@@ -1,0 +1,8 @@
+.obsidian/
+.cursors/
+.locks/
+.hook-fired/
+.hook-errors.log
+index/
+*.db
+dm/

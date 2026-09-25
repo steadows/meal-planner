@@ -1,0 +1,1836 @@
+#!/usr/bin/env sh
+# brain — the portable engine for the Agent Brain coordination vault.
+# One POSIX sh script; no Claude-specific deps. Subcommands below; hooks call back in.
+# v1: filesystem-only. Reads via built-in tools/Grep; writes via Write/Edit + this script's
+# atomic append. See .context/AGENT-BRAIN-BUILD-SPEC.md for the authoritative design.
+#
+# Deviation note: macOS has no flock(1); `brain commit`/governance use an atomic mkdir lock
+# (the portable equivalent — mkdir is atomic create on POSIX filesystems).
+
+set -u
+VERSION="1.2.3"
+
+# Clear the vault-resolution sentinel at process entry: it is a marker for "this process ran
+# brain_root()", and an inherited value would let a caller's environment stand in for that.
+_BRAIN_RESOLVED=""
+# Clear snapshot state too: inherited values must not stand in for work this process performed.
+_CHANGES_TOTAL=0; _CHANGES_CURRENT=0; _CHANGES_TOKEN=""
+# Clear caller-visible warning state so inherited values cannot suppress or forge diagnostics.
+_WHOAMI_WARNED=""
+_DM_MISSING_IDS=""
+
+# DM bounds. One file per message removes the old append-atomicity rationale; the body cap now
+# bounds storage and digest work. Consumption is bounded by the surviving digest limits.
+DM_MAX_BODY=4096
+DM_INJECT_MAX_LINES=40
+DM_INJECT_MAX_COLS=2000
+DM_FILENAME_MAX_BYTES=255
+# Aggregate digest bound (seam must-survive #4) holds STRUCTURALLY, with no runtime accounting:
+# both consume loops cap at DM_INJECT_MAX_LINES entries and _dm_digest bounds every emitted line
+# to DM_INJECT_MAX_COLS bytes, so the total is ≤ LINES × (COLS + 1) by construction. A prior
+# per-message wc -c accumulator guarded exactly that unreachable branch and was removed.
+# Digest per-field starting budget: reserve DM_DIGEST_ENVELOPE cols for the four bounded wire
+# fields' JSON envelope, then divide by DM_ESCAPE_FACTOR — worst-case JSON escaping (\uXXXX)
+# expands one character into six output characters. The stable id is bounded separately by
+# _dm_id_ok; the serializer reduces the field budget further when needed.
+DM_DIGEST_ENVELOPE=512
+DM_ESCAPE_FACTOR=6
+
+# ── Root discovery (fix A) — the one function everything reuses ───────────────────────────────
+# --git-common-dir resolves to the MAIN worktree's .git from any sibling worktree, so the brain
+# is always the one <main>/.brain/. Robust to a relative result (e.g. ".git" or "../.git").
+brain_root() {
+  _gcd=$(git rev-parse --git-common-dir 2>/dev/null) || return 1
+  case "$_gcd" in
+    /*) : ;;                                  # already absolute
+    *)  _gcd=$(cd "$_gcd" 2>/dev/null && pwd -P) || return 1 ;;
+  esac
+  dirname "$_gcd"
+}
+
+# ── Small helpers ────────────────────────────────────────────────────────────────────────────
+_now_iso()  { date -u +%Y-%m-%dT%H:%M:%SZ; }
+_now_compact() { date -u +%Y%m%dT%H%M%SZ; }   # filename-safe clock (dm message IDs)
+_now_epoch()   { date -u +%s; }               # epoch clock (collision suffixes)
+_today()    { date -u +%Y-%m-%d; }
+# Test seam: BRAIN_TEST_BRANCH overrides the resolved branch (used by the smoke test only).
+_branch()   { printf '%s\n' "${BRAIN_TEST_BRANCH:-$(git rev-parse --abbrev-ref HEAD 2>/dev/null)}"; }
+_toplevel() { git rev-parse --show-toplevel 2>/dev/null; }
+# integration branch the vault commits/diffs against; override with BRAIN_MAIN_REF (e.g. origin/master)
+_main_ref()    { printf '%s\n' "${BRAIN_MAIN_REF:-origin/main}"; }
+_main_remote() { _r=$(_main_ref); printf '%s\n' "${_r%%/*}"; }
+_main_branch() { _r=$(_main_ref); printf '%s\n' "${_r#*/}"; }
+_warn()     { printf 'brain: %s\n' "$*" >&2; }
+_die()      { _warn "$*"; exit 1; }
+
+# Write producer output to a same-directory dot-temp, then atomically replace the destination.
+# Same-directory rename is process-crash-safe; POSIX sh cannot promise power-loss durability.
+_atomic_place() { # <content-producer> <dest> [producer-args...]
+  [ "$#" -ge 2 ] || return 2
+  _ap_producer=$1; _ap_dest=$2; shift 2
+  _ap_dir=${_ap_dest%/*}; _ap_n=0; _ap_tmp="$_ap_dir/.tmp-$$"
+  while [ -e "$_ap_tmp" ] || [ -L "$_ap_tmp" ]; do
+    _ap_n=$((_ap_n + 1)); _ap_tmp="$_ap_dir/.tmp-$$-$_ap_n"
+  done
+  if ! "$_ap_producer" "$@" > "$_ap_tmp"; then
+    rm -f -- "$_ap_tmp" 2>/dev/null || true
+    return 1
+  fi
+  if ! command mv -f -- "$_ap_tmp" "$_ap_dest" 2>/dev/null; then
+    rm -f -- "$_ap_tmp" 2>/dev/null || true
+    return 1
+  fi
+}
+
+# Repo-relative path from the MAIN root or the caller's own worktree root. The pre-tool hook
+# needs the worktree case: agents live in sibling worktrees, whose absolute paths never carry
+# the $ROOT prefix, so a ROOT-only strip would leave them absolute and _path_match
+# (exact-match) could never fire.
+_relpath_any() {
+  case "$1" in "$ROOT"/*) printf '%s\n' "${1#"$ROOT"/}"; return 0 ;; esac
+  _wt=$(git rev-parse --show-toplevel 2>/dev/null) || _wt=""
+  if [ -n "$_wt" ]; then
+    case "$1" in "$_wt"/*) printf '%s\n' "${1#"$_wt"/}"; return 0 ;; esac
+  fi
+  printf '%s\n' "$1"
+}
+
+# Read one frontmatter scalar (first match), stripping an inline "# comment" and trailing space.
+# The colon after the key disambiguates feature/features, status/current_status, etc.
+_fm() {
+  awk -v key="$2" '
+    /^---[[:space:]]*$/ { fence++; if (fence >= 2) exit; next }
+    fence == 1 && index($0, key ":") == 1 {
+      line = $0
+      sub(/^[^:]*:[[:space:]]*/, "", line)
+      sub(/[[:space:]]+#.*$/, "", line)
+      sub(/[[:space:]]+$/, "", line)
+      print line; exit
+    }
+  ' "$1" 2>/dev/null
+}
+
+# All four presence display fields in ONE awk pass (status, phase, current_ticket,
+# dialog_with), US-delimited (0x1F cannot appear in a frontmatter scalar). Same first-match +
+# comment-strip semantics as _fm; one fork per note instead of four in the status loop.
+_fm_presence() { # <file>
+  awk '
+    BEGIN { n = split("status phase current_ticket dialog_with", k, " ") }
+    /^---[[:space:]]*$/ { fence++; if (fence >= 2) exit; next }
+    fence == 1 {
+      for (i = 1; i <= n; i++) {
+        if (!(i in v) && index($0, k[i] ":") == 1) {
+          line = $0
+          sub(/^[^:]*:[[:space:]]*/, "", line)
+          sub(/[[:space:]]+#.*$/, "", line)
+          sub(/[[:space:]]+$/, "", line)
+          v[i] = line
+        }
+      }
+    }
+    END { printf "%s\037%s\037%s\037%s\n", v[1], v[2], v[3], v[4] }
+  ' "$1" 2>/dev/null
+}
+
+# A YAML inline list ("[a, b]" / '["a","b"]') → space-separated bare tokens.
+_list_field() {
+  _fm "$1" "$2" | tr -d '[]' | tr -d '"' | tr -d "'" | tr ',' ' '
+}
+_owns_tokens() { _list_field "$1" owns_branches; }
+_agent_slug()  { _as_b=${1##*/}; printf '%s\n' "${_as_b%.md}"; } # display-only; pure PE, no basename fork
+_slug_of()     { _SLUG=${1##*/}; _SLUG=${_SLUG%.md}; }            # variable twin for path identities
+
+# Branch → positional slug (§2a): first token after the "<alpha>-<num>" ticket in feat/…; else
+# the whole branch name. graph⊄langgraph and the cockpit double-match are killed by this + exact
+# token equality in whoami.
+_slug_from_branch() {
+  case "$1" in
+    feat/*)
+      _rest=${1#feat/}
+      _stripped=$(printf '%s' "$_rest" | sed -E 's/^[A-Za-z]+-[0-9]+-//')
+      printf '%s\n' "$_stripped" | cut -d- -f1
+      ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
+# path vs declared path/zone — trailing "/" = zone (prefix); else exact file (fix D).
+_path_match() {
+  _p=$1; _t=$2
+  case "$_t" in
+    */) case "$_p" in "$_t"*) return 0 ;; esac; return 1 ;;
+    *)  [ "$_p" = "$_t" ] && return 0; return 1 ;;
+  esac
+}
+
+# Render one frontmatter key replacement; `_set_fm_inline` owns atomic placement.
+_render_fm_inline() { # <source> <key> <value>
+  _rfi_source=$1; _rfi_key=$2; _rfi_value=$3
+  awk -v key="$_rfi_key" -v val="$_rfi_value" '
+    /^---[[:space:]]*$/ { fence++; print; next }
+    fence == 1 && !done && index($0, key ":") == 1 { print key ": " val; done=1; next }
+    { print }
+  ' "$_rfi_source"
+}
+
+_set_fm_inline() {
+  _sfi_file=$1; _sfi_key=$2; _sfi_value=$3
+  _atomic_place _render_fm_inline "$_sfi_file" "$_sfi_file" "$_sfi_key" "$_sfi_value"
+}
+
+# Atomic mkdir lock (flock replacement — macOS has no flock).
+_lock_acquire() {
+  _ld="$BRAIN/.locks/$1.lock"; mkdir -p "$BRAIN/.locks" 2>/dev/null
+  _i=0
+  while ! mkdir "$_ld" 2>/dev/null; do
+    _i=$((_i + 1)); [ "$_i" -ge 50 ] && return 1; sleep 0.1
+  done
+  return 0
+}
+_lock_release() { rmdir "$BRAIN/.locks/$1.lock" 2>/dev/null || true; }
+
+_kebab() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//;s/-$//'; }
+
+_new_journal() {
+  printf -- '---\ntype: journal\ndate: %s\n---\n\n' "$2" > "$1"
+}
+
+# ── Resolve the vault for the subcommands that need it ────────────────────────────────────────
+_require_brain() {
+  # Short-circuit ONLY on a resolution this process performed itself. _BRAIN_RESOLVED is a
+  # private sentinel cleared at process entry, so an inherited BRAIN/ROOT pair — however
+  # consistent it looks — cannot make us skip brain_root() and write to a foreign tree.
+  if [ "${_BRAIN_RESOLVED:-}" = "1" ] && [ -n "${BRAIN:-}" ] && [ -d "$BRAIN" ]; then return 0; fi
+  ROOT=$(brain_root) || _die "not inside a git repository"
+  BRAIN="$ROOT/.brain"
+  [ -d "$BRAIN" ] || _die "no brain here (run: brain init)"
+  _BRAIN_RESOLVED=1
+}
+
+# ── whoami (the single identity resolver) ────────────────────────────────────────────────────
+# Set a caller-visible scalar so DM path components never have to cross command substitution.
+_resolve_whoami() {
+  _WHOAMI=""
+  if [ -n "${BRAIN_FEATURE:-}" ]; then
+    if _feat_ok "$BRAIN_FEATURE"; then
+      _WHOAMI=$BRAIN_FEATURE
+    else
+      [ "${_WHOAMI_WARNED:-}" = 1 ] || { _warn "invalid inherited BRAIN_FEATURE (bare slug only)"; _WHOAMI_WARNED=1; }
+    fi
+    return 0
+  fi
+  ROOT=$(brain_root) || return 0
+  BRAIN="$ROOT/.brain"; [ -d "$BRAIN" ] || return 0
+  _slug=$(_slug_from_branch "$(_branch)"); [ -z "$_slug" ] && return 0
+
+  _matches=""
+  for _f in "$BRAIN"/presence/*.md; do
+    [ -e "$_f" ] || continue
+    for _tok in $(_owns_tokens "$_f"); do
+      if [ "$_tok" = "$_slug" ]; then
+        _slug_of "$_f"
+        _feat_ok "$_SLUG" && _matches="$_matches $_SLUG"
+      fi
+    done
+  done
+  # de-dupe
+  _matches=$(printf '%s\n' $_matches | sort -u | tr '\n' ' ')
+  set -- $_matches
+  case $# in
+    0) return 0 ;;                                  # empty = not a brain branch
+    1) _WHOAMI=$1; return 0 ;;
+    *)                                              # multi-match → tiebreak by current_worktree
+      _top=$(_toplevel); _topc=$(cd "$_top" 2>/dev/null && pwd -P)
+      for _m in "$@"; do
+        _cw=$(_fm "$BRAIN/presence/$_m.md" current_worktree)
+        _cwc=$(cd "$_cw" 2>/dev/null && pwd -P)     # canonicalize (handles /tmp→/private/tmp symlinks)
+        if [ "$_cw" = "$_top" ] || { [ -n "$_cwc" ] && [ "$_cwc" = "$_topc" ]; }; then
+          _WHOAMI=$_m; return 0
+        fi
+      done
+      return 1 ;;                                   # still ambiguous → refuse (print nothing)
+  esac
+}
+
+cmd_whoami() {
+  _resolve_whoami || return $?
+  [ -z "$_WHOAMI" ] || printf '%s\n' "$_WHOAMI"
+}
+
+# ── announce (the single canonical journal writer) ───────────────────────────────────────────
+# _announce_as: the write path, identity supplied by the caller — the seam for commands that
+# have already resolved who they are (cmd_dm) so they don't re-run the whoami presence scan.
+_announce_as() {
+  _require_brain
+  _day=$(_today); _jf="$BRAIN/journal/$_day.md"
+  [ -f "$_jf" ] || _new_journal "$_jf" "$_day" || return 1
+  printf -- '- %s %s — %s\n' "$(_now_iso)" "$1" "$2" >> "$_jf" || return 1   # atomic append
+}
+
+cmd_announce() {
+  _require_brain
+  [ -n "${1:-}" ] || _die "usage: brain announce \"<msg>\""
+  _resolve_whoami; _feat=${_WHOAMI:-system}
+  _announce_as "$_feat" "$1"
+}
+
+# ── dm (direct lane-to-lane message; the fast path, NOT the record) ──────────────────────────
+# The journal stays the durable record and connections stay the state. A DM is the SIGNAL that
+# something changed — it exists to cut unblock latency from "next session boot" to seconds.
+# Queue entries stay pending until emission succeeds, then move directly to read/. Structurally
+# invalid messages move to failed/. The single-session queue path takes no lock.
+_feat_ok() {
+  case "$1" in
+    ''|.*|-*|*'..'*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  [ "${#1}" -le 128 ] || return 1
+  return 0
+}
+
+# Type and access predicates kept separate so creation can establish a real directory before an
+# operation proves the read+search permissions required by enumeration.
+_real_dir() { [ ! -L "$1" ] && [ -d "$1" ]; }
+_dm_dir_access_ok() { [ -r "$1" ] && [ -x "$1" ]; }
+
+# Validate the queue path component-by-component. POSIX sh has no openat/O_NOFOLLOW, so this
+# refuses observed links but cannot close a same-user check/use race.
+_dm_dir_ok() { # <dm-root|lane-dir|state-dir|message-file>
+  _do_path=$1; _do_root="$BRAIN/dm"
+  _real_dir "$_do_root" \
+    || { _warn "dm queue root is not a real directory: $_do_root"; return 1; }
+  _dm_dir_access_ok "$_do_root" \
+    || { _warn "dm queue root is not readable and searchable: $_do_root"; return 1; }
+  [ "$_do_path" = "$_do_root" ] && return 0
+  case "$_do_path" in
+    "$_do_root"/*) _do_rest=${_do_path#"$_do_root"/} ;;
+    *) _warn "dm queue path escapes the queue root: $_do_path"; return 1 ;;
+  esac
+
+  _do_lane=${_do_rest%%/*}
+  _feat_ok "$_do_lane" || { _warn "invalid dm lane component: $_do_lane"; return 1; }
+  _do_lane_path="$_do_root/$_do_lane"
+  _real_dir "$_do_lane_path" \
+    || { _warn "dm lane is not a real directory: $_do_lane_path"; return 1; }
+  _dm_dir_access_ok "$_do_lane_path" \
+    || { _warn "dm lane is not readable and searchable: $_do_lane_path"; return 1; }
+  [ "$_do_rest" = "$_do_lane" ] && return 0
+
+  _do_tail=${_do_rest#*/}; _do_state=${_do_tail%%/*}
+  case "$_do_state" in pending|read|failed) ;; *)
+    _warn "invalid dm queue state: $_do_state"; return 1 ;;
+  esac
+  _do_state_path="$_do_lane_path/$_do_state"
+  _real_dir "$_do_state_path" \
+    || { _warn "dm state is not a real directory: $_do_state_path"; return 1; }
+  _dm_dir_access_ok "$_do_state_path" \
+    || { _warn "dm state is not readable and searchable: $_do_state_path"; return 1; }
+  [ "$_do_tail" = "$_do_state" ] && return 0
+
+  _do_name=${_do_tail#*/}
+  case "$_do_name" in ''|*/*) _warn "invalid dm message path: $_do_path"; return 1 ;; esac
+  [ ! -L "$_do_path" ] && [ -f "$_do_path" ] \
+    || { _warn "refusing non-regular dm message: $_do_path"; return 1; }
+}
+
+_dm_make_dir() { # <path>
+  _md_path=$1
+  [ -L "$_md_path" ] && { _warn "refusing symlinked dm directory: $_md_path"; return 1; }
+  if [ -e "$_md_path" ] && [ ! -d "$_md_path" ]; then
+    _warn "refusing non-directory dm component: $_md_path"; return 1
+  fi
+  if [ ! -d "$_md_path" ]; then
+    mkdir "$_md_path" 2>/dev/null || {
+      _real_dir "$_md_path" || {
+        _warn "could not create dm directory: $_md_path"; return 1;
+      }
+    }
+  fi
+  _real_dir "$_md_path"
+}
+
+_dm_ensure_tree() { # <lane>
+  _et_lane=$1
+  _feat_ok "$_et_lane" || { _warn "invalid feature name '$_et_lane' (bare slug only)"; return 1; }
+  # Each state is created then validated before advancing; validation also proves read+search
+  # access, without which a 0300 directory makes glob enumeration lie that it is empty/free.
+  _et_lane_dir="$BRAIN/dm/$_et_lane"
+  _dm_make_dir "$BRAIN/dm" || return 1
+  _dm_make_dir "$_et_lane_dir" || return 1
+  for _et_state in pending read failed; do
+    _dm_make_dir "$_et_lane_dir/$_et_state" || return 1
+    _dm_dir_ok "$_et_lane_dir/$_et_state" || return 1
+  done
+}
+
+# Print this lane's pending directory — what the agent arms at session start.
+cmd_inbox() {
+  _require_brain
+  _feat=${1:-}
+  if [ -z "$_feat" ]; then _resolve_whoami; _feat=$_WHOAMI; fi
+  [ -n "$_feat" ] || _die "usage: brain inbox [<feature>]   (no feature given and whoami is empty)"
+  _dm_ensure_tree "$_feat" || return 1
+  printf '%s\n' "$BRAIN/dm/$_feat/pending"
+}
+
+_dm_id_in_use() { # <lane> <id>
+  _iu_lane=$1; _iu_id=$2
+  for _iu_state in pending read failed; do
+    _iu_dir="$BRAIN/dm/$_iu_lane/$_iu_state"
+    _dm_dir_ok "$_iu_dir" || return 2
+    # Keep the exact-path witness: search permission alone can resolve it even when a glob scan
+    # cannot enumerate the directory. Bumped variants still require the wider scan below.
+    _iu_exact="$_iu_dir/$_iu_id"
+    _dm_dest_occupied "$_iu_exact" && return 0
+    # Collision-bumped transcripts still reserve their original stable id. This is a strict
+    # widening of the safety scan: <id> and every <id>* variant count as occupied.
+    for _iu_file in "$_iu_dir/$_iu_id"*; do
+      _iu_name=${_iu_file##*/}
+      case "$_iu_name" in .|..|.tmp-*) continue ;; esac
+      [ -e "$_iu_file" ] || [ -L "$_iu_file" ] || continue
+      case "$_iu_name" in "$_iu_id"*) return 0 ;; esac
+    done
+    # A permission change during expansion must not turn "could not enumerate" into "free".
+    _dm_dir_ok "$_iu_dir" || return 2
+  done
+  return 1
+}
+
+# Producer-shaped stable message ID:
+# `<YYYYmmddTHHMMSSZ>-<decimal-pid>[-<decimal-collision-bump>]`. Its byte cap also
+# bounds the stable id that _dm_digest injects outside bounded()'s four-field recursion.
+_dm_digits_ok() { case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
+
+_dm_id_ok() {
+  _io_id=$1
+  [ "${#_io_id}" -le "$DM_FILENAME_MAX_BYTES" ] || return 1
+  _io_stamp=${_io_id%%-*}
+  case "$_io_stamp" in
+    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;;
+    *) return 1 ;;
+  esac
+  [ "$_io_stamp" != "$_io_id" ] || return 1
+  _io_tail=${_io_id#*-}
+  case "$_io_tail" in
+    *-*)
+      _io_pid=${_io_tail%%-*}; _io_bump=${_io_tail#*-}
+      case "$_io_bump" in *-*) return 1 ;; esac
+      _dm_digits_ok "$_io_bump" || return 1
+      ;;
+    *) _io_pid=$_io_tail; _io_bump="" ;;
+  esac
+  case "$_io_pid" in [1-9]*) ;; *) return 1 ;; esac
+  _dm_digits_ok "$_io_pid"
+}
+
+_dm_new_id() { # <lane>
+  # Identity is derived on demand, never inherited from the environment. The clock must really
+  # succeed; a valid-looking fallback would make clock failure indistinguishable from a mint.
+  _ni_lane=$1
+  _ni_ts=$(_now_compact) || return 1
+  [ -n "$_ni_ts" ] || return 1
+  _ni_base="$_ni_ts-$$"; _ni_id=$_ni_base; _ni_n=0
+  _dm_id_ok "$_ni_id" || return 1
+  while :; do
+    _dm_id_in_use "$_ni_lane" "$_ni_id"
+    case $? in
+      0)
+        _ni_n=$((_ni_n + 1)); _ni_id="$_ni_base-$_ni_n"
+        _dm_id_ok "$_ni_id" || return 1
+        ;;
+      1) break ;;
+      *) return 1 ;;
+    esac
+  done
+  printf '%s\n' "$_ni_id"
+}
+
+_dm_write_json() { # <from> <to> <msg> <ts>
+  _dm_resolve_jq || return 1
+  # shellcheck disable=SC2016  # jq source; $f/$t/$ts/$c are jq variables
+  _wj_payload=$("$_DM_JQ_BIN" -cn --arg f "$1" --arg t "$2" --arg c "$3" --arg ts "$4" \
+    '{from:$f,to:$t,ts:$ts,content:$c}' 2>/dev/null) || return 1
+  _wj_valid=1
+  case "$_wj_payload" in \{*\}) ;; *) _wj_valid=0 ;; esac
+  for _wj_key in '"from":' '"to":' '"ts":' '"content":'; do
+    case "$_wj_payload" in *"$_wj_key"*) ;; *) _wj_valid=0 ;; esac
+  done
+  if [ "$_wj_valid" != 1 ]; then
+    _warn "jq produced an invalid dm send payload ($_DM_JQ_BIN); nothing sent"
+    return 1
+  fi
+  printf '%s\n' "$_wj_payload"
+}
+
+# One message is one JSON object, made visible only by the final same-directory rename.
+_dm_send() { # <from> <to> <msg> <ts>
+  _ds_from=$1; _ds_to=$2; _ds_msg=$3; _ds_ts=$4
+  _dm_ensure_tree "$_ds_to" || return 1
+  _ds_pending="$BRAIN/dm/$_ds_to/pending"
+  _ds_id=$(_dm_new_id "$_ds_to") || return 1
+  _dm_id_ok "$_ds_id" || return 1
+  _ds_dest="$_ds_pending/$_ds_id"
+  [ "${_ds_dest%/*}" = "$_ds_pending" ] || return 1
+  _atomic_place _dm_write_json "$_ds_dest" "$_ds_from" "$_ds_to" "$_ds_msg" "$_ds_ts"
+}
+
+_dm_dest_occupied() { [ -e "$1" ] || [ -L "$1" ]; }
+
+# Fork-free queue probe. rc 0 means entries, 1 means established-empty, and 2 means the directory
+# could not be established. Validate on both sides of an empty expansion so a permission change
+# during the scan cannot turn "unreadable" into "empty".
+_dm_dir_has_entries() {
+  _dm_dir_ok "$1" || return 2
+  for _dhe_file in "$1"/* "$1"/.*; do
+    _dhe_name=${_dhe_file##*/}
+    case "$_dhe_name" in .|..|.tmp-*) continue ;; esac
+    [ -e "$_dhe_file" ] || [ -L "$_dhe_file" ] || continue
+    return 0
+  done
+  _dm_dir_ok "$1" || return 2
+  return 1
+}
+
+_dm_direct_pending_entry() { # <lane> <entry-path>; type is deliberately not constrained here
+  _dpe_dir="$BRAIN/dm/$1/pending"
+  _dm_dir_ok "$_dpe_dir" || return 1
+  [ "${2%/*}" = "$_dpe_dir" ] \
+    || { _warn "refusing non-direct pending dm entry: $2"; return 1; }
+}
+
+# Pick a never-occupied state destination with one shared collision-bump idiom. The result is a
+# caller-visible variable, never stdout: command substitution would strip trailing newlines from
+# an opaque filesystem path. Preserve the original name when NAME_MAX allows; a checksum fallback
+# keeps long records distinct.
+_dm_filename_fits() {
+  _ff_bytes=$(LC_ALL=C printf '%s' "$1" | wc -c | tr -d ' \n')
+  [ "$_ff_bytes" -le "$DM_FILENAME_MAX_BYTES" ]
+}
+
+_dm_collision_dest() { # <lane> <read|failed> <name>
+  _cd_lane=$1; _cd_state=$2; _cd_name=$3
+  _DM_COLLISION_DEST=""
+  _cd_dir="$BRAIN/dm/$_cd_lane/$_cd_state"; _cd_dest="$_cd_dir/$_cd_name"
+  if ! _dm_dest_occupied "$_cd_dest"; then _DM_COLLISION_DEST=$_cd_dest; return 0; fi
+  _warn "dm $_cd_state destination is occupied for $_cd_name; using a collision-safe name"
+  _cd_stamp=$(_now_epoch) || {
+    _warn "could not construct dm collision destination for $_cd_name: clock failed"
+    return 1
+  }
+  _cd_suffix=".collision-$_cd_stamp-$$"
+  _cd_base="$_cd_name$_cd_suffix"
+  _cd_compact=""; _cd_n=0
+  while :; do
+    if [ -n "$_cd_compact" ]; then
+      _cd_candidate=$_cd_compact
+    else
+      _cd_candidate=$_cd_base
+    fi
+    [ "$_cd_n" -eq 0 ] || _cd_candidate="$_cd_candidate-$_cd_n"
+    if ! _dm_filename_fits "$_cd_candidate"; then
+      [ -z "$_cd_compact" ] || {
+        _warn "could not construct dm collision destination for $_cd_name: filename limit exhausted"
+        return 1
+      }
+      # The compact base reserves headroom for the largest portable shell-integer counter; every
+      # concrete suffix is still rechecked below before it is used as a filesystem path.
+      _cd_sum=$(printf '%s' "$_cd_name" | cksum) || {
+        _warn "could not construct dm collision destination for $_cd_name: checksum failed"
+        return 1
+      }
+      _cd_sum=${_cd_sum%% *}
+      _cd_compact="collision-$_cd_sum-$_cd_stamp-$$"
+      _dm_filename_fits "$_cd_compact-9223372036854775807" || {
+        _warn "could not construct dm collision destination for $_cd_name: compact name exceeds filename limit"
+        return 1
+      }
+      _cd_n=0
+      continue
+    fi
+    _cd_dest="$_cd_dir/$_cd_candidate"
+    if ! _dm_dest_occupied "$_cd_dest"; then
+      _DM_COLLISION_DEST=$_cd_dest
+      return 0
+    fi
+    _cd_n=$((_cd_n + 1))
+  done
+}
+
+_dm_route_failed() { # <lane> <message-file> <reason>
+  _rf_lane=$1; _rf_file=$2; _rf_reason=$3; _rf_name=${_rf_file##*/}
+  _dm_dir_ok "$BRAIN/dm/$_rf_lane/failed" || return 1
+  _dm_direct_pending_entry "$_rf_lane" "$_rf_file" || return 1
+  _dm_collision_dest "$_rf_lane" failed "$_rf_name" || return 1
+  _rf_dest=$_DM_COLLISION_DEST
+  _dm_dest_occupied "$_rf_dest" \
+    && { _warn "dm failed destination became occupied for $_rf_name"; return 1; }
+  if command mv -f -- "$_rf_file" "$_rf_dest" 2>/dev/null; then
+    _warn "$_rf_reason: $_rf_name (routed to failed/@$_rf_lane as ${_rf_dest##*/})"
+    return 0
+  fi
+  [ -e "$_rf_file" ] || [ -L "$_rf_file" ] || return 0
+  _warn "could not route invalid dm message to failed/@$_rf_lane: $_rf_name"
+  return 1
+}
+
+# Resolve the external jq executable without routing its path through command substitution.
+# Relative and empty PATH components retain normal shell lookup meaning because DM operations do
+# not change directories after root discovery.
+_dm_resolve_jq() {
+  _DM_JQ_BIN=""; _rj_rest=${PATH:-}; _rj_more=1
+  while [ "$_rj_more" = 1 ]; do
+    case "$_rj_rest" in
+      *:*) _rj_dir=${_rj_rest%%:*}; _rj_rest=${_rj_rest#*:} ;;
+      *) _rj_dir=$_rj_rest; _rj_more=0 ;;
+    esac
+    [ -n "$_rj_dir" ] || _rj_dir=.
+    _rj_candidate="$_rj_dir/jq"
+    if [ -f "$_rj_candidate" ] && [ -x "$_rj_candidate" ]; then
+      _DM_JQ_BIN=$_rj_candidate
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Measure the three jq capabilities used by consumption against the already-pinned executable.
+# Parse/error statuses are variable returns; only inability to run the capability probe is rc 1.
+_dm_jq_measure() {
+  _JM_PARSE_RC=""; _JM_ERROR_RC=""
+  [ -n "${_DM_JQ_BIN:-}" ] || return 1
+  "$_DM_JQ_BIN" -e -n '"x" | (utf8bytelength == 1 and ((tojson | type) == "string"))' \
+    >/dev/null 2>&1 || return 1
+  printf '{' | "$_DM_JQ_BIN" -e . >/dev/null 2>&1
+  _JM_PARSE_RC=$?
+  "$_DM_JQ_BIN" -n 'error("dm preflight")' >/dev/null 2>&1
+  _JM_ERROR_RC=$?
+}
+
+# Prove the pinned jq's measured parse-error and error() statuses still match the preflight pair.
+# A failure is global, so callers leave every entry pending. PATH is deliberately not re-resolved.
+_dm_jq_contract_holds() {
+  _dm_jq_measure || return 1
+  [ "$_JM_PARSE_RC" = "$_DM_JQ_PARSE_RC" ] || return 1
+  [ "$_JM_ERROR_RC" = "$_DM_JQ_ERROR_RC" ]
+}
+
+# Resolve jq once per consume operation, then establish the contract on that exact executable.
+_dm_jq_preflight() {
+  _DM_JQ_BIN=""; _DM_JQ_PARSE_RC=""; _DM_JQ_ERROR_RC=""
+  _DM_JQ_SYSTEMIC_FAILURE=0
+  _dm_resolve_jq || return 1
+  _dm_jq_measure || return 1
+  [ "$_JM_PARSE_RC" != 0 ] || return 1
+  [ "$_JM_ERROR_RC" != 0 ] || return 1
+  _DM_JQ_PARSE_RC=$_JM_PARSE_RC
+  _DM_JQ_ERROR_RC=$_JM_ERROR_RC
+}
+
+# Rebuild one validated pending object from only the bounded wire fields plus its stable ID. The
+# recursive byte check preserves the content head while keeping the serialized record valid.
+_dm_digest() { # <message-file> <message-id>
+  _dg_file=$1; _dg_id=$2
+  # _dg_id is intentionally outside bounded()'s four-field recursion. _dm_id_ok's filename-byte
+  # cap is therefore a serializer precondition, paired with DM_DIGEST_ENVELOPE's reserved space.
+  [ -n "${_DM_JQ_BIN:-}" ] || return 1
+  _dg_field_max=$(((DM_INJECT_MAX_COLS - DM_DIGEST_ENVELOPE) / DM_ESCAPE_FACTOR))
+  [ "$_dg_field_max" -gt 0 ] || _dg_field_max=1
+  # The single-quoted program is jq source; its $names must not expand in the shell.
+  # shellcheck disable=SC2016
+  "$_DM_JQ_BIN" -c -s -r \
+    --arg id "$_dg_id" \
+    --argjson field_max "$_dg_field_max" \
+    --argjson line_max "$DM_INJECT_MAX_COLS" '
+    if length == 1
+       and (.[0] | type) == "object"
+       and (.[0].from | type) == "string"
+       and (.[0].to | type) == "string"
+       and (.[0].ts | type) == "string"
+       and (.[0].content | type) == "string"
+    then .[0]
+    else error("invalid dm object")
+    end
+    | . as $message
+    | def bounded($limit):
+        {
+          from: $message.from[0:$limit],
+          to: $message.to[0:$limit],
+          ts: $message.ts[0:$limit],
+          content: $message.content[0:$limit],
+          id: $id
+        } as $record
+        | if (($record | tojson | utf8bytelength) <= $line_max) or $limit <= 1
+          then $record
+          else bounded((($limit / 2) | floor))
+          end;
+      bounded($field_max) | tojson
+  ' "$_dg_file" 2>/dev/null
+}
+
+# Digest one pending message — the shared per-message step of BOTH consume paths (take and
+# SessionStart), owning validation, quarantine, and the warn for every outcome so callers never
+# duplicate policy. The digest is a caller-visible scalar so systemic flags survive this call.
+# rc 0: digest available, file left pending for emit→archive. rc 2: structurally invalid and
+# quarantined. rc 3: invalid but quarantine failed. rc 1: transient/systemic, file left pending.
+_dm_pending_digest() { # <lane> <message-file>
+  _pd_lane=$1; _pd_file=$2; _pd_name=${_pd_file##*/}
+  _DM_PENDING_DIGEST=""
+  _dm_direct_pending_entry "$_pd_lane" "$_pd_file" || return 1
+  if [ -L "$_pd_file" ] || [ ! -f "$_pd_file" ]; then
+    _warn "structurally unusable non-regular dm queue entry for @$_pd_lane: $_pd_name"
+    _dm_route_failed "$_pd_lane" "$_pd_file" "structurally unusable dm queue entry" || return 3
+    return 2
+  fi
+  _dm_dir_ok "$_pd_file" || return 1
+  if ! _dm_id_ok "$_pd_name"; then
+    _warn "invalid pending dm name for @$_pd_lane: $_pd_name"
+    _dm_route_failed "$_pd_lane" "$_pd_file" "structurally invalid dm message" || return 3
+    return 2
+  fi
+  _pd_digest=$(_dm_digest "$_pd_file" "$_pd_name")
+  _pd_digest_rc=$?
+  if [ "$_pd_digest_rc" = 0 ]; then
+    case "$_pd_digest" in
+      \{*'"id":"'"$_pd_name"'"'*\})
+        _DM_PENDING_DIGEST=$_pd_digest
+        return 0
+        ;;
+    esac
+    _DM_JQ_SYSTEMIC_FAILURE=1
+    _warn "jq produced an invalid dm digest for @$_pd_lane ($_DM_JQ_BIN); leaving all messages pending"
+    return 1
+  fi
+  if { [ -n "${_DM_JQ_PARSE_RC:-}" ] && [ "$_pd_digest_rc" = "$_DM_JQ_PARSE_RC" ]; } \
+     || { [ -n "${_DM_JQ_ERROR_RC:-}" ] && [ "$_pd_digest_rc" = "$_DM_JQ_ERROR_RC" ]; }; then
+    if ! _dm_jq_contract_holds; then
+      _DM_JQ_SYSTEMIC_FAILURE=1
+      _warn "jq contract changed during dm consume for @$_pd_lane (${_DM_JQ_BIN:-<unresolved>}); leaving all messages pending"
+      return 1
+    fi
+    _warn "invalid dm object in $_pd_file"
+    _dm_route_failed "$_pd_lane" "$_pd_file" "structurally invalid dm message" || return 3
+    return 2
+  fi
+  _warn "could not digest pending dm message for @$_pd_lane: $_pd_name; leaving it pending"
+  return 1
+}
+
+# Move a successfully emitted pending message into read/, preserving any occupied transcript via
+# the same collision-bump helper used by failed/.
+_dm_archive() { # <lane> <message-file>
+  _ar_lane=$1; _ar_file=$2; _ar_name=${_ar_file##*/}
+  _dm_dir_ok "$BRAIN/dm/$_ar_lane/read" || return 1
+  _dm_dir_ok "$_ar_file" || return 1
+  _dm_id_ok "$_ar_name" || { _warn "invalid pending dm name at archive: $_ar_name"; return 1; }
+  _dm_collision_dest "$_ar_lane" read "$_ar_name" || return 1
+  _ar_dest=$_DM_COLLISION_DEST
+  if command mv -f -- "$_ar_file" "$_ar_dest" 2>/dev/null; then return 0; fi
+  _warn "could not archive emitted dm message for @$_ar_lane: $_ar_name"
+  return 1
+}
+
+cmd_dm_take() {
+  _require_brain
+  _resolve_whoami; _dt_lane=$_WHOAMI
+  [ -n "$_dt_lane" ] || _die "brain dm take: whoami is empty"
+  _dm_ensure_tree "$_dt_lane" || return 1
+  _dt_pending="$BRAIN/dm/$_dt_lane/pending"
+  _dm_dir_has_entries "$_dt_pending"
+  case $? in 0) ;; 1) return 0 ;; *) return 1 ;; esac
+  if ! _dm_jq_preflight; then
+    _warn "brain dm take: jq is unavailable or incompatible; leaving all messages pending"
+    return 1
+  fi
+  if ! { true >&1; } 2>/dev/null; then
+    _warn "brain dm take: stdout is unavailable; leaving all messages pending"
+    return 1
+  fi
+  _dt_count=0; _dt_rc=0; _dt_exhausted=1
+  for _dt_file in "$_dt_pending"/* "$_dt_pending"/.*; do
+    _dt_name=${_dt_file##*/}
+    case "$_dt_name" in .|..|.tmp-*) continue ;; esac
+    [ -e "$_dt_file" ] || [ -L "$_dt_file" ] || continue
+    if [ "$_dt_count" -ge "$DM_INJECT_MAX_LINES" ]; then
+      _dt_exhausted=0
+      break
+    fi
+    _dt_count=$((_dt_count + 1))
+    _dm_pending_digest "$_dt_lane" "$_dt_file"
+    _dt_digest_rc=$?
+    if [ "${_DM_JQ_SYSTEMIC_FAILURE:-0}" = 1 ]; then
+      _dt_rc=1; _dt_exhausted=0
+      break
+    fi
+    case "$_dt_digest_rc" in
+      0) _dt_digest=$_DM_PENDING_DIGEST ;;
+      2) continue ;;
+      *) _dt_rc=1; continue ;;
+    esac
+    if ! printf '%s\n' "$_dt_digest"; then
+      _warn "could not emit pending dm messages for @$_dt_lane; leaving them pending"
+      return 1
+    fi
+    _dm_archive "$_dt_lane" "$_dt_file" || _dt_rc=1
+  done
+  if [ "$_dt_exhausted" = 1 ]; then
+    _dm_dir_ok "$_dt_pending" || _dt_rc=1
+  fi
+  if [ "$_dt_count" -ge "$DM_INJECT_MAX_LINES" ]; then
+    _dm_dir_has_entries "$_dt_pending"
+    case $? in
+      0) _warn "brain dm take: more messages remain pending after this bounded batch" ;;
+      1) ;;
+      *) _dt_rc=1 ;;
+    esac
+  fi
+  return "$_dt_rc"
+}
+
+# Establish failed/ one component at a time. rc 0 means the leaf exists and is validated,
+# rc 1 means a child is proven absent beneath a validated parent, and rc 2 means an existing
+# ancestor or leaf cannot be inspected. This stays shell-only on the common absent path.
+_dm_failed_state() { # <lane>
+  _fs_root="$BRAIN/dm"
+  [ -e "$_fs_root" ] || [ -L "$_fs_root" ] || return 1
+  _dm_dir_ok "$_fs_root" || return 2
+
+  _fs_lane="$_fs_root/$1"
+  [ -e "$_fs_lane" ] || [ -L "$_fs_lane" ] || return 1
+  _dm_dir_ok "$_fs_lane" || return 2
+
+  _fs_failed="$_fs_lane/failed"
+  [ -e "$_fs_failed" ] || [ -L "$_fs_failed" ] || return 1
+  _dm_dir_ok "$_fs_failed" || return 2
+}
+
+# Authoritative status scan: preserve the state probe's tri-state return and publish a count only
+# after enumeration is revalidated. Callers read _DM_FAILED_COUNT; no path crosses stdout.
+_dm_failed_count() { # <lane>
+  _DM_FAILED_COUNT=0
+  _fc_dir="$BRAIN/dm/$1/failed"; _fc_count=0
+  _dm_failed_state "$1"
+  case $? in
+    0) ;;
+    1) return 1 ;;
+    *) return 2 ;;
+  esac
+  # Display-only count — the dir was just validated; every visible or dot-named artifact in
+  # failed/ belongs in the operator's "inspect failed/" total.
+  for _fc_file in "$_fc_dir"/* "$_fc_dir"/.*; do
+    _fc_name=${_fc_file##*/}
+    case "$_fc_name" in .|..) continue ;; esac
+    [ -e "$_fc_file" ] || [ -L "$_fc_file" ] || continue
+    _fc_count=$((_fc_count + 1))
+  done
+  # Re-establish the directory after expansion: a mid-scan permission flip must not turn an
+  # uninspectable failed/ into a caller-visible zero.
+  _dm_dir_ok "$_fc_dir" || return 2
+  _DM_FAILED_COUNT=$_fc_count
+  return 0
+}
+
+cmd_dm() {
+  if [ "${1:-}" = "take" ]; then
+    [ "$#" = 1 ] || _die "usage: brain dm take"
+    cmd_dm_take
+    return $?
+  fi
+  _require_brain
+  _to=${1:-}; _msg=${2:-}
+  [ -n "$_to" ] && [ -n "$_msg" ] || _die "usage: brain dm @<feature>|@all \"<msg>\""
+  _to=${_to#@}
+  # whoami already falls back to BRAIN_FEATURE, so empty here can only mean "system"
+  _resolve_whoami; _from=${_WHOAMI:-system}
+  _ts=$(_now_iso)
+  # The cap bounds queue storage and digest work. Larger payloads belong in a connection note.
+  [ "${#_msg}" -le "$DM_MAX_BODY" ] || \
+    _die "brain dm: message too long (${#_msg} > $DM_MAX_BODY chars) — put it in a connections/ note and DM the pointer"
+
+  if [ "$_to" = "all" ]; then
+    # Broadcast (task 1.6): every registered presence note, skip self only. Deliberately NOT
+    # gated on status or updated: — presence `updated:` is unreliable, and writing one line
+    # into a dormant lane's queue is harmless (delivered at its next boot).
+    _n=0; _failed=""
+    for _pn in "$BRAIN"/presence/*.md; do
+      [ -e "$_pn" ] || continue
+      _slug_of "$_pn"; _rcpt=$_SLUG
+      [ "$_rcpt" = "$_from" ] && continue
+      if _dm_send "$_from" "$_rcpt" "$_msg" "$_ts"; then
+        _n=$((_n + 1))
+      else
+        _warn "brain dm: could NOT deliver to @$_rcpt (check .brain/dm/$_rcpt/)"
+        _failed="${_failed:-} @$_rcpt"
+      fi
+    done
+    [ "$_n" -gt 0 ] || _die "brain dm: broadcast delivered to nobody${_failed:+ (failed:$_failed)}"
+    _announce_as "$_from" "dm → @all (broadcast to $_n queues; transcripts under .brain/dm/)${_failed:+ — FAILED:$_failed}" \
+      || _warn "brain dm: broadcast DELIVERED but the journal call-log line FAILED — audit trail incomplete"
+    printf 'dm → @all (%s inboxes)%s\n' "$_n" "${_failed:+ — FAILED:$_failed}"
+    [ -z "${_failed:-}" ]      # partial delivery is a non-zero exit, not a success
+    return $?
+  fi
+
+  [ -f "$BRAIN/presence/$_to.md" ] || _die "brain dm: no registered feature '$_to' (see brain status)"
+  [ "$_from" = "$_to" ] && _die "brain dm: refusing to send to yourself ($_from)"
+  # A failed store must never be announced as a delivery — the journal is committed, so a false
+  # "delivered" line is worse than a loud failure.
+  _dm_send "$_from" "$_to" "$_msg" "$_ts" \
+    || _die "brain dm: could not write to @$_to's queue — nothing sent (check .brain/dm/$_to/)"
+  # Call-log line, never the body (task 1.2, Steve's call): the journal is committed and the
+  # secret scan cannot see a mid-line body; the pointer keeps the transcript retrievable.
+  # Vault-relative on purpose — this line is committed and read on other machines, where an
+  # absolute path is meaningless.
+  # The message IS delivered by now, so a journal failure must not read as "resend" — report it
+  # as an audit-log failure with its own exit code.
+  _announce_as "$_from" "dm → @$_to (transcripts: .brain/dm/$_to/)" \
+    || _warn "brain dm: DELIVERED to @$_to but the journal call-log line FAILED — audit trail incomplete, do not resend"
+  printf 'dm → @%s\n' "$_to"
+}
+
+# ── status (the single live-state source) ────────────────────────────────────────────────────
+_recent_journal() {
+  _feat=$1; _jf="$BRAIN/journal/$(_today).md"
+  [ -f "$_jf" ] || return 0
+  grep -E "(^| )$_feat | @$_feat([^a-zA-Z]|$)" "$_jf" 2>/dev/null | tail -5
+}
+
+_changes_snapshot() { # <identity>
+  # Keep the sole CHANGES count here. Snapshot before rendering so commit records exactly what
+  # was displayed; re-counting at commit could mark later additions read. Neither invariant is
+  # test-guarded.
+  _CHANGES_TOTAL=0; _CHANGES_CURRENT=0; _CHANGES_TOKEN=""
+  _CHANGES_CURSOR="$BRAIN/.cursors/${1:-anon}.changes"
+  [ -f "$BRAIN/CHANGES.md" ] || return 0
+  # The sentinel preserves trailing newlines through command substitution; both values below
+  # then describe this one read. A failed read leaves an invalid, empty snapshot.
+  if ! _CHANGES_SNAPSHOT=$(cat "$BRAIN/CHANGES.md" 2>/dev/null && printf '%s' .); then
+    _CHANGES_SNAPSHOT=""
+    return 0
+  fi
+  _CHANGES_SNAPSHOT=${_CHANGES_SNAPSHOT%.}
+  _CHANGES_TOTAL=$(printf '%s' "$_CHANGES_SNAPSHOT" | grep -c '^- ' 2>/dev/null) \
+    || _CHANGES_TOTAL=0
+  if ! _CHANGES_TOKEN=$(printf '%s' "$_CHANGES_SNAPSHOT" | cksum 2>/dev/null); then
+    _CHANGES_TOTAL=0; _CHANGES_TOKEN=""
+    return 0
+  fi
+  if [ -f "$_CHANGES_CURSOR" ]; then
+    _CHANGES_CURRENT=$(cat "$_CHANGES_CURSOR" 2>/dev/null || echo 0)
+  fi
+  return 0
+}
+
+_changes_commit() {
+  [ -n "${_CHANGES_CURSOR:-}" ] || return 0
+  # A stale concurrent snapshot may move the cursor backward, causing only a repeat banner.
+  # Deliberately write the snapshot without re-reading so undisplayed changes are never marked read.
+  [ "$_CHANGES_TOTAL" -gt "$_CHANGES_CURRENT" ] 2>/dev/null || return 0
+  # mv treats a directory destination as a container, which would falsely report a committed cursor.
+  [ ! -d "$_CHANGES_CURSOR" ] || return 1
+  mkdir -p "$BRAIN/.cursors"
+  # If CHANGES cannot be read or changed after the snapshot, repeat rather than risk silent loss.
+  _CHANGES_LIVE_TOKEN=$(cksum < "$BRAIN/CHANGES.md" 2>/dev/null) || return 0
+  [ "$_CHANGES_LIVE_TOKEN" = "$_CHANGES_TOKEN" ] || return 0
+  _atomic_place printf "$_CHANGES_CURSOR" '%s\n' "$_CHANGES_TOTAL"
+}
+
+cmd_status() {
+  _require_brain
+  _resolve_whoami; _me=$_WHOAMI
+  printf '═══ Agent Brain — live state ═══\n'
+  [ -n "$_me" ] && printf 'You are: %s\n' "$_me"
+
+  printf '\nActive features:\n'
+  _us=$(printf '\037')
+  for _f in "$BRAIN"/presence/*.md; do
+    [ -e "$_f" ] || continue
+    _sl=$(_agent_slug "$_f")
+    # One awk pass per note. dialog_with (task 4.2) is read OUTSIDE the status branch: an open
+    # dialog on an idle/done lane is the stale state the field exists to expose.
+    _pf=$(_fm_presence "$_f")
+    _st=${_pf%%"$_us"*}; _pf=${_pf#*"$_us"}
+    _ph=${_pf%%"$_us"*}; _pf=${_pf#*"$_us"}
+    _tk=${_pf%%"$_us"*}; _dw=${_pf#*"$_us"}
+    case "$_st" in
+      active|blocked)
+        printf '  • %-18s [%s] %s %s\n' "$_sl" "$_st" "${_ph:-—}" "${_tk:+($_tk)}"
+        [ -n "$_dw" ] && printf '      ↳ in dialog with @%s\n' "$_dw"
+        ;;
+      idle)
+        printf '  • %-18s [idle] (upcoming)\n' "$_sl"
+        [ -n "$_dw" ] && printf '      ⚠ still marked in dialog with @%s while idle — stale?\n' "$_dw"
+        ;;
+      *)
+        [ -n "$_dw" ] && printf '  • %-18s [%s] ⚠ still marked in dialog with @%s — stale\n' "$_sl" "${_st:-?}" "$_dw"
+        ;;
+    esac
+  done
+
+  printf '\nOpen/watch connections touching you:\n'
+  _any=0
+  for _c in "$BRAIN"/connections/*.md; do
+    [ -e "$_c" ] || continue
+    _st=$(_fm "$_c" status); case "$_st" in open|watch) ;; *) continue ;; esac
+    _feats=$(_list_field "$_c" features)
+    _hit=0
+    if [ -n "$_me" ]; then
+      for _x in $_feats; do [ "$_x" = "$_me" ] && _hit=1; done
+    fi
+    [ -z "$_me" ] && _hit=1     # no identity → show all open edges
+    if [ "$_hit" = 1 ]; then
+      _any=1
+      printf '  • %-34s [%s/%s/%s] blocks:%s\n' \
+        "$(_agent_slug "$_c")" "$(_fm "$_c" kind)" "$(_fm "$_c" severity)" "$_st" \
+        "$(_list_field "$_c" blocks | tr -s ' ' | sed 's/^ *//;s/ *$//' | tr ' ' ',' )"
+    fi
+  done
+  [ "$_any" = 0 ] && printf '  (none)\n'
+
+  # CHANGES banner — "⚠ N brain changes since you last looked" (render only; callers commit)
+  if [ "$_CHANGES_TOTAL" -gt "$_CHANGES_CURRENT" ] 2>/dev/null; then
+    printf '\n⚠ %s brain change(s) since you last looked — see .brain/CHANGES.md\n' \
+      "$((_CHANGES_TOTAL - _CHANGES_CURRENT))"
+  fi
+
+  # hook-error breadcrumbs
+  [ -s "$BRAIN/.hook-errors.log" ] && \
+    printf '\n⚠ hook errors logged — see .brain/.hook-errors.log\n'
+
+  # Structurally invalid messages are quarantined but never silent or auto-deleted. The
+  # authoritative tri-state+count call keeps both zero and positive results fork-free while
+  # refusing to infer absence through a malformed or uninspectable dm root/lane.
+  if [ -n "$_me" ]; then
+    _dm_failed_count "$_me" 2>/dev/null
+    _failed_count_rc=$?
+    case $_failed_count_rc in
+      0)
+        [ "$_DM_FAILED_COUNT" -gt 0 ] 2>/dev/null && \
+          printf '\n⚠ %s DM message(s) failed structural validation — inspect .brain/dm/%s/failed/\n' \
+            "$_DM_FAILED_COUNT" "$_me"
+        ;;
+      1) ;;
+    esac
+    [ "$_failed_count_rc" -le 1 ] || \
+      printf '\n⚠ DM failed/ state cannot be inspected for @%s — check .brain/dm/%s/failed/\n' \
+        "$_me" "$_me"
+  fi
+
+  # recent journal lines relevant to me
+  if [ -n "$_me" ]; then
+    _rj=$(_recent_journal "$_me")
+    if [ -n "$_rj" ]; then printf '\nRecent journal (you):\n%s\n' "$_rj"; fi
+  fi
+}
+
+# ── new-feature (register a feature once) ────────────────────────────────────────────────────
+cmd_new_feature() {
+  _require_brain
+  _slug=${1:-}; [ -n "$_slug" ] || _die "usage: brain new-feature <slug>"
+  _feat_ok "$_slug" || _die "invalid feature slug: '$_slug' (bare slug, no path separators)"
+  # 'all' would be swallowed by the dm broadcast keyword, 'system' is the unresolved-sender
+  # fallback, and 'take' is the dm consume keyword — a lane registered under any of these
+  # becomes unreachable (or reachable only in @-prefixed form) by name.
+  case "$_slug" in
+    all|system|take) _die "reserved feature name: '$_slug' ('brain dm @all' broadcasts; 'system' is the fallback author; 'brain dm take' consumes)" ;;
+  esac
+  _note="$BRAIN/presence/$_slug.md"
+  [ -f "$_note" ] && _die "feature already registered: $_slug"
+
+  _br=$(_branch); _pslug=$(_slug_from_branch "$_br"); _top=$(_toplevel)
+  _owns="\"$_slug\""
+  if [ -n "$_pslug" ] && [ "$_pslug" != "$_slug" ]; then
+    _owns="$_owns, \"$_pslug\""
+    _warn "M6: branch slug ('$_pslug') ≠ feature ('$_slug') — added both to owns_branches; prefer the feature name in the branch going forward."
+  fi
+
+  _ts=$(_now_iso)
+  cat > "$_note" <<EOF
+---
+type: presence
+agent: $_slug
+feature: "TODO"
+status: idle
+phase: TODO
+owns_branches: [$_owns]
+plan: TODO
+tracker_epic: TODO
+current_worktree: $_top
+current_branch: $_br
+current_ticket: TODO
+touches: []
+updated: $_ts
+---
+TODO: one paragraph — what this feature just did, what's next, [[links]] to connections touching its files.
+EOF
+  cmd_announce "joined — feature '$_slug' registered (status idle)"
+  printf 'registered: %s\n' "$_note"
+}
+
+# ── reconcile (the coherence keeper) ─────────────────────────────────────────────────────────
+cmd_reconcile() {
+  _require_brain
+  _check_only=0; [ "${1:-}" = "--check" ] && _check_only=1
+  _errors=0
+
+  # validate: every note parses + type allowlist (flags stealth-structural notes)
+  for _f in "$BRAIN"/presence/*.md "$BRAIN"/connections/*.md "$BRAIN"/research/*.md; do
+    [ -e "$_f" ] || continue
+    _t=$(_fm "$_f" type)
+    case "$_t" in
+      presence|connection|research) ;;
+      *) _warn "invalid/stealth type ('$_t') in ${_f#"$BRAIN"/}"; _errors=$((_errors + 1)) ;;
+    esac
+  done
+
+  # colliding owns_branches tokens across features
+  _seen=""
+  for _f in "$BRAIN"/presence/*.md; do
+    [ -e "$_f" ] || continue
+    _sl=$(_agent_slug "$_f")
+    for _tok in $(_owns_tokens "$_f"); do
+      _prev=$(printf '%s\n' $_seen | grep "^$_tok=" | head -1)
+      if [ -n "$_prev" ] && [ "${_prev#*=}" != "$_sl" ]; then
+        _warn "owns_branches collision: token '$_tok' claimed by ${_prev#*=} and $_sl"
+        _errors=$((_errors + 1))
+      fi
+      _seen="$_seen $_tok=$_sl"
+    done
+  done
+
+  # dangling [[links]] (best-effort; warning only, not an error). Skip unfilled stubs whose
+  # bracketed tokens are template placeholders (a note still carrying TODO isn't real yet).
+  for _f in "$BRAIN"/presence/*.md "$BRAIN"/connections/*.md; do
+    [ -e "$_f" ] || continue
+    grep -q 'TODO' "$_f" 2>/dev/null && continue
+    for _lnk in $(grep -oE '\[\[[a-z0-9-]+\]\]' "$_f" 2>/dev/null | tr -d '[]' | sort -u); do
+      if [ ! -f "$BRAIN/presence/$_lnk.md" ] && [ ! -f "$BRAIN/connections/$_lnk.md" ] \
+         && [ ! -f "$BRAIN/research/$_lnk.md" ]; then
+        _warn "dangling link [[$_lnk]] in ${_f#"$BRAIN"/}"
+      fi
+    done
+  done
+
+  # stale-but-active (updated older than ~5 days) — secondary liveness hint, warning only
+  _stale_cut=$(_days_ago 5)
+  for _f in "$BRAIN"/presence/*.md; do
+    [ -e "$_f" ] || continue
+    [ "$(_fm "$_f" status)" = "active" ] || continue
+    _up=$(_fm "$_f" updated)
+    if [ -n "$_up" ] && [ -n "$_stale_cut" ] && [ "${_up%%T*}" \< "$_stale_cut" ]; then
+      _warn "stale-active: $(_agent_slug "$_f") updated $_up (> ~5d) — confirm still active"
+    fi
+  done
+
+  if [ "$_check_only" = 1 ]; then
+    [ "$_errors" -gt 0 ] && return 1
+    return 0
+  fi
+
+  # ── cheap auto-fixes (mutating) ──
+  _resolve_whoami; _me=$_WHOAMI
+  if [ -n "$_me" ] && [ -f "$BRAIN/presence/$_me.md" ]; then
+    _diff=$(git -C "$ROOT" diff --name-only "$(_main_ref)" 2>/dev/null | sort -u | tr '\n' ',' | sed 's/,$//;s/,/, /g')
+    if [ -n "$_diff" ]; then
+      _set_fm_inline "$BRAIN/presence/$_me.md" touches "[$_diff]"
+      _set_fm_inline "$BRAIN/presence/$_me.md" updated "$(_now_iso)"
+    fi
+  fi
+
+  # waiting-on liveness (blocker = features[] minus blocks[]; an external-only edge has no internal
+  # blocker → never auto-touched). blocker done → resolve; blocker stale/abandoned → downgrade
+  # open→watch so a blocked feature never sits stuck on a note nobody tends (M10).
+  _stale_cut=$(_days_ago 5)
+  for _c in "$BRAIN"/connections/*.md; do
+    [ -e "$_c" ] || continue
+    [ "$(_fm "$_c" kind)" = "waiting-on" ] || continue
+    case "$(_fm "$_c" status)" in open|watch) ;; *) continue ;; esac
+    _feats=$(_list_field "$_c" features); _blocked=$(_list_field "$_c" blocks)
+    _resolved=0
+    for _b in $_feats; do
+      case " $_blocked " in *" $_b "*) continue ;; esac     # _b is blocked, not the blocker
+      if [ -f "$BRAIN/presence/$_b.md" ] && [ "$(_fm "$BRAIN/presence/$_b.md" status)" = "done" ]; then
+        _set_fm_inline "$_c" status resolved
+        _set_fm_inline "$_c" resolved "$(_now_iso)"
+        _set_fm_inline "$_c" updated "$(_now_iso)"
+        cmd_announce "auto-resolved $(_agent_slug "$_c") — blocker '$_b' is done"
+        _resolved=1; break
+      fi
+    done
+    [ "$_resolved" = 1 ] && continue
+    [ "$(_fm "$_c" status)" = "open" ] || continue          # only downgrade open edges
+    for _b in $_feats; do
+      case " $_blocked " in *" $_b "*) continue ;; esac
+      [ -f "$BRAIN/presence/$_b.md" ] || continue
+      [ "$(_fm "$BRAIN/presence/$_b.md" status)" = "done" ] && continue
+      _bup=$(_fm "$BRAIN/presence/$_b.md" updated)
+      if [ -n "$_bup" ] && [ -n "$_stale_cut" ] && [ "${_bup%%T*}" \< "$_stale_cut" ]; then
+        _set_fm_inline "$_c" status watch
+        _set_fm_inline "$_c" updated "$(_now_iso)"
+        cmd_announce "downgraded $(_agent_slug "$_c") open→watch — blocker '$_b' appears abandoned (stale > ~5d); proceeding"
+        break
+      fi
+    done
+  done
+  return 0
+}
+
+# date N days ago (YYYY-MM-DD); BSD and GNU date differ, try both
+_days_ago() {
+  date -u -v-"$1"d +%Y-%m-%d 2>/dev/null || date -u -d "$1 days ago" +%Y-%m-%d 2>/dev/null || true
+}
+
+# ── commit (durability; path-scoped, locked, secret-scanned, ff-only) ────────────────────────
+_commit_cleanup() {
+  _cc_rc=0
+  if [ -n "${_commit_index:-}" ]; then
+    rm -f -- "$_commit_index" "$_commit_index.lock" 2>/dev/null || _cc_rc=1
+    _commit_index=""
+  fi
+  if [ "${_commit_lock_held:-0}" = 1 ]; then
+    _lock_release commit
+    _commit_lock_held=0
+  fi
+  return "$_cc_rc"
+}
+
+_commit_clear_traps() { trap - 0 HUP INT TERM; }
+
+_commit_abort() {
+  _ca_message=$*
+  _ca_index=${_commit_index:-}
+  _commit_cleanup || _warn "could not clean temporary commit index: $_ca_index"
+  _commit_clear_traps
+  _die "$_ca_message"
+}
+
+_commit_finish() {
+  _cf_index=${_commit_index:-}
+  if ! _commit_cleanup; then
+    _commit_clear_traps
+    _die "could not clean temporary commit index: $_cf_index"
+  fi
+  _commit_clear_traps
+}
+
+cmd_commit() {
+  _require_brain
+  _lock_acquire commit || _die "another brain commit is in progress"
+  _commit_lock_held=1
+  _commit_index=""
+  trap '_commit_cleanup' 0
+  trap '_commit_cleanup; exit 129' HUP
+  trap '_commit_cleanup; exit 130' INT
+  trap '_commit_cleanup; exit 143' TERM
+  # Self-healing invariant: dm/ MUST be ignored. cmd_init writes .gitignore only on a fresh
+  # scaffold (and --force is forbidden on a live vault), so a vault initialized before the DM
+  # feature would otherwise commit inbox bodies — which the line-anchored secret scan below
+  # cannot see, since a jsonl line starts with '{'.
+  # DM inboxes must never reach a commit, and this guard FAILS CLOSED — the secret scan below
+  # is line-anchored and cannot see a jsonl body, so this is the only control that stands.
+  if [ -d "$BRAIN/dm" ]; then
+    if ! git -C "$ROOT" check-ignore --no-index -q -- .brain/dm/.brain-ignore-probe 2>/dev/null; then
+      printf 'dm/\n' >> "$BRAIN/.gitignore" 2>/dev/null \
+        || _commit_abort "cannot write .brain/.gitignore to exclude dm/ — refusing to commit"
+      git -C "$ROOT" check-ignore --no-index -q -- .brain/dm/.brain-ignore-probe 2>/dev/null \
+        || _commit_abort "could not verify the dm/ ignore rule — refusing to commit"
+      _warn "added missing 'dm/' to .brain/.gitignore — DM inboxes must never be committed"
+    fi
+    # An ignore rule does not apply to files git already TRACKS, and does not un-stage. Purge
+    # every dm path git knows about, not merely the ones showing in a staged diff.
+    if git -C "$ROOT" ls-files --cached -- .brain/dm 2>/dev/null | grep -q .; then
+      git -C "$ROOT" rm -r --cached -q --ignore-unmatch -- .brain/dm 2>/dev/null \
+        || _commit_abort "could not un-track .brain/dm/ — refusing to commit"
+      _warn "un-tracked .brain/dm/ — DM inboxes are per-machine and must never be committed"
+    fi
+  fi
+  # secret scan staged .brain/ content. Extra denylist terms (one per line, '#' comments ok) come
+  # from $BRAIN_SECRET_DENYLIST or, by default, <vault>/secret-denylist.txt (optional — absent = skip).
+  _deny="${BRAIN_SECRET_DENYLIST:-$BRAIN/secret-denylist.txt}"
+  _hit=""
+  for _f in $(git -C "$ROOT" ls-files --others --modified --exclude-standard -- .brain 2>/dev/null; \
+              git -C "$ROOT" diff --cached --name-only -- .brain 2>/dev/null); do
+    [ -f "$ROOT/$_f" ] || continue
+    case "$_f" in .brain/bin/*|.brain/templates/*) continue ;; esac   # code/templates, not note content
+    if grep -qE '^[A-Z][A-Z0-9_]*=.+' "$ROOT/$_f" 2>/dev/null; then _hit="$_f (env-shaped secret)"; break; fi
+    if [ -f "$_deny" ]; then
+      while IFS= read -r _term; do
+        _term=$(printf '%s' "$_term" | sed 's/^[ -]*//;s/ *$//')
+        [ -z "$_term" ] && continue
+        case "$_term" in '#'*) continue ;; esac
+        if grep -qiF "$_term" "$ROOT/$_f" 2>/dev/null; then _hit="$_f (denylisted: $_term)"; break 2; fi
+      done < "$_deny"
+    fi
+  done
+  [ -z "$_hit" ] || _commit_abort "secret-scan abort: $_hit"
+
+  _commit_git_dir=$(git -C "$ROOT" rev-parse --git-dir 2>/dev/null) \
+    || _commit_abort "could not resolve git directory for temporary commit index"
+  case "$_commit_git_dir" in
+    /*) ;;
+    *) _commit_git_dir="$ROOT/$_commit_git_dir" ;;
+  esac
+  [ -d "$_commit_git_dir" ] \
+    || _commit_abort "git directory is not a directory: $_commit_git_dir"
+  _commit_index="$_commit_git_dir/brain-commit-index.$$"
+  _commit_index_n=0
+  while [ -e "$_commit_index" ] || [ -L "$_commit_index" ] \
+     || [ -e "$_commit_index.lock" ] || [ -L "$_commit_index.lock" ]; do
+    _commit_index_n=$((_commit_index_n + 1))
+    _commit_index="$_commit_git_dir/brain-commit-index.$$-$_commit_index_n"
+  done
+
+  _commit_parent=$(git -C "$ROOT" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) || _commit_parent=""
+  if [ -n "$_commit_parent" ]; then
+    GIT_INDEX_FILE="$_commit_index" git -C "$ROOT" read-tree "$_commit_parent" 2>/dev/null \
+      || _commit_abort "could not seed temporary commit index from HEAD"
+  else
+    GIT_INDEX_FILE="$_commit_index" git -C "$ROOT" read-tree --empty 2>/dev/null \
+      || _commit_abort "could not initialize temporary commit index"
+  fi
+  GIT_INDEX_FILE="$_commit_index" git -C "$ROOT" add -A -- .brain 2>/dev/null \
+    || _commit_abort "could not stage .brain into temporary commit index"
+  # Re-purge AFTER staging: a DM landing between the pre-check and `git add` would otherwise
+  # ride along. Then assert the invariant on the sanitized index — fail closed if any DM entry
+  # remains, while allowing the intended deletion of DM entries inherited from HEAD.
+  GIT_INDEX_FILE="$_commit_index" git -C "$ROOT" rm -r --cached -q --ignore-unmatch -- .brain/dm 2>/dev/null || true
+  _commit_dm_entries=$(GIT_INDEX_FILE="$_commit_index" git -C "$ROOT" ls-files --cached -- .brain/dm 2>/dev/null) \
+    || _commit_abort "could not verify temporary commit index after DM purge"
+  [ -z "$_commit_dm_entries" ] \
+    || _commit_abort "refusing to commit: .brain/dm/ is still staged after purge — DM bodies must never be committed"
+
+  _commit_tree=$(GIT_INDEX_FILE="$_commit_index" git -C "$ROOT" write-tree 2>/dev/null) \
+    || _commit_abort "could not write sanitized .brain tree"
+  if [ -n "$_commit_parent" ]; then
+    _commit_parent_tree=$(git -C "$ROOT" rev-parse "$_commit_parent^{tree}" 2>/dev/null) \
+      || _commit_abort "could not resolve HEAD tree"
+    if [ "$_commit_tree" = "$_commit_parent_tree" ]; then
+      git -C "$ROOT" reset -q HEAD -- .brain 2>/dev/null \
+        || _commit_abort "could not reconcile the real index for .brain"
+      _commit_finish
+      printf 'brain: nothing to commit\n'
+      return 0
+    fi
+    _commit_new=$(git -C "$ROOT" commit-tree "$_commit_tree" -p "$_commit_parent" \
+      -m "chore(brain): sync coordination vault" 2>/dev/null) \
+      || _commit_abort "commit failed"
+    git -C "$ROOT" update-ref -m "brain commit: sync coordination vault" HEAD \
+      "$_commit_new" "$_commit_parent" 2>/dev/null \
+      || _commit_abort "commit failed: HEAD changed while building the sanitized commit"
+  else
+    _commit_new=$(git -C "$ROOT" commit-tree "$_commit_tree" \
+      -m "chore(brain): sync coordination vault" 2>/dev/null) \
+      || _commit_abort "commit failed"
+    git -C "$ROOT" update-ref -m "brain commit: sync coordination vault" HEAD \
+      "$_commit_new" 2>/dev/null || _commit_abort "commit failed"
+  fi
+  # The temp index produced the new HEAD; reconcile only .brain in the developer's real index.
+  # This leaves unrelated staged work intact and never re-reads the working tree into the commit.
+  git -C "$ROOT" reset -q HEAD -- .brain 2>/dev/null \
+    || _commit_abort "committed, but could not reconcile the real index for .brain"
+  # ff-only rebase onto the fresh integration branch; never force-push (push is the caller's job)
+  git -C "$ROOT" fetch -q "$(_main_remote)" "$(_main_branch)" 2>/dev/null && \
+    git -C "$ROOT" rebase -q "$(_main_ref)" 2>/dev/null || \
+    _warn "could not rebase onto $(_main_ref) (resolve manually before pushing)"
+  _commit_finish
+  printf 'brain: committed .brain/ (chore(brain): sync coordination vault)\n'
+}
+
+# ── wrap (self-contained session closeout; wire into your own /wrap or run standalone) ─────────
+cmd_wrap() {
+  _require_brain
+  _resolve_whoami; _me=$_WHOAMI
+  [ -n "$_me" ] || { printf 'brain: not a brain branch — nothing to wrap\n'; return 0; }
+  printf 'brain: wrapping %s — update presence/%s.md live fields first (status/phase/touches).\n' "$_me" "$_me"
+  cmd_reconcile                                    # self-heal settled/abandoned edges + refresh state
+  if [ "$(_toplevel)" = "$ROOT" ]; then            # only the main-worktree session commits
+    cmd_commit
+  else
+    printf 'brain: reconciled. commit skipped (sibling worktree) — the committer runs `brain commit` from %s.\n' "$ROOT"
+  fi
+}
+
+# ── governance gauntlet ──────────────────────────────────────────────────────────────────────
+cmd_propose() {
+  _require_brain
+  _type=${1:-}; shift 2>/dev/null || true; _desc="${*:-}"
+  [ -n "$_type" ] && [ -n "$_desc" ] || _die "usage: brain propose <convention|machinery> \"<desc>\""
+  _id=$(_kebab "$_desc")
+  case "$_type" in
+    machinery)
+      # file a persistent watch connection (no feature-pair) + journal; keep working (human applies)
+      _mf="$BRAIN/connections/machinery-$_id.md"
+      _ts=$(_now_iso)
+      cat > "$_mf" <<EOF
+---
+type: connection
+features: []
+kind: machinery
+status: watch
+severity: medium
+blocks: []
+files: []
+discovered: $_ts
+resolved: null
+updated: $_ts
+---
+MACHINERY change proposed (human-applied in v1): $_desc
+Agents keep working with current machinery until a human applies this deliberately.
+EOF
+      cmd_announce "machinery change proposed (human-applied in v1): $_id"
+      printf 'brain: machinery proposal filed → %s (a human applies machinery in v1)\n' "${_mf#"$ROOT"/}"
+      ;;
+    convention)
+      _lock_acquire governance || _die "a structural change is already in flight (lock held)"
+      mkdir -p "$BRAIN/proposals"
+      _pf="$BRAIN/proposals/$_id.md"
+      _ts=$(_now_iso)
+      cat > "$_pf" <<EOF
+---
+type: proposal
+id: $_id
+status: proposed
+desc: $_desc
+created: $_ts
+---
+CONVENTION change proposed (NOT yet live): $_desc
+Validate + apply with: brain apply
+EOF
+      cmd_announce "convention change proposed: $_desc (id $_id)"
+      printf 'brain: proposed convention "%s" (id %s) — not live. Apply: brain apply\n' "$_desc" "$_id"
+      ;;
+    *) _die "unknown proposal type: $_type (convention|machinery)" ;;
+  esac
+}
+
+cmd_apply() {
+  _require_brain
+  _pf=""
+  for _f in "$BRAIN"/proposals/*.md; do [ -e "$_f" ] && { _pf="$_f"; break; }; done
+  [ -n "$_pf" ] || _die "no convention proposal in flight"
+  _id=$(_fm "$_pf" id); [ -n "$_id" ] || _id=$(_agent_slug "$_pf")
+  _desc=$(_fm "$_pf" desc)
+  # auto-validate (reconcile dry-run); fail → reject + rollback
+  if ! cmd_reconcile --check >/dev/null 2>&1; then
+    rm -f "$_pf"; _lock_release governance
+    _die "validation failed (reconcile --check) — proposal rolled back, nothing applied"
+  fi
+  # apply in lockstep: record in CHANGES, retire the proposal
+  [ -f "$BRAIN/CHANGES.md" ] || printf '# Brain CHANGES — structural change log\n\n' > "$BRAIN/CHANGES.md"
+  printf -- '- %s %s — %s\n' "$(_now_iso)" "$_id" "${_desc:-convention change}" >> "$BRAIN/CHANGES.md"
+  mkdir -p "$BRAIN/proposals/applied"; mv "$_pf" "$BRAIN/proposals/applied/$_id.md"
+  _lock_release governance
+  printf 'brain: applied "%s" — recorded in CHANGES.md. Revert: brain revert %s\n' "$_id" "$_id"
+}
+
+cmd_revert() {
+  _require_brain
+  _id=${1:-}; [ -n "$_id" ] || _die "usage: brain revert <change-id|git-sha>"
+  # git sha → git revert; else a recorded convention change → undo the record + retire
+  if git -C "$ROOT" cat-file -e "$_id^{commit}" 2>/dev/null; then
+    git -C "$ROOT" revert --no-edit "$_id" || _die "git revert failed"
+    printf 'brain: reverted commit %s\n' "$_id"; return 0
+  fi
+  if [ -f "$BRAIN/CHANGES.md" ] && grep -q " $_id — " "$BRAIN/CHANGES.md"; then
+    _atomic_place _render_without_change "$BRAIN/CHANGES.md" "$BRAIN/CHANGES.md" "$_id" \
+      || _die "could not rewrite CHANGES.md while reverting $_id"
+    rm -f "$BRAIN/proposals/applied/$_id.md"
+    cmd_announce "reverted convention change $_id"
+    printf 'brain: reverted convention change %s (removed from CHANGES.md)\n' "$_id"; return 0
+  fi
+  _die "no change found for id: $_id"
+}
+
+_render_without_change() { # <source> <change-id>
+  awk -v marker=" $2 — " 'index($0, marker) == 0 { print }' "$1"
+}
+
+# ── hooks ────────────────────────────────────────────────────────────────────────────────────
+_emit_session_ctx() {
+  jq -n --arg c "$1" \
+    '{hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:$c}}' 2>/dev/null \
+    || printf '%s\n' "$1"
+}
+_emit_session_ctx_pinned() { # <context> [staged-message-name...]
+  _DM_MISSING_IDS=""
+  [ -n "${_DM_JQ_BIN:-}" ] || return 1
+  _ep_context=$1; shift
+  # shellcheck disable=SC2016  # jq source; $c is a jq variable
+  _esc_payload=$("$_DM_JQ_BIN" -n --arg c "$_ep_context" \
+    '{hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:$c}}' 2>/dev/null) \
+    || return 1
+  case "$_esc_payload" in \{*\}) ;; *) _DM_JQ_SYSTEMIC_FAILURE=1; return 1 ;; esac
+  for _ep_name in "$@"; do
+      case "$_esc_payload" in *'\"id\":\"'"$_ep_name"'\"'*) ;; *) _DM_MISSING_IDS="${_DM_MISSING_IDS}${_DM_MISSING_IDS:+ }$_ep_name" ;; esac
+  done
+  [ -z "$_DM_MISSING_IDS" ] || { _DM_JQ_SYSTEMIC_FAILURE=1; return 1; }
+  printf '%s\n' "$_esc_payload"
+}
+_emit_pretool() { # <decision: allow|ask> <text>
+  # Field placement is empirical (2026-08-01, DM-mechanisms eval E2/E9 — the eval doc lives
+  # with the consuming project, not in this repo): permissionDecisionReason renders ONLY on
+  # ask/deny and is silently dropped on allow; allow surfaces via additionalContext. Both
+  # branches degrade to raw text if jq is missing, so a collision warning is never swallowed.
+  case "$1" in
+    ask)
+      jq -n --arg r "$2" \
+        '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"ask",permissionDecisionReason:$r}}' 2>/dev/null \
+        || printf '%s\n' "$2"
+      ;;
+    *)
+      jq -n --arg r "$2" \
+        '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"allow",additionalContext:$r}}' 2>/dev/null \
+        || printf '%s\n' "$2"
+      ;;
+  esac
+}
+
+_hook_session_start() {
+  _resolve_whoami; _feat=$_WHOAMI
+  if [ -z "$_feat" ]; then
+    # (a) self-onboard pre-check (fix C): feat/-shaped but no note → informational nudge
+    _br=$(_branch); _slug=$(_slug_from_branch "$_br")
+    case "$_br" in
+      feat/*)
+        # optional suppression list of non-brain globs
+        if [ -f "$BRAIN/templates/non-brain-globs" ] && grep -qxF "$_br" "$BRAIN/templates/non-brain-globs" 2>/dev/null; then
+          exit 0
+        fi
+        _emit_session_ctx "Agent Brain: branch '$_br' has no presence note. If this is a tracked feature, register it once: \"$BRAIN/bin/brain\" new-feature $_slug"
+        ;;
+    esac
+    exit 0                               # non-feature branch → silent
+  fi
+  # (b2) Inspect a bounded batch in pending/. Structurally invalid regular files are quarantined
+  # independently; valid files stay pending until the complete SessionStart payload is emitted.
+  _ib="$BRAIN/dm/$_feat/pending"
+  _dm_block=""; _digest=""; _batch_count=0; _more_dm=0
+  set --
+  # Established-empty (rc 1) and unestablishable (rc 2, already diagnosed by _dm_dir_ok)
+  # deliberately converge on no consume; the SessionStart wrapper must remain rc 0.
+  if _dm_ensure_tree "$_feat" && _dm_dir_has_entries "$_ib"; then
+    if ! _dm_jq_preflight; then
+      _warn "SessionStart dm consume: jq is unavailable or incompatible; leaving all messages pending"
+    else
+      _ib_exhausted=1
+      for _pending_file in "$_ib"/* "$_ib"/.*; do
+        _pending_name=${_pending_file##*/}
+        case "$_pending_name" in .|..|.tmp-*) continue ;; esac
+        [ -e "$_pending_file" ] || [ -L "$_pending_file" ] || continue
+        if [ "$_batch_count" -ge "$DM_INJECT_MAX_LINES" ]; then
+          _more_dm=1; _ib_exhausted=0
+          break
+        fi
+        _batch_count=$((_batch_count + 1))
+        _dm_pending_digest "$_feat" "$_pending_file"
+        _digest_rc=$?
+        if [ "${_DM_JQ_SYSTEMIC_FAILURE:-0}" = 1 ]; then
+          _ib_exhausted=0
+          break
+        fi
+        case "$_digest_rc" in
+          0) _digest_line=$_DM_PENDING_DIGEST ;;
+          3) _warn "could not quarantine invalid dm message for @$_feat: $_pending_name"; continue ;;
+          *) continue ;;
+        esac
+        _digest="${_digest}${_digest:+
+}${_digest_line}"
+        set -- "$@" "$_pending_name"
+      done
+      if [ "${_DM_JQ_SYSTEMIC_FAILURE:-0}" = 1 ] ||
+         { [ "$_ib_exhausted" = 1 ] && ! _dm_dir_ok "$_ib"; }; then
+        # No archive may rest on an unsafe operation or an enumeration that could not be
+        # re-established. Both invalidate the complete batch staged above.
+        _digest=""; _more_dm=0
+        set --
+      fi
+    fi
+  fi
+  if [ "$#" -gt 0 ]; then
+    _dm_block="Unread DMs delivered while you were away:
+$_digest
+
+"
+  fi
+  _continue_dm=""
+  if [ "$_more_dm" = 1 ]; then
+    _continue_dm="
+More DMs remain pending after this bounded batch. Continue by running: \"$BRAIN/bin/brain\" dm take
+"
+  fi
+  # (c) cheap auto-fixes, robust to a never-wraps agent
+  cmd_reconcile >/dev/null 2>&1 || true
+  # (d) inject the protocol nudge + live state
+  _changes_snapshot "$_feat"
+  _st=$(cmd_status 2>/dev/null)
+  _session_ctx="${_dm_block}Run the **navigation-standards** skill now (the Agent-Brain coordination protocol).
+
+Your DM pending queue — arm a watch on directory activity: $_ib
+On activity, consume it by running: \"$BRAIN/bin/brain\" dm take
+${_continue_dm}
+
+$_st"
+  if [ "$#" -gt 0 ]; then
+    _emit_session_ctx_pinned "$_session_ctx" "$@"
+    _emit_rc=$?
+  else
+    _emit_session_ctx "$_session_ctx"
+    _emit_rc=$?
+  fi
+  if [ "$_emit_rc" = 0 ]; then
+    _changes_commit
+    _changes_commit_rc=$?
+    [ "$_changes_commit_rc" = 0 ] || _warn "could not record the CHANGES cursor at $_CHANGES_CURSOR; the banner will repeat next boot"
+    if [ "$#" -gt 0 ]; then
+      _archive_rc=0
+      for _emitted_name in "$@"; do
+        _dm_archive "$_feat" "$_ib/$_emitted_name" || _archive_rc=1
+      done
+      [ "$_archive_rc" = 0 ] \
+        || _warn "one or more DMs were emitted but could not be archived; they remain pending and may replay"
+    fi
+  else
+    _warn "could not emit SessionStart context with ${_DM_JQ_BIN:-<unresolved>}${_DM_MISSING_IDS:+; missing staged DM ids: $_DM_MISSING_IDS}; DMs remain pending and replayable"
+  fi
+  exit 0
+}
+
+_hook_pre_tool() {
+  _input=$(cat 2>/dev/null)
+  _resolve_whoami; _feat=$_WHOAMI; [ -z "$_feat" ] && exit 0  # allowlist: non-brain → silent
+  _tool=$(printf '%s' "$_input" | jq -r '.tool_name // empty' 2>/dev/null)
+  _cmd=$(printf '%s'  "$_input" | jq -r '.tool_input.command // empty' 2>/dev/null)
+  _fp=$(printf '%s'   "$_input" | jq -r '.tool_input.file_path // empty' 2>/dev/null)
+
+  _paths=""
+  case "$_tool" in
+    Bash)
+      case "$_cmd" in
+        *"git push"*|*"gh pr create"*) _paths=$(git -C "$ROOT" diff --name-only "$(_main_ref)" 2>/dev/null) ;;
+        *) exit 0 ;;
+      esac ;;
+    Edit|Write|MultiEdit) [ -n "$_fp" ] && _paths=$(_relpath_any "$_fp") ;;
+    *) exit 0 ;;
+  esac
+  [ -z "$_paths" ] && exit 0
+
+  _collisions=$(_detect_collisions "$_feat" "$_paths")
+  [ -z "$_collisions" ] && exit 0
+
+  # durable record (also serves as the "about to PR / edit shared" journal line) — the guarantee
+  cmd_announce "about to $_tool — shared-surface collision: $_collisions"
+
+  # decision: non-blocking allow by default. ask is forbidden without an attached human (fix K).
+  if [ "${BRAIN_PRETOOL_MODE:-allow}" = "ask" ] && [ -t 1 ]; then
+    _emit_pretool ask "Shared-surface collision: $_collisions. Coordinate before proceeding."
+  else
+    _emit_pretool allow "Shared-surface collision (proceeding; logged to journal): $_collisions"
+  fi
+  exit 0
+}
+
+_detect_collisions() {
+  _me=$1; _paths=$2; _out=""
+  for _p in $_paths; do
+    for _o in "$BRAIN"/presence/*.md; do
+      [ -e "$_o" ] || continue
+      _os=$(_agent_slug "$_o"); [ "$_os" = "$_me" ] && continue
+      case "$(_fm "$_o" status)" in active|blocked) ;; *) continue ;; esac   # live only
+      for _t in $(_list_field "$_o" touches); do
+        _path_match "$_p" "$_t" && _out="$_out $_os:$_t"
+      done
+    done
+    for _c in "$BRAIN"/connections/*.md; do
+      [ -e "$_c" ] || continue
+      case "$(_fm "$_c" status)" in open|watch) ;; *) continue ;; esac
+      for _cf in $(_list_field "$_c" files); do
+        _path_match "$_p" "$_cf" && _out="$_out $(_agent_slug "$_c"):$_cf"
+      done
+    done
+  done
+  printf '%s\n' "$_out" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ' | sed 's/ *$//'
+}
+
+cmd_hook() {
+  _ev=${1:-}
+  ROOT=$(brain_root) 2>/dev/null || exit 0
+  BRAIN="$ROOT/.brain"; [ -d "$BRAIN" ] || exit 0     # no brain → no-op (covers every other repo)
+  case "$_ev" in
+    session-start) ( _hook_session_start ) 2>>"$BRAIN/.hook-errors.log" || exit 0 ;;
+    pre-tool)      ( _hook_pre_tool      ) 2>>"$BRAIN/.hook-errors.log" || exit 0 ;;
+    *) exit 0 ;;
+  esac
+}
+
+# ── install (machine-global pieces that do NOT travel with git) ───────────────────────────────
+# The permissions merge BOTH settings surfaces share (additionalDirectories + the brain
+# allowlist entry). jq program text in a sh variable: expanded once, never re-expanded, so the
+# jq $-variables pass through literally.
+# shellcheck disable=SC2016  # $dir/$allow are jq variables, literal by design
+_JQ_PERMISSIONS_MERGE='
+    .permissions = (.permissions // {}) |
+    .permissions.additionalDirectories = ((.permissions.additionalDirectories // []) + [$dir] | unique) |
+    .permissions.allow = ((.permissions.allow // []) + [$allow] | unique)
+  '
+
+_filter_global_settings() { # <session-dispatcher> <pretool-dispatcher>
+  jq --arg ss "$1" --arg pt "$2" --arg dir "$BRAIN" --arg allow "Bash($BRAIN/bin/brain:*)" '
+    .hooks = (.hooks // {}) |
+    .hooks.SessionStart = (.hooks.SessionStart // []) |
+    .hooks.PreToolUse = (.hooks.PreToolUse // []) |
+    (if ([.hooks.SessionStart[]?.hooks[]?.command] | index($ss)) then .
+     else .hooks.SessionStart += [{"hooks":[{"type":"command","command":$ss}]}] end) |
+    (if ([.hooks.PreToolUse[]?.hooks[]?.command] | index($pt)) then .
+     else .hooks.PreToolUse += [{"matcher":"Bash|Edit|Write|MultiEdit","hooks":[{"type":"command","command":$pt}]}] end) |'"$_JQ_PERMISSIONS_MERGE"
+}
+
+# Seed a settings filter from the existing file, or from an empty object on first install.
+# Redirect (not cat|pipe) so an unreadable source fails the producer instead of silently
+# feeding the filter empty input.
+_render_settings() { # <filter-fn> <source> [filter-args...]
+  _rset_filter=$1; _rset_source=$2; shift 2
+  if [ -f "$_rset_source" ]; then
+    "$_rset_filter" "$@" < "$_rset_source"
+  else
+    printf '{}\n' | "$_rset_filter" "$@"
+  fi
+}
+
+cmd_install() {
+  ROOT=$(brain_root) || _die "not inside a git repository"
+  BRAIN="$ROOT/.brain"
+  _src="$BRAIN/templates/navigation-standards.SKILL.md"
+  [ -f "$_src" ] || _die "missing nav-skill template (run brain init first): $_src"
+
+  _skills="${BRAIN_SKILLS_DIR:-$HOME/.claude/skills}/navigation-standards"
+  mkdir -p "$_skills" || _die "could not create nav-skill directory: $_skills"
+  _atomic_place cat "$_skills/SKILL.md" "$_src" \
+    || _die "could not install nav skill: $_skills/SKILL.md"
+
+  _gs="${BRAIN_GLOBAL_SETTINGS:-$HOME/.claude/settings.json}"
+  _gs_dir=$(dirname "$_gs")
+  mkdir -p "$_gs_dir" || _die "could not create global settings directory: $_gs_dir"
+  _disp_ss='d="$(git rev-parse --git-common-dir 2>/dev/null)" || exit 0; case "$d" in /*) ;; *) d="$(cd "$d" 2>/dev/null && pwd)" || exit 0;; esac; r="$(dirname "$d")"; [ -x "$r/.brain/bin/brain" ] && exec "$r/.brain/bin/brain" hook session-start || exit 0'
+  _disp_pt='d="$(git rev-parse --git-common-dir 2>/dev/null)" || exit 0; case "$d" in /*) ;; *) d="$(cd "$d" 2>/dev/null && pwd)" || exit 0;; esac; r="$(dirname "$d")"; [ -x "$r/.brain/bin/brain" ] && exec "$r/.brain/bin/brain" hook pre-tool || exit 0'
+  _atomic_place _render_settings "$_gs" _filter_global_settings "$_gs" "$_disp_ss" "$_disp_pt" \
+    || _die "failed to merge global settings"
+
+  printf 'brain: installed nav skill → %s\n' "$_skills/SKILL.md"
+  printf 'brain: merged global dispatcher + allowlist → %s\n' "$_gs"
+}
+
+_filter_project_settings() {
+  jq --arg dir "$BRAIN" --arg allow "Bash($BRAIN/bin/brain:*)" "$_JQ_PERMISSIONS_MERGE"
+}
+
+_write_project_settings() {
+  # project .claude/settings.json: write-allowlist only (no hooks; hooks live in the global
+  # dispatcher to avoid double-fire). .claude/settings.json is gitignored → main-worktree-local.
+  _sf="$ROOT/.claude/settings.json"
+  mkdir -p "$ROOT/.claude" || { _warn "could not create project settings directory"; return 1; }
+  _atomic_place _render_settings "$_sf" _filter_project_settings "$_sf" \
+    || { _warn "could not write project settings"; return 1; }
+}
+
+# ── init (scaffold the brain into a repo) ────────────────────────────────────────────────────
+cmd_init() {
+  _force=0; _no_install=0
+  for _a in "$@"; do
+    case "$_a" in
+      --force) _force=1 ;;
+      --no-install) _no_install=1 ;;
+    esac
+  done
+  ROOT=$(brain_root) || _die "not inside a git repository"
+  BRAIN="$ROOT/.brain"
+  _self_dir=$(cd "$(dirname "$0")" && pwd -P)     # the tool's bin/
+  _tool_root=$(dirname "$_self_dir")              # ~/agent-brain (or an existing .brain)
+
+  if [ -d "$BRAIN" ] && [ "$_force" = 0 ]; then
+    printf 'brain: already initialized at %s (idempotent no-op; --force to re-template)\n' "$BRAIN"
+  else
+    mkdir -p "$BRAIN/bin" "$BRAIN/templates" "$BRAIN/presence" "$BRAIN/connections" \
+             "$BRAIN/journal" "$BRAIN/research" "$BRAIN/dm"
+    # copy the engine + hook wrappers + templates from the source tool into the committed brain
+    cp "$_tool_root/bin/"* "$BRAIN/bin/" 2>/dev/null || true
+    chmod +x "$BRAIN/bin/"* 2>/dev/null || true
+    cp "$_tool_root/templates/"* "$BRAIN/templates/" 2>/dev/null || true
+    # static INDEX + CHANGES + reserved .indexignore (Phase 2)
+    cp "$BRAIN/templates/INDEX.md" "$BRAIN/INDEX.md" 2>/dev/null || true
+    [ -f "$BRAIN/CHANGES.md" ] || printf '# Brain CHANGES — structural change log\n\n' > "$BRAIN/CHANGES.md"
+    printf 'templates/\nbin/\n' > "$BRAIN/.indexignore"
+    # keep runtime artifacts + Obsidian config + the Phase-2 index DB out of commits
+    # (dm/ is per-machine transient: cmd_commit stages the whole vault, and a tracked inbox
+    # would land in every lane's touches[] and fire _detect_collisions on every push)
+    printf '.obsidian/\n.cursors/\n.locks/\n.hook-fired/\n.hook-errors.log\nindex/\n*.db\ndm/\n' > "$BRAIN/.gitignore"
+    _day=$(_today); _jf="$BRAIN/journal/$_day.md"
+    [ -f "$_jf" ] || { _new_journal "$_jf" "$_day"; \
+      printf -- '- %s system — brain initialized. Agents: run the navigation-standards skill; query the brain yourself (pull, not push).\n' "$(_now_iso)" >> "$_jf"; }
+    printf 'brain: scaffolded %s\n' "$BRAIN"
+  fi
+
+  if _write_project_settings; then
+    printf 'brain: wrote project write-allowlist → %s/.claude/settings.json\n' "$ROOT"
+  fi
+
+  if [ "$_no_install" = 0 ]; then
+    cmd_install
+  else
+    printf 'brain: skipped machine-global install (--no-install). Run `brain install` to go live.\n'
+  fi
+  printf 'brain: NOTE — seed project features with `brain new-feature <slug>` (project-agnostic; no features hardcoded).\n'
+}
+
+usage() {
+  cat <<'EOF'
+brain — Agent Brain coordination vault (v1, filesystem-only)
+
+  brain init [--force] [--no-install]   scaffold .brain/ into this repo
+  brain install                         machine-global: nav skill + global hook dispatcher
+  brain new-feature <slug>              register one feature (run once)
+  brain whoami                          resolve the current feature (empty = not a brain branch)
+  brain announce "<msg>"                append a line to today's journal
+  brain dm @<feature>|@all "<msg>"      direct-message a lane's queue (@all = every lane but you)
+  brain dm take                         validate, print, and archive this lane's pending DMs
+  brain inbox [<feature>]               print (and create) a lane's pending/ queue directory
+  brain status                          live dashboard (features, connections, banners)
+  brain reconcile [--check]             validate + cheap auto-fixes (--check = validate only)
+  brain commit                          durability: path-scoped, locked, secret-scanned, ff-only
+  brain wrap                            self-contained closeout: reconcile + commit (from main)
+  brain propose <convention|machinery> "<desc>"   governance gauntlet
+  brain apply                           validate + apply the in-flight convention proposal
+  brain revert <id|sha>                 undo a recorded change
+  brain hook <session-start|pre-tool>   hook entry point (wired via settings)
+EOF
+}
+
+# ── dispatch ─────────────────────────────────────────────────────────────────────────────────
+_sub=${1:-}; [ $# -gt 0 ] && shift
+case "$_sub" in
+  init)        cmd_init "$@" ;;
+  install)     cmd_install "$@" ;;
+  new-feature) cmd_new_feature "$@" ;;
+  whoami)      cmd_whoami "$@" ;;
+  announce)    cmd_announce "$@" ;;
+  dm)          cmd_dm "$@" ;;
+  inbox)       cmd_inbox "$@" ;;
+  status)
+    _require_brain
+    _resolve_whoami
+    _changes_snapshot "$_WHOAMI"
+    cmd_status "$@"
+    _status_rc=$?
+    _changes_commit
+    _changes_commit_rc=$?
+    [ "$_changes_commit_rc" = 0 ] || _warn "could not record the CHANGES cursor at $_CHANGES_CURSOR; the banner will repeat next boot"
+    exit "$_status_rc"
+    ;;
+  reconcile)   cmd_reconcile "$@" ;;
+  commit)      cmd_commit "$@" ;;
+  wrap)        cmd_wrap "$@" ;;
+  propose)     cmd_propose "$@" ;;
+  apply)       cmd_apply "$@" ;;
+  revert)      cmd_revert "$@" ;;
+  hook)        cmd_hook "$@" ;;
+  version|--version) printf 'brain %s\n' "$VERSION" ;;
+  ''|help|-h|--help) usage ;;
+  *) _warn "unknown subcommand: $_sub"; usage; exit 1 ;;
+esac

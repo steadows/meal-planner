@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "additionalDirectories": [
+      "/Users/amap3i/meal-planner/.brain"
+    ],
+    "allow": [
+      "Bash(/Users/amap3i/meal-planner/.brain/bin/brain:*)"
+    ]
+  }
+}

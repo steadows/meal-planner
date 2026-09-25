@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+# Thin wrapper → brain hook session-start. Resolves the MAIN worktree's brain from any worktree.
+# Fails open (no brain / not a git repo → exit 0).
+d="$(git rev-parse --git-common-dir 2>/dev/null)" || exit 0
+case "$d" in /*) ;; *) d="$(cd "$d" 2>/dev/null && pwd)" || exit 0 ;; esac
+r="$(dirname "$d")"
+[ -x "$r/.brain/bin/brain" ] && exec "$r/.brain/bin/brain" hook session-start || exit 0
