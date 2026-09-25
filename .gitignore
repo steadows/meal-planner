@@ -1,0 +1,28 @@
+# secrets and local state
+.env
+*.sqlite
+*.sqlite3
+*.db
+data/
+seed/*.csv
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# os / editor
+.DS_Store
+*.swp
+.vscode/
+.idea/
+
+# claude code local settings (per machine)
+.claude/settings.local.json
