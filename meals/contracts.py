@@ -5,9 +5,10 @@ Only the contracts lane edits this file. Other lanes request changes with a smal
 
 from collections.abc import Sequence
 from datetime import date
-from typing import Literal, Protocol, runtime_checkable
+from typing import Annotated, Literal, Protocol, runtime_checkable
+from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 PlanMode = Literal["mix", "recipes", "components"]
 Custody = Literal["wed+fri_sat", "wed+sat_sun"]
@@ -18,6 +19,18 @@ PantryCategory = Literal["staple", "perishable", "fallback"]
 PantryStatus = Literal["have", "buy_next_time"]
 
 MAX_PANTRY_QUESTIONS = 3
+
+
+def _require_meijer_url(url: str) -> str:
+    """The logged-in cart session may only open meijer.com (CLAUDE.md; PLAN.md, Risks)."""
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower()
+    if parts.scheme != "https" or not (host == "meijer.com" or host.endswith(".meijer.com")):
+        raise ValueError("must be an https URL on meijer.com")
+    return url
+
+
+MeijerUrl = Annotated[str, AfterValidator(_require_meijer_url)]
 
 
 class Contract(BaseModel):
@@ -78,9 +91,9 @@ class Intent(Contract):
 
 class CartItem(Contract):
     name: str
-    qty: float
+    qty: float = Field(gt=0)
     unit: str | None = None
-    meijer_url: str | None = None
+    meijer_url: MeijerUrl | None = None
     preferred_name: str | None = None
     substitute_ok: bool = True
 
@@ -103,19 +116,23 @@ class CartReport(Contract):
 
 
 class PantryItem(Contract):
-    """One `pantry_item` row (PLAN.md, Table schema)."""
+    """The domain fields of a `pantry_item` row (PLAN.md, Table schema).
+
+    Not a raw row: `aliases` is the decoded JSON array, and `updated_at` is bookkeeping the
+    contract leaves out. The pantry lane maps rows to this model.
+    """
 
     id: int
     name: str
     aliases: tuple[str, ...] = ()
     category: PantryCategory
     status: PantryStatus = "have"
-    typical_interval_days: int | None = None
+    typical_interval_days: int | None = Field(default=None, gt=0)
     last_purchased: date | None = None
     default_qty: float | None = None
     default_unit: str | None = None
     meijer_product_id: str | None = None
-    meijer_url: str | None = None
+    meijer_url: MeijerUrl | None = None
     preferred_product_name: str | None = None
     substitute_ok: bool = True
     for_miles: bool = False
@@ -158,5 +175,6 @@ class Pantry(Protocol):
         ...
 
     def flip_status(self, name: str, status: PantryStatus) -> PantryItem | None:
-        """Flip an item by name or alias. Returns the updated item, or None if the item is unknown."""
+        """Flip an item by name or alias, case-insensitively. Returns the updated item, or None
+        if the item is unknown."""
         ...

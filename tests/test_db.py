@@ -5,8 +5,11 @@ Authority: the db.py docstrings, PLAN.md (Table schema; Runtime concurrency), an
 PLAN.md, not read back from the code.
 """
 
+import logging
+import re
 import sqlite3
 import threading
+from contextlib import closing
 from pathlib import Path
 from typing import get_args
 
@@ -90,6 +93,11 @@ def _insert(conn: sqlite3.Connection, table: str, **overrides: object) -> None:
     )
 
 
+def _open(tmp_path: Path) -> closing[sqlite3.Connection]:
+    """A migrated database on tmp_path, closed when the with-block ends."""
+    return closing(meals.db.get_db(tmp_path / "pantry.sqlite"))
+
+
 def _version(conn: sqlite3.Connection) -> int:
     version: int = conn.execute("PRAGMA user_version").fetchone()[0]
     return version
@@ -114,26 +122,33 @@ def test_migration_1_creates_exactly_the_plan_schema(
 ) -> None:
     monkeypatch.setattr(meals.db, "MIGRATIONS", meals.db.MIGRATIONS[:1])
 
-    conn = meals.db.get_db(tmp_path / "pantry.sqlite")
-
-    assert _version(conn) == 1
-    assert _tables(conn) == set(PLAN_SCHEMA)
-    for table, expected in PLAN_SCHEMA.items():
-        info = conn.execute(f"PRAGMA table_info({table})").fetchall()
-        actual = {row[1]: (row[2].upper(), row[3], row[4], row[5]) for row in info}
-        assert actual == expected, table
+    with _open(tmp_path) as conn:
+        assert _version(conn) == 1
+        assert _tables(conn) == set(PLAN_SCHEMA)
+        for table, expected in PLAN_SCHEMA.items():
+            info = conn.execute(f"PRAGMA table_info({table})").fetchall()
+            actual = {row[1]: (row[2].upper(), row[3], row[4], row[5]) for row in info}
+            assert actual == expected, table
 
 
 @pytest.mark.parametrize(
     ("table", "column"), [("pantry_item", "name"), ("weekly_plan", "week_start")]
 )
 def test_unique_columns(table: str, column: str, tmp_path: Path) -> None:
-    conn = meals.db.get_db(tmp_path / "pantry.sqlite")
-    _insert(conn, table)
-
-    with pytest.raises(sqlite3.IntegrityError, match="UNIQUE"):
+    with _open(tmp_path) as conn:
         _insert(conn, table)
-    assert conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 1
+
+        with pytest.raises(sqlite3.IntegrityError, match="UNIQUE"):
+            _insert(conn, table)
+        assert conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 1
+
+
+def test_pantry_item_name_is_unique_ignoring_case(tmp_path: Path) -> None:
+    with _open(tmp_path) as conn:
+        _insert(conn, "pantry_item", name="olive oil")
+
+        with pytest.raises(sqlite3.IntegrityError, match="UNIQUE"):
+            _insert(conn, "pantry_item", name="Olive Oil")
 
 
 ACCEPTED = [
@@ -142,6 +157,7 @@ ACCEPTED = [
     *(("weekly_plan", "status", v) for v in ("proposed", "approved", "cart_filled", "ordered")),
     *(("meal_rating", "rater", value) for value in ("steve", "miles")),
     *(("meal_rating", "rating", value) for value in (-1, 1)),
+    *(("pantry_item", "typical_interval_days", value) for value in (None, 1, 70)),
 ]
 
 REJECTED = [
@@ -151,6 +167,8 @@ REJECTED = [
     ("meal_rating", "rater", "guest"),
     ("meal_rating", "rating", 0),
     ("meal_rating", "rating", 2),
+    ("pantry_item", "typical_interval_days", 0),
+    ("pantry_item", "typical_interval_days", -7),
 ]
 
 
@@ -159,48 +177,45 @@ def test_check_constraints_accept_every_allowed_value(
     table: str, column: str, value: object, tmp_path: Path
 ) -> None:
     """pantry_item values come from the contract Literals: a new Literal value needs a migration."""
-    conn = meals.db.get_db(tmp_path / "pantry.sqlite")
+    with _open(tmp_path) as conn:
+        _insert(conn, table, **{column: value})
 
-    _insert(conn, table, **{column: value})
-
-    assert conn.execute(f"SELECT {column} FROM {table}").fetchone()[0] == value
+        assert conn.execute(f"SELECT {column} FROM {table}").fetchone()[0] == value
 
 
 @pytest.mark.parametrize(("table", "column", "value"), REJECTED)
 def test_check_constraints_reject_other_values(
     table: str, column: str, value: object, tmp_path: Path
 ) -> None:
-    conn = meals.db.get_db(tmp_path / "pantry.sqlite")
-
-    with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
-        _insert(conn, table, **{column: value})
-    assert conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0
+    with _open(tmp_path) as conn:
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            _insert(conn, table, **{column: value})
+        assert conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0
 
 
 def test_foreign_keys_are_enforced(tmp_path: Path) -> None:
     """SQLite ignores REFERENCES unless PRAGMA foreign_keys is on for the connection."""
-    conn = meals.db.get_db(tmp_path / "pantry.sqlite")
-    _insert(conn, "pantry_item")
-    (item_id,) = conn.execute("SELECT id FROM pantry_item").fetchone()
     log = "INSERT INTO purchase_log (item_id, purchased_on) VALUES (?, '2026-09-20')"
+    with _open(tmp_path) as conn:
+        _insert(conn, "pantry_item")
+        (item_id,) = conn.execute("SELECT id FROM pantry_item").fetchone()
 
-    conn.execute(log, (item_id,))
-    with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
-        conn.execute(log, (item_id + 999,))
-    assert _column(conn, "SELECT item_id FROM purchase_log") == [item_id]
+        conn.execute(log, (item_id,))
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+            conn.execute(log, (item_id + 999,))
+        assert _column(conn, "SELECT item_id FROM purchase_log") == [item_id]
 
 
 # ── connection settings ──────────────────────────────────────────────────────
 
 
 def test_connection_uses_wal_row_factory_and_a_busy_timeout(tmp_path: Path) -> None:
-    conn = meals.db.get_db(tmp_path / "pantry.sqlite")
-
-    assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
-    assert conn.execute("PRAGMA busy_timeout").fetchone()[0] > 0
-    row = conn.execute("SELECT 7 AS answer").fetchone()
-    assert isinstance(row, sqlite3.Row)
-    assert row["answer"] == 7
+    with _open(tmp_path) as conn:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] > 0
+        row = conn.execute("SELECT 7 AS answer").fetchone()
+        assert isinstance(row, sqlite3.Row)
+        assert row["answer"] == 7
 
 
 def test_get_db_defaults_to_settings_pantry_db_and_creates_parents(
@@ -209,13 +224,11 @@ def test_get_db_defaults_to_settings_pantry_db_and_creates_parents(
     target = tmp_path / "state" / "nested" / "pantry.sqlite"
     monkeypatch.setenv("PANTRY_DB", str(target))
 
-    conn = meals.db.get_db()
-    conn.close()
+    meals.db.get_db().close()
 
     assert target.is_file()
-    check = sqlite3.connect(target)
-    assert _version(check) == len(meals.db.MIGRATIONS)
-    check.close()
+    with closing(sqlite3.connect(target)) as check:
+        assert _version(check) == len(meals.db.MIGRATIONS)
 
 
 def test_db_fixture_is_a_migrated_database(db: sqlite3.Connection) -> None:
@@ -227,32 +240,52 @@ def test_db_fixture_is_a_migrated_database(db: sqlite3.Connection) -> None:
 
 
 def test_reopening_is_idempotent_and_keeps_data(tmp_path: Path) -> None:
-    path = tmp_path / "pantry.sqlite"
-    conn = meals.db.get_db(path)
-    _insert(conn, "pantry_item", name="tahini")
-    conn.commit()
-    conn.close()
+    with _open(tmp_path) as conn:
+        _insert(conn, "pantry_item", name="tahini")
+        conn.commit()
 
-    reopened = meals.db.get_db(path)
-
-    assert _version(reopened) == len(meals.db.MIGRATIONS)
-    assert meals.db.migrate(reopened) == len(meals.db.MIGRATIONS)
-    assert _column(reopened, "SELECT name FROM pantry_item") == ["tahini"]
+    with _open(tmp_path) as reopened:
+        assert _version(reopened) == len(meals.db.MIGRATIONS)
+        assert meals.db.migrate(reopened) == len(meals.db.MIGRATIONS)
+        assert _column(reopened, "SELECT name FROM pantry_item") == ["tahini"]
 
 
 def test_appended_migration_is_applied_once_in_order(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    path = tmp_path / "pantry.sqlite"
-    meals.db.get_db(path).close()
+    meals.db.get_db(tmp_path / "pantry.sqlite").close()
     latest = len(meals.db.MIGRATIONS)
     monkeypatch.setattr(meals.db, "MIGRATIONS", (*meals.db.MIGRATIONS, PROBE))
 
-    conn = meals.db.get_db(path)
+    with _open(tmp_path) as conn:
+        assert _version(conn) == latest + 1
+        assert meals.db.migrate(conn) == latest + 1
+        assert _column(conn, "SELECT x FROM probe") == [42]
 
-    assert _version(conn) == latest + 1
-    assert meals.db.migrate(conn) == latest + 1
-    assert _column(conn, "SELECT x FROM probe") == [42]
+
+def test_migrating_a_fresh_file_logs_the_from_and_to_versions(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="meals.db")
+    latest = len(meals.db.MIGRATIONS)
+
+    meals.db.get_db(tmp_path / "pantry.sqlite").close()
+
+    versions = re.compile(rf"(?<!\d)0(?!\d).*(?<!\d){latest}(?!\d)")
+    infos = [
+        r.getMessage() for r in caplog.records if r.name == "meals.db" and r.levelno == logging.INFO
+    ]
+    assert any(versions.search(message) for message in infos), infos
+
+
+def test_database_newer_than_the_code_is_refused(tmp_path: Path) -> None:
+    """Old code must not write to a schema it doesn't know."""
+    meals.db.get_db(tmp_path / "pantry.sqlite").close()
+    with closing(sqlite3.connect(tmp_path / "pantry.sqlite")) as raw:
+        raw.execute("PRAGMA user_version = 99")
+
+    with pytest.raises(Exception, match=r"(?i)newer"):  # the type is unspecified
+        meals.db.get_db(tmp_path / "pantry.sqlite").close()
 
 
 def test_failing_migration_rolls_back_entirely(
@@ -279,6 +312,45 @@ def test_failing_migration_rolls_back_entirely(
     assert _version(fresh) == latest
     assert "probe" not in _tables(fresh)
     fresh.close()
+
+
+def test_migrate_refuses_to_commit_the_callers_open_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pending migration must not commit the caller's half-done writes as a side effect."""
+    meals.db.get_db(tmp_path / "pantry.sqlite").close()
+    latest = len(meals.db.MIGRATIONS)
+    monkeypatch.setattr(meals.db, "MIGRATIONS", (*meals.db.MIGRATIONS, PROBE))
+
+    with closing(sqlite3.connect(tmp_path / "pantry.sqlite")) as conn:
+        _insert(conn, "pantry_item", name="tahini")
+        assert conn.in_transaction
+        try:
+            meals.db.migrate(conn)
+        except Exception:  # the type is unspecified; what matters is the caller's transaction
+            pass
+        else:
+            pytest.fail("migrate() ran a pending migration inside the caller's transaction")
+
+        conn.rollback()
+        assert _column(conn, "SELECT name FROM pantry_item") == []
+        assert _version(conn) == latest
+        assert "probe" not in _tables(conn)
+
+
+def test_migration_that_ends_its_own_transaction_surfaces_the_real_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The failing statement's error, not "cannot rollback - no transaction is active"."""
+    meals.db.get_db(tmp_path / "pantry.sqlite").close()
+    latest = len(meals.db.MIGRATIONS)
+    broken = ("CREATE TABLE probe (x INTEGER)", "COMMIT", "THIS IS NOT SQL")
+    monkeypatch.setattr(meals.db, "MIGRATIONS", (*meals.db.MIGRATIONS, broken))
+
+    with pytest.raises(sqlite3.OperationalError, match="syntax error"):
+        meals.db.get_db(tmp_path / "pantry.sqlite").close()
+    with closing(sqlite3.connect(tmp_path / "pantry.sqlite")) as check:
+        assert _version(check) == latest
 
 
 def test_first_open_waits_out_a_writer_holding_a_fresh_file(tmp_path: Path) -> None:
