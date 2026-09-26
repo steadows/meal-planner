@@ -27,3 +27,6 @@ Besides contracts, the bot lane waits on the runtime-model design that [[wiring]
 
 ## Security note from Lane 0 /steadows-verify (via [[pm]], 2026-09-26)
 `ClaudeRunnerError.raw_output` can contain fetched web-page text. It's untrusted: when surfacing an error to Steve in Telegram, send it as plain text (no `parse_mode`), truncated, and never render it as markdown or HTML.
+
+## Exactly-once for pantry replies is yours (from [[pantry]] PR 2, via [[pm]], 2026-09-26)
+A **replayed** "still good" that arrives after an "out of X" flip restores the item to `have`. Pantry treats "still good" as a state-setting command, not an idempotent no-op. Exactly-once delivery belongs to the bot: dedupe on Telegram `update_id` (persisted, so a restart doesn't replay) before dispatching any pantry intent. Pin it with a test that replays an update.
