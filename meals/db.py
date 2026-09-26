@@ -62,6 +62,14 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
             rated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
         )""",
     ),
+    (
+        # "Still good" / "plenty": ask again on or after this date (Pantry Protocol, ask date).
+        "ALTER TABLE pantry_item ADD COLUMN next_ask_on DATE",
+        # One purchase per item per day: a repeat is a replayed "ordered" message. Keyed without
+        # `source` on purpose (seam map contracts-3-followup). Fails the whole migration, rather
+        # than deleting history, if duplicates already exist.
+        "CREATE UNIQUE INDEX purchase_log_item_day ON purchase_log (item_id, purchased_on)",
+    ),
 )
 
 
