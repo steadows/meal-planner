@@ -85,6 +85,7 @@ def test_an_imported_recipe_comes_back_with_parsed_ingredients(
 ) -> None:
     recipe = mealie.get_recipe(imported)
 
+    assert recipe.mealie_slug == imported
     assert recipe.name
     assert recipe.ingredients
     assert any(ingredient.qty is not None for ingredient in recipe.ingredients)

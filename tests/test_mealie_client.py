@@ -239,6 +239,16 @@ def test_get_recipe_maps_mealie_fields_onto_recipe_option(
     assert recipe.batch_ok is True
     assert recipe.fit_note == ""
     assert recipe.steps == ("Slice.", "Roast.")
+    assert recipe.mealie_slug == "fajitas"
+
+
+# The MealieClient contract sets mealie_slug to the slug asked for, not the body's own "slug".
+def test_get_recipe_sets_mealie_slug_to_the_slug_asked_for(
+    client: HttpMealieClient, stub: MealieStub
+) -> None:
+    stub.recipes["fajitas"] = recipe_json("fajitas") | {"slug": "something-else"}
+
+    assert client.get_recipe("fajitas").mealie_slug == "fajitas"
 
 
 def test_get_recipe_fills_gaps_for_a_hand_entered_recipe(
@@ -254,6 +264,7 @@ def test_get_recipe_fills_gaps_for_a_hand_entered_recipe(
     assert recipe.servings is None  # a yield counts cookies or loaves, not people
     assert recipe.hands_on_min is None
     assert recipe.batch_ok is False
+    assert recipe.mealie_slug == "mac"  # no URL to re-import from, so the slug is the only way back
 
 
 # v3.28.0 sends prepTime as free text (its scraper writes "1 hour 30 minutes"), not seconds.
@@ -695,9 +706,10 @@ def test_a_slug_may_mix_case_digits_underscores_and_hyphens(
 ) -> None:
     stub.recipes["Sheet_Pan-Fajitas-2"] = recipe_json("Sheet_Pan-Fajitas-2")
 
-    client.get_recipe("Sheet_Pan-Fajitas-2")
+    recipe = client.get_recipe("Sheet_Pan-Fajitas-2")
 
     assert [r.url.path for r in stub.requests] == ["/api/recipes/Sheet_Pan-Fajitas-2"]
+    assert recipe.mealie_slug == "Sheet_Pan-Fajitas-2"  # echoed as asked, case and all
 
 
 TOKEN = "tok-123"
