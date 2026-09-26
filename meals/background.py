@@ -14,6 +14,7 @@ from collections.abc import Callable
 from typing import TypeVar
 
 from telegram import Message, Update
+from telegram.constants import MessageLimit
 from telegram.ext import ContextTypes
 
 logger = logging.getLogger(__name__)
@@ -53,7 +54,10 @@ async def start(
         return
     if _in_flight >= MAX_IN_FLIGHT:
         logger.info("refused a request: %d already in flight", _in_flight)
-        await _reply(message, BUSY_TEXT)
+        try:
+            await _reply(message, BUSY_TEXT)
+        except Exception:
+            logger.exception("couldn't send the busy reply")
         return
     _in_flight += 1  # no await since the check, so two handlers can't both take the last slot
     context.application.create_task(
@@ -89,7 +93,13 @@ async def _run(
 
 
 async def _reply(message: Message, text: str) -> None:
-    await message.reply_text(text, parse_mode=None)  # plain text: replies carry web/Claude text
+    """Send `text` as plain text (replies carry web and Claude text), split at Telegram's limit.
+
+    Empty text is still sent, so Telegram rejects it and the caller's error path reports it.
+    """
+    size = MessageLimit.MAX_TEXT_LENGTH
+    for chunk in [text[i : i + size] for i in range(0, len(text), size)] or [text]:
+        await message.reply_text(chunk, parse_mode=None)
 
 
 def _release(_future: object = None) -> None:
@@ -99,7 +109,7 @@ def _release(_future: object = None) -> None:
 
 def _log_abandoned(future: asyncio.Future[T], elapsed_s: float) -> None:
     error = None if future.cancelled() else future.exception()
-    logger.info("abandoned work ended after %.0fs; its slot is free", elapsed_s, exc_info=error)
+    logger.warning("abandoned work ended after %.0fs; its slot is free", elapsed_s, exc_info=error)
 
 
 def _one_line(exc: Exception) -> str:
