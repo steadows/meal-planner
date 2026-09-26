@@ -92,7 +92,7 @@ name = "Module layering (PLAN.md, Definition of done)"
 type = "layers"
 containers = ["meals"]
 layers = [
-    "(bot) | (jobs) | (mcp_tools) | (__main__)",
+    "(bot) | (jobs) | (mcp_tools) | (__main__) | (seed_loader)",
     "(pantry) | (mealie_client) | (search) | (planner) | (cart)",
     "(db) | (claude_runner) | (rollup)",
     "contracts | (config)",

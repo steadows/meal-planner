@@ -1,13 +1,16 @@
 import subprocess
 import sys
-from datetime import date
+from collections.abc import Callable
+from datetime import date, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic import BaseModel, ValidationError
 
 from meals.contracts import (
     CartItem,
+    CartList,
     CartReport,
     ClaudeRunnerError,
     Components,
@@ -211,7 +214,10 @@ def test_fake_mealie_lists_and_gets_by_slug(
 ) -> None:
     assert fake_mealie.list_by_tag("rotation") == ("sheet-pan-chicken-fajitas",)
     assert fake_mealie.list_by_tag("no-such-tag") == ()
-    assert fake_mealie.get_recipe("sheet-pan-chicken-fajitas") == sample_recipe
+    # A recipe that lives in Mealie carries its slug, so a pick can be published without re-importing.
+    assert fake_mealie.get_recipe("sheet-pan-chicken-fajitas") == sample_recipe.model_copy(
+        update={"mealie_slug": "sheet-pan-chicken-fajitas"}
+    )
     with pytest.raises(KeyError):
         fake_mealie.get_recipe("no-such-recipe")
 
@@ -219,7 +225,7 @@ def test_fake_mealie_lists_and_gets_by_slug(
 def test_fake_mealie_imports_only_known_urls(sample_recipe: RecipeOption) -> None:
     mealie = FakeMealieClient(importable={"https://example.com/r": sample_recipe})
     slug = mealie.import_url("https://example.com/r")
-    assert mealie.get_recipe(slug) == sample_recipe
+    assert mealie.get_recipe(slug) == sample_recipe.model_copy(update={"mealie_slug": slug})
     with pytest.raises(ValueError):
         mealie.import_url("https://example.com/unscrapeable")
 
@@ -284,3 +290,260 @@ def test_fake_pantry_does_not_mutate_the_items_it_was_given(
 ) -> None:
     fake_pantry.flip_status("rice", "buy_next_time")
     assert next(i for i in sample_pantry_items if i.name == "rice").status == "have"
+
+
+def _staple(id_: int, name: str, **fields: object) -> PantryItem:
+    return PantryItem.model_validate({"id": id_, "name": name, "category": "staple", **fields})
+
+
+def _due(pantry: FakePantry, on: date) -> list[str]:
+    return [item.name for item in pantry.staples_due(on)]
+
+
+def _days(n: int) -> timedelta:
+    return timedelta(days=n)
+
+
+def test_fake_pantry_asks_once_90_percent_of_the_interval_has_passed(today: date) -> None:
+    # ceil(0.9 * 11) = 10 days after the last purchase.
+    pantry = FakePantry(
+        (
+            _staple(1, "cumin", typical_interval_days=11, last_purchased=today - _days(10)),
+            _staple(2, "paprika", typical_interval_days=11, last_purchased=today - _days(9)),
+        )
+    )
+    assert _due(pantry, today) == ["cumin"]
+
+
+def test_fake_pantry_next_ask_on_replaces_the_interval_rule(today: date) -> None:
+    pantry = FakePantry(
+        (
+            # Overdue by its interval, but postponed to tomorrow.
+            _staple(
+                1,
+                "tahini",
+                typical_interval_days=60,
+                last_purchased=today - _days(120),
+                next_ask_on=today + _days(1),
+            ),
+            # Not due by its interval, but its ask date is today.
+            _staple(
+                2,
+                "rice",
+                typical_interval_days=56,
+                last_purchased=today - _days(1),
+                next_ask_on=today,
+            ),
+            # Already owned, never bought through the system: a bootstrap reminder only.
+            _staple(3, "cumin", next_ask_on=today - _days(3)),
+        )
+    )
+    assert _due(pantry, today) == ["cumin", "rice"]
+
+
+def test_fake_pantry_flag_overrides_a_later_next_ask_on(today: date) -> None:
+    pantry = FakePantry(
+        (_staple(1, "butter", status="buy_next_time", next_ask_on=today + _days(30)),)
+    )
+    assert _due(pantry, today) == ["butter"]
+
+
+def test_fake_pantry_staples_due_order(today: date) -> None:
+    """Flagged first (no ask date last among them), then days past the ask date, then name."""
+    pantry = FakePantry(
+        (
+            _staple(1, "Zaatar", next_ask_on=today - _days(2)),
+            _staple(2, "allspice", next_ask_on=today - _days(2)),
+            _staple(3, "salt", next_ask_on=today - _days(9)),
+            _staple(4, "honey", status="buy_next_time"),
+            _staple(5, "butter", status="buy_next_time", next_ask_on=today + _days(14)),
+            _staple(6, "oats", status="buy_next_time", next_ask_on=today - _days(1)),
+        )
+    )
+    assert _due(pantry, today) == ["oats", "butter", "honey", "salt", "allspice", "Zaatar"]
+
+
+def test_fake_pantry_gets_items_by_name_or_alias(fake_pantry: FakePantry) -> None:
+    for query in ("olive oil", " EVOO ", "Olive Oil"):
+        item = fake_pantry.get_item(query)
+        assert item is not None
+        assert item.id == 1
+
+
+def test_fake_pantry_matching_casefolds() -> None:
+    pantry = FakePantry((PantryItem(id=1, name="Weißwurst", category="perishable"),))
+    item = pantry.get_item("WEISSWURST")
+    assert item is not None
+    assert item.id == 1
+
+
+# Every by-name method, so none of them drifts to its own matching rule.
+BY_NAME: dict[str, Callable[[FakePantry, str, date], PantryItem | None]] = {
+    "get_item": lambda pantry, name, on: pantry.get_item(name),
+    "flip_status": lambda pantry, name, on: pantry.flip_status(name, "buy_next_time"),
+    "confirm_stocked": lambda pantry, name, on: pantry.confirm_stocked(name, on),
+    "log_purchase": lambda pantry, name, on: pantry.log_purchase(name, on),
+}
+
+
+@pytest.mark.parametrize("method", list(BY_NAME))
+def test_fake_pantry_exact_name_beats_another_items_alias(method: str, today: date) -> None:
+    pantry = FakePantry((_staple(1, "brown rice", aliases=("rice",)), _staple(2, "rice")))
+    item = BY_NAME[method](pantry, "RICE", today)
+    assert item is not None
+    assert item.id == 2
+
+
+@pytest.mark.parametrize("method", list(BY_NAME))
+def test_fake_pantry_unknown_name_returns_none_and_writes_nothing(
+    method: str, fake_pantry: FakePantry, today: date
+) -> None:
+    before = fake_pantry.list_items()
+    assert BY_NAME[method](fake_pantry, "saffron", today) is None
+    assert fake_pantry.list_items() == before
+
+
+def test_fake_pantry_lists_every_item_in_id_order(
+    sample_pantry_items: tuple[PantryItem, ...],
+) -> None:
+    assert FakePantry(reversed(sample_pantry_items)).list_items() == sample_pantry_items
+
+
+def test_fake_pantry_still_good_asks_again_in_a_week(today: date) -> None:
+    last = today - _days(30)
+    pantry = FakePantry(
+        (
+            _staple(
+                1, "butter", status="buy_next_time", typical_interval_days=21, last_purchased=last
+            ),
+        )
+    )
+
+    item = pantry.confirm_stocked("Butter", today)
+
+    assert item is not None
+    assert (item.status, item.next_ask_on, item.last_purchased) == (
+        "have",
+        today + _days(7),
+        last,
+    )
+    assert pantry.get_item("butter") == item
+    assert _due(pantry, today + _days(6)) == []
+    assert _due(pantry, today + _days(7)) == ["butter"]
+    assert pantry.confirm_stocked("butter", today) == item  # a replay changes nothing
+
+
+@pytest.mark.parametrize(("interval", "wait"), [(42, 42), (None, 7)])
+def test_fake_pantry_plenty_pushes_the_ask_back_one_interval(
+    interval: int | None, wait: int, today: date
+) -> None:
+    pantry = FakePantry((_staple(1, "rice", typical_interval_days=interval),))
+
+    item = pantry.confirm_stocked("rice", today, plenty=True)
+
+    assert item is not None
+    assert (item.status, item.next_ask_on) == ("have", today + _days(wait))
+    assert pantry.get_item("rice") == item
+
+
+def test_fake_pantry_logging_the_latest_purchase_resets_the_item(today: date) -> None:
+    pantry = FakePantry(
+        (
+            _staple(
+                1,
+                "olive oil",
+                status="buy_next_time",
+                typical_interval_days=70,
+                last_purchased=today - _days(65),
+                next_ask_on=today + _days(3),
+            ),
+        )
+    )
+
+    item = pantry.log_purchase("olive oil", today, qty=2.5, price_cents=0)
+
+    assert item is not None
+    assert (item.last_purchased, item.status, item.next_ask_on) == (today, "have", None)
+    assert pantry.get_item("olive oil") == item
+
+
+def test_fake_pantry_back_dated_purchase_only_adds_history(today: date) -> None:
+    before = _staple(
+        1,
+        "olive oil",
+        status="buy_next_time",
+        typical_interval_days=70,
+        last_purchased=today,
+        next_ask_on=today + _days(3),
+    )
+    pantry = FakePantry((before,))
+
+    item = pantry.log_purchase("olive oil", today - _days(70))
+
+    after = pantry.get_item("olive oil")
+    assert item == after
+    assert after is not None
+    assert (after.last_purchased, after.status, after.next_ask_on) == (
+        today,
+        "buy_next_time",
+        today + _days(3),
+    )
+
+
+def test_fake_pantry_duplicate_purchase_makes_no_writes(today: date) -> None:
+    pantry = FakePantry((_staple(1, "rice", typical_interval_days=56),))
+    pantry.log_purchase("rice", today)
+    postponed = pantry.confirm_stocked("rice", today)
+
+    # A replayed "ordered" message for the same day must not clear the postponement.
+    assert pantry.log_purchase("RICE", today) == postponed
+    assert pantry.get_item("rice") == postponed
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"qty": 0},
+        {"qty": -1},
+        {"qty": float("nan")},
+        {"qty": float("inf")},
+        {"price_cents": -1},
+    ],
+)
+def test_fake_pantry_rejects_bad_purchase_values_before_writing(
+    bad: dict[str, Any], fake_pantry: FakePantry, today: date
+) -> None:
+    before = fake_pantry.list_items()
+    with pytest.raises(ValueError):
+        fake_pantry.log_purchase("rice", today, **bad)
+    with pytest.raises(ValueError):  # arguments are checked before the name lookup
+        fake_pantry.log_purchase("saffron", today, **bad)
+    assert fake_pantry.list_items() == before
+
+
+# ── week_start is the Sunday of the cook ─────────────────────────────────────
+
+WEEK_START_OWNERS: dict[type[BaseModel], dict[str, object]] = {
+    WeekProposal: _proposal().model_dump(),
+    CartList: {"items": ()},
+}
+
+
+@pytest.mark.parametrize("model", list(WEEK_START_OWNERS), ids=lambda m: m.__name__)
+def test_week_start_accepts_a_sunday(model: type[BaseModel]) -> None:
+    sunday = date(2026, 9, 27)
+    built = model.model_validate(WEEK_START_OWNERS[model] | {"week_start": sunday})
+    assert built.model_dump()["week_start"] == sunday
+
+
+@pytest.mark.parametrize("model", list(WEEK_START_OWNERS), ids=lambda m: m.__name__)
+@pytest.mark.parametrize(
+    ("day", "weekday"), [(date(2026, 9, 26), "Saturday"), (date(2026, 9, 28), "Monday")]
+)
+def test_week_start_rejects_other_weekdays_and_names_the_date(
+    model: type[BaseModel], day: date, weekday: str
+) -> None:
+    with pytest.raises(
+        ValidationError, match=rf"week_start[\s\S]*{day.isoformat()} is a {weekday}"
+    ):
+        model.model_validate(WEEK_START_OWNERS[model] | {"week_start": day})

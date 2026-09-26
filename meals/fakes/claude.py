@@ -5,7 +5,7 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
-from meals.contracts import ClaudeRunnerError
+from meals.contracts import ClaudeRunnerError, validate_claude_output
 
 Response = dict[str, Any] | list[Any] | BaseModel | ClaudeRunnerError
 
@@ -45,7 +45,7 @@ class FakeClaudeRunner:
         if schema is None:
             return payload
         try:
-            return schema.model_validate(payload)
+            return validate_claude_output(schema, payload)
         except ValidationError as exc:
             raise ClaudeRunnerError(
                 f"output failed {schema.__name__} validation", raw_output=str(payload)
