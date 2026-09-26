@@ -165,6 +165,9 @@ def test_migration_3_adds_job_run_and_changes_nothing_else(
 ) -> None:
     """ADR-0001 §`job_run` and Ownership → contracts: the ADR's DDL, no FK, and no other change
     (no new columns, no weekly_plan change, no extra index)."""
+    # The ADR's three items only, so no migration 4 rides along. Fails on purpose when a later,
+    # requested migration 4 lands: update it then.
+    assert len(meals.db.MIGRATIONS) == 3
     monkeypatch.setattr(meals.db, "MIGRATIONS", meals.db.MIGRATIONS[:3])
     expected_schema = PLAN_SCHEMA | {
         "pantry_item": PLAN_SCHEMA["pantry_item"] | {"next_ask_on": ("DATE", 0, None, 0)},
@@ -223,9 +226,11 @@ REJECTED = [
     ("meal_rating", "rating", 2),
     ("pantry_item", "typical_interval_days", 0),
     ("pantry_item", "typical_interval_days", -7),
-    # Claim states from the ADR, not outcomes: "running" is NULL, and "finished" isn't an outcome.
+    # The ADR's claim states aren't outcomes ("running" is NULL), and nor is anything else.
     ("job_run", "outcome", "running"),
     ("job_run", "outcome", "finished"),
+    ("job_run", "outcome", "claimed"),
+    ("job_run", "outcome", "cancelled"),
 ]
 
 

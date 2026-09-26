@@ -55,7 +55,7 @@ def test_layers_contract_has_adr_0001s_tiers() -> None:
     the tiers themselves are pinned here."""
     config = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     contracts = config["tool"]["importlinter"]["contracts"]
-    (layering,) = [c for c in contracts if c["name"].startswith("Module layering")]
+    (layering,) = [c for c in contracts if c["type"] == "layers"]
 
     assert [_tier(layer) for layer in layering["layers"]] == [
         _tier(layer) for layer in ADR_0001_LAYERS

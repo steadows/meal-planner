@@ -397,7 +397,9 @@ def test_timeout_raises_without_retry_and_kills_the_process_group(
     started = time.monotonic()
     try:
         with pytest.raises(ClaudeRunnerError):
-            claude_runner.run(PROMPT, timeout=1)
+            # Not 1s: under load the fake can take that long to start, and a claude killed before
+            # it records its start leaves no call to check. Still well short of the 20s sleep.
+            claude_runner.run(PROMPT, timeout=3)
         elapsed = time.monotonic() - started
 
         assert elapsed < 10
@@ -424,7 +426,9 @@ def test_timeout_does_not_wait_for_a_grandchild_that_left_the_group(
     started = time.monotonic()
     try:
         with pytest.raises(ClaudeRunnerError) as caught:
-            claude_runner.run(PROMPT, timeout=1)
+            # Not 1s: under load the fake can take that long to start and write its early output.
+            # Still well short of the 30s sleep.
+            claude_runner.run(PROMPT, timeout=3)
 
         assert time.monotonic() - started < 20
         assert "marker-partial" in caught.value.raw_output
@@ -472,7 +476,9 @@ def _interrupting(
     ) -> tuple[str, str]:
         processes.append(process)
         with contextlib.suppress(subprocess.TimeoutExpired):
-            communicate(process, input, timeout=1)  # claude starts, as in the timeout tests
+            # claude starts, as in the timeout tests. Not 1s: under load the fake can take that
+            # long to start, and a claude killed before it records its start leaves no call.
+            communicate(process, input, timeout=3)
         raise interrupt
 
     return interrupted
@@ -1071,8 +1077,8 @@ def test_claude_output_revalidates_a_nested_instance_carrying_a_slug() -> None:
     """pydantic keeps a model instance as is by default, so one the Mealie client built (as
     get_recipe does, with model_validate under TRUSTED) must not carry its slug through Claude's
     output."""
-    from_mealie = RecipeOption.model_validate(RECIPE).model_copy(
-        update={"mealie_slug": "sheet-pan-gnocchi"}
+    from_mealie = RecipeOption.model_validate(
+        RECIPE | {"mealie_slug": "sheet-pan-gnocchi"}, context={contracts.TRUSTED: True}
     )
 
     with pytest.raises(ValidationError):
