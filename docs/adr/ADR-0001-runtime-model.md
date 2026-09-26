@@ -212,6 +212,9 @@ is no queue, no outbox table, and no second always-on process.
 
 ## Alternatives Considered
 
+The options page Steve chose from (Stage 4) is kept as `docs/adr/ADR-0001-options.html`. Where the two differ, this
+ADR wins.
+
 | Option | Pros | Cons | Rejected because |
 |---|---|---|---|
 | A. Everything in the bot (PTB JobQueue + in-bot tasks) | One process; simplest to stand up | JobQueue drops missed jobs and forgets schedules on restart; a bot restart kills an in-flight cart fill | Rebuilds sleep/wake catch-up by hand; ties Saturday to bot health |
