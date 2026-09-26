@@ -538,6 +538,44 @@ def test_exception_mid_run_still_kills_the_child_when_killpg_is_refused(
                 _kill(call["grandchild"])
 
 
+def test_a_second_interrupt_during_the_kill_still_finishes_it_and_keeps_the_first(
+    fake_claude_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second Ctrl-C while the runner kills claude must not abandon the kill (claude would run
+    on, holding the slot) or replace the caller's exception."""
+    killpg = os.killpg  # the real one: the patch replaces it on the shared os module
+    killpg_calls: list[int] = []
+
+    def interrupt_the_first_killpg(pgid: int, sig: int) -> None:
+        killpg_calls.append(pgid)
+        if len(killpg_calls) == 1:
+            raise KeyboardInterrupt("second")
+        killpg(pgid, sig)
+
+    monkeypatch.setattr("meals.claude_runner.os.killpg", interrupt_the_first_killpg)
+    _script(fake_claude_home, {"sleep": 20, "grandchild": True, **OK})
+    interrupt = KeyboardInterrupt("marker-ctrl-c")
+    processes: list[subprocess.Popen[str]] = []
+    interrupted = _interrupting(subprocess.Popen.communicate, interrupt, processes)
+    monkeypatch.setattr(subprocess.Popen, "communicate", interrupted)
+    try:
+        with pytest.raises(KeyboardInterrupt) as caught:
+            claude_runner.run(PROMPT, timeout=RUN_TIMEOUT)
+
+        assert killpg_calls, "the second interrupt never fired: _kill_tree no longer calls killpg"
+        assert caught.value is interrupt
+        (call,) = _calls(fake_claude_home)
+        assert not _alive(call["pid"])
+        (process,) = processes
+        pipes = (process.stdin, process.stdout, process.stderr)
+        assert [pipe is not None and pipe.closed for pipe in pipes] == [True, True, True]
+    finally:
+        for call in _calls(fake_claude_home):
+            _kill(call["pid"])
+            if call["grandchild"] is not None:
+                _kill(call["grandchild"])
+
+
 # ── the cross-process slot cap ───────────────────────────────────────────────
 
 DRIVER = (
