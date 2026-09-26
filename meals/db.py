@@ -73,7 +73,8 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
     (
         # ADR-0001 (runtime model): one claim per scheduled job per week. plan_state owns every
         # read and write. `outcome` is NULL while the job runs; `detail` is never rewritten once
-        # a result commits.
+        # a result commits. `started_at` defaults to SQLite's CURRENT_TIMESTAMP, which is UTC
+        # text 'YYYY-MM-DD HH:MM:SS': compare it, and write any reset, in that form, not local time.
         """CREATE TABLE job_run (
             job          TEXT NOT NULL,
             week_start   DATE NOT NULL,

@@ -100,9 +100,13 @@ def run(
     pre-approved; `chrome=True` runs get `--chrome` and no built-in tools. The run holds one of
     settings.claude_max_concurrent cross-process slots (settings.claude_lock_dir) throughout.
 
-    `hold_fds` are open fds each claude child inherits alongside its slot, so a lock the caller
-    holds through one (a job lock, cart's Chrome lock) lives as long as claude does, even if the
-    caller dies first (ADR-0001, Orphaned Chrome child). A closed fd stops claude starting.
+    `hold_fds` are open fds (3 and up) each claude child inherits alongside its slot, so a
+    `flock` lock the caller holds through one (a job lock, cart's Chrome lock) stays held while
+    claude, or anything it started, still has the fd, even if the caller dies first (ADR-0001,
+    Orphaned Chrome child). Only flock works: fcntl/lockf record locks belong to the caller's
+    process and die with it. Release one by closing your fd, never with LOCK_UN, which would
+    unlock it for claude too. An fd below 3, or one that isn't open, raises ValueError before a
+    slot is taken or claude starts.
 
     Raises ClaudeRunnerError (with raw_output) on a non-zero exit, an is_error result, output
     that fails parsing or validation, or a timeout. A plain run retries once on anything except a
@@ -112,6 +116,7 @@ def run(
     Known gaps: Ctrl-C inside `Popen()` itself, before it returns, can't reach the child; and on
     macOS, if killpg is refused (zombie leader), only the leader is reaped.
     """
+    _check_hold_fds(hold_fds)
     command = _command(schema, chrome)
     attempts = 1 if chrome else MAX_ATTEMPTS
     with _slot() as slot_fd:
@@ -164,6 +169,19 @@ def _command(schema: type[BaseModel] | None, chrome: bool) -> list[str]:
     if schema is not None:
         command += ["--json-schema", json.dumps(schema.model_json_schema())]
     return command
+
+
+def _check_hold_fds(hold_fds: tuple[int, ...]) -> None:
+    """Refuse an fd the child can't hold. Popen silently replaces fds 0-2 with the child's stdio,
+    which would leave claude running unlocked; a closed one would fail late, as a retried "could
+    not start" that blames the claude binary."""
+    for fd in hold_fds:
+        if fd < 3:
+            raise ValueError(f"hold_fds: fd {fd} is one of the child's stdin, stdout or stderr")
+        try:
+            os.fstat(fd)
+        except OSError as exc:
+            raise ValueError(f"hold_fds: fd {fd} isn't open") from exc
 
 
 def _child_env() -> dict[str, str]:
