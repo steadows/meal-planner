@@ -6,7 +6,7 @@ Read this, then `docs/AUTONOMOUS_WORK.md` (how a lane runs its build loop: gates
 
 - The design is in `docs/PLAN.md`. The sections you need most: **Implementation plan** (code layout, shared contracts, definition of done) and **Concurrency lanes** (who owns what, what waits on what).
 - This repo is coordinated with agent-brain (`.brain/`). Follow the `navigation-standards` skill at session start. Your lane is resolved from your branch: `feat/<lane>`.
-- Your presence note is `.brain/presence/<lane>.md`. Keep `status`, `phase` and `touches` honest. Set `status: done` when your lane has merged — that is what unblocks the lanes waiting on you.
+- Your presence note is `~/meal-planner/.brain/presence/<lane>.md`, **in the main checkout**. The brain reads and writes `.brain/` only there. Your worktree's own `.brain/` copy is stale, and editing it does nothing. The same goes for `connections/` and `journal/`. Keep `status`, `phase` and `touches` honest. Set `status: done` when your lane has merged — that is what unblocks the lanes waiting on you.
 
 ## Lane rules
 
