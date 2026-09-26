@@ -32,3 +32,9 @@ Today the Meijer boundary is `--tools ""` (no web tools) plus a validated `meije
 
 ## Cart-path gate input from ADR-0001 (via [[pm]], 2026-09-26)
 Decide in the cart-path gate whether `cart.fill` **sets quantities to target**, which would make "retry cart" safe over a partly filled Meijer cart. Until then, retry requires emptying the cart first (ADR-0001 accepted risk #16). The runner API you build against is `fill(cart_list, hold_fds=())`; the locks are held by the Chrome child, so a crash can't double the cart.
+
+## `hold_fds` rules you must follow (from [[contracts]] PR 2 review, verified by experiment on this Mac, via [[pm]], 2026-09-26)
+- Use **`flock`** locks only. A `lockf`/`fcntl` POSIX record lock dies with the caller, so the child can't hold it.
+- Release by **closing** the fd, **never `LOCK_UN`**, which unlocks claude's inherited copy too.
+- fds 0–2, negative fds and closed fds are rejected up front with `ValueError`, before a slot is taken.
+- `job_run.started_at` is UTC text.

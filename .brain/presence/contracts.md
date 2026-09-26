@@ -2,16 +2,16 @@
 type: presence
 agent: contracts
 feature: "Shared contracts: config, db schema + migrations, pydantic contracts, claude_runner, fakes"
-status: idle
-phase: "PR #13 merged (1cc239b, 2026-09-26): pantry next_ask_on migration 2 + Protocol, mealie_slug default-deny (TRUSTED), SundayDate, runner kill-on-any-exception, load_prompt CWE-22. Next (pm-scheduled, ADR-0001 accepted): job_run migration 3 + run(hold_fds) + layer tiers (__main__ > bot|jobs|mcp_tools|seed_loader). Then confirm_stocked Protocol one-liner after pantry PR 2"
+status: active
+phase: "Two PRs (pm window, AUTONOMOUS_WORK). PR 1 #18 feat/contracts (MealieUnavailable + FakeMealie unavailable= + MEALS_LIVE_CLAUDE gate): all gates done, green and mergeable, waiting on Steve. PR 2 feat/contracts-adr (worktree ~/meal-planner-contracts-adr, from main): job_run migration 3 + run(hold_fds) + layer tiers: RED (test-writer + 1 watchdog pass) and GREEN done, in /simplify"
 owns_branches: ["contracts"]
 plan: docs/PLAN.md (Implementation plan, Concurrency lanes)
 tracker_epic: none
 current_worktree: /Users/stevemeadows/meal-planner-contracts
 current_branch: feat/contracts
 current_ticket: none
-touches: [docs/PLAN.md, meals/claude_runner.py, meals/contracts.py, meals/db.py, meals/fakes/claude.py, meals/fakes/mealie.py, meals/fakes/pantry.py, pyproject.toml, tests/test_claude_runner.py, tests/test_contracts.py, tests/test_db.py]
-updated: 2026-09-26T14:57:52Z
+touches: [meals/contracts.py, meals/fakes/mealie.py, meals/fakes/claude.py, meals/claude_runner.py, meals/db.py, pyproject.toml, docs/PLAN.md, tests/conftest.py, tests/test_claude_runner.py, tests/test_contracts.py, tests/test_db.py]
+updated: 2026-09-26T18:56:05Z
 ---
 Lane 0 — everything else builds on this. Deliver the database schema from PLAN.md (Pantry rules → Table schema), the pydantic models (WeekProposal, RecipeOption, Intent, CartList, CartReport), `claude_runner.run()` wrapping `claude -p` / `claude --chrome -p` with timeouts and JSON validation, and a fake for every contract in `meals/fakes/`. Done when fakes pass and one real `claude -p` call returns valid JSON. Merge first; then set status: done to unblock [[contracts-pantry-waiting-on]], [[contracts-mealie-waiting-on]], [[contracts-search-waiting-on]], [[bot-contracts-waiting-on]] and [[cart-contracts-waiting-on]]. Sole owner of the contracts rule: [[bot-cart-contracts-mealie-pantry-search-wiring-shared-rule]].
 
