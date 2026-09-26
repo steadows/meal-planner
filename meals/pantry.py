@@ -314,16 +314,21 @@ class SqlitePantry:
             item = self.get_item(name)
             if item is None:
                 return None
-            logged = self._conn.execute(
-                "INSERT INTO purchase_log (item_id, purchased_on, qty, price_cents) "
-                "VALUES (?, ?, ?, ?) ON CONFLICT (item_id, purchased_on) DO NOTHING",
-                (item.id, on.isoformat(), qty, price_cents),
-            ).rowcount
-            if not logged:
+            # Read, not INSERT's rowcount: that isn't reliable (PRAGMA count_changes zeroes it).
+            already = self._conn.execute(
+                "SELECT 1 FROM purchase_log WHERE item_id = ? AND purchased_on = ?",
+                (item.id, on.isoformat()),
+            ).fetchone()
+            if already:
                 logger.info(
                     "pantry: %s purchase on %s already logged; nothing to do", item.name, on
                 )
                 return item
+            self._conn.execute(
+                "INSERT INTO purchase_log (item_id, purchased_on, qty, price_cents) "
+                "VALUES (?, ?, ?, ?)",
+                (item.id, on.isoformat(), qty, price_cents),
+            )
             latest = item.last_purchased is None or on >= item.last_purchased
             learned = (
                 _median_gap(self._purchase_dates(item.id)) if item.category == "staple" else None
