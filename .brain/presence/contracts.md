@@ -2,8 +2,8 @@
 type: presence
 agent: contracts
 feature: "Shared contracts: config, db schema + migrations, pydantic contracts, claude_runner, fakes"
-status: active
-phase: PR #6 CLEAN — all ultrareview findings converged (7a8717c), CI green on #7; awaiting Steve's merge (then status: done)
+status: done
+phase: merged — PR #6 rebase-merged to main (7fd9f09, 2026-09-26); next contracts PR (migration 2 job_run + run(hold_fds)) when wiring sends the final DDL
 owns_branches: ["contracts"]
 plan: docs/PLAN.md (Implementation plan, Concurrency lanes)
 tracker_epic: none
@@ -11,7 +11,7 @@ current_worktree: /Users/stevemeadows/meal-planner-contracts
 current_branch: feat/contracts
 current_ticket: none
 touches: [meals/__init__.py, meals/config.py, meals/db.py, meals/contracts.py, meals/claude_runner.py, meals/fakes/, pyproject.toml, uv.lock, tests/conftest.py, tests/test_contracts.py, tests/test_config.py, tests/test_db.py, tests/test_claude_runner.py]
-updated: 2026-09-26T03:40:00Z
+updated: 2026-09-26T03:58:37Z
 ---
 Lane 0 — everything else builds on this. Deliver the database schema from PLAN.md (Pantry rules → Table schema), the pydantic models (WeekProposal, RecipeOption, Intent, CartList, CartReport), `claude_runner.run()` wrapping `claude -p` / `claude --chrome -p` with timeouts and JSON validation, and a fake for every contract in `meals/fakes/`. Done when fakes pass and one real `claude -p` call returns valid JSON. Merge first; then set status: done to unblock [[contracts-pantry-waiting-on]], [[contracts-mealie-waiting-on]], [[contracts-search-waiting-on]], [[bot-contracts-waiting-on]] and [[cart-contracts-waiting-on]]. Sole owner of the contracts rule: [[bot-cart-contracts-mealie-pantry-search-wiring-shared-rule]].
 

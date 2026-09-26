@@ -3,7 +3,7 @@ type: presence
 agent: pm
 feature: "PM/coordination lane: sweeps the vault, unblocks waiting-on edges, tracks merge order against PLAN.md, files follow-ups — owns no meals/ code"
 status: active
-phase: contracts PR #6 up (ultrareview in progress); CI PR #7 stacked on it and green; PR #5 (chrome-devtools MCP, coverage ignore, presence path) awaiting merge; branch protection after #7 lands on main
+phase: contracts merged (#6); CI on main (#7); chrome-devtools MCP (#5); branch protection on. Lanes unblocked: pantry, mealie, search (bot also waits on runtime ADR; cart on spike + ADR). Wiring running its runtime-model architect gate.
 owns_branches: ["pm"]
 plan: docs/PLAN.md (Concurrency lanes, Coordination with agent-brain)
 tracker_epic: none
@@ -11,7 +11,7 @@ current_worktree: /Users/stevemeadows/meal-planner-pm
 current_branch: feat/pm
 current_ticket: none
 touches: [docs/PLAN.md, CLAUDE.md, .claude/settings.json, .gitignore, .github/, .brain/presence/, .brain/connections/, .brain/journal/]
-updated: 2026-09-26T03:36:24Z
+updated: 2026-09-26T04:00:52Z
 ---
 Coordination lane, not a build lane — owns no files under `meals/`. Job: periodic sweep of `.brain/` (presence notes, `connections/`, journal) to catch stalled lanes, unresolved `waiting-on` edges, and merge-order violations against the diagram in PLAN.md (`Concurrency lanes`); message a stuck lane; keep this note's `status` honest. Comms: live `SendMessage` between lanes (Steve, 2026-09-25) — do NOT arm a watcher on `dm/pm/pending`.
 
@@ -58,4 +58,8 @@ Pre-checked on 2026-09-25: none of these files existed, `~/.gitconfig` had no in
 - **Installed skill:** the global `~/.claude/skills/navigation-standards` is the ERD-customized copy. It references `docs/AUTONOMOUS_WORK.md`, `.brain/pm/punch-list.md` and "87 research notes", none of which exist here, and its whoami folder-name fallback isn't in this engine. `.brain/research/` doesn't exist yet.
 
 ## Follow-ups (pm backlog)
-- [~] **Chrome DevTools MCP for e2e testing** (PR #5 open) (Steve, 2026-09-25, "when we get a chance"). It isn't configured anywhere yet: there's no global MCP server and no `.mcp.json`. Plan: [[pm]] adds a committed project `.mcp.json` with the `chrome-devtools` server so every worktree gets it. Main users: [[wiring]] (end-to-end Saturday dry run, M4) and [[mealie]] (checking a meal plan renders in Mealie). **Hard rule:** e2e uses an isolated, throwaway Chrome profile, never Steve's logged-in Meijer profile. Same prompt-injection and no-checkout boundary as the cart lane. Research the current server package and flags before adding it.
+- [x] **Chrome DevTools MCP for e2e testing** (PR #5, merged 2026-09-26) (Steve, 2026-09-25, "when we get a chance"). It isn't configured anywhere yet: there's no global MCP server and no `.mcp.json`. Plan: [[pm]] adds a committed project `.mcp.json` with the `chrome-devtools` server so every worktree gets it. Main users: [[wiring]] (end-to-end Saturday dry run, M4) and [[mealie]] (checking a meal plan renders in Mealie). **Hard rule:** e2e uses an isolated, throwaway Chrome profile, never Steve's logged-in Meijer profile. Same prompt-injection and no-checkout boundary as the cart lane. Research the current server package and flags before adding it.
+- [ ] **`/steadows-verify` for Lane 0's phase hasn't run** (the contracts lane wrapped without it). Run it on main; the architecture stage will flag the missing ARCHITECTURE.md, which is known (see AUTONOMOUS_WORK.md §0). Ask Steve who runs it.
+- [ ] **Contracts follow-up PR:** migration 2 `job_run` plus `run(hold_fds=())`, waiting on wiring's final DDL after its ADR is confirmed. See [[cart-contracts-wiring-runtime-adr-asks]].
+- [ ] **`feat/contracts` resync to main**: the rebase-merge changed the SHAs. Contracts asked Steve.
+- [ ] **Tooling note:** in one run, a test-writer subagent's scratch command included `rm -f /dev/null`. It failed harmlessly (not root) and `/dev/null` is intact. Contracts queued a feedback draft.
