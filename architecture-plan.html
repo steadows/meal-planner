@@ -235,8 +235,8 @@ tr:last-child td { border-bottom: 0; }
 "tasks": [
 {
 "id": "2.1",
-"text": "`/steadows-seams`: expect HIGH tier (flock, claim, CAS, redelivery)",
-"status": "todo",
+"text": "`/steadows-seams`: expect HIGH tier (flock, claim, CAS, redelivery). Done 2026-09-26: tier HIGH; seam map `.context/seams/P2.md` (decisions D1–D10)",
+"status": "done",
 "gate": true
 },
 {
@@ -257,7 +257,7 @@ tr:last-child td { border-bottom: 0; }
 },
 {
 "id": "2.5",
-"text": "`meals/__main__.py`: `bot`, `job <name> [--now] [--week] [--retry]`",
+"text": "`meals/__main__.py`: `job <name> [--now] [--week] [--retry]`, composing the merged modules; `cart_fill` refuses until cart merges. (`bot` moved to 4.1, seam map D1)",
 "status": "todo"
 },
 {
@@ -332,7 +332,7 @@ tr:last-child td { border-bottom: 0; }
 "tasks": [
 {
 "id": "4.1",
-"text": "Wire real planner, cart, Mealie, pantry into `jobs.py` (entry points import real modules)",
+"text": "Wire real planner, cart, Mealie, pantry into `jobs.py` (entry points import real modules); `__main__ bot` → `meals.bot.main()`; cart_fill's 20-min Chrome alarm + 'waiting behind another fill' hook with cart (P2 seam map D1, D9)",
 "status": "todo"
 },
 {
