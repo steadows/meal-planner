@@ -189,8 +189,12 @@ class TelegramSend:
         for attempt in range(1, SEND_ATTEMPTS + 1):
             began = self._clock()
             try:
-                asyncio.run(self._send(pending))
+                # Each attempt gets only what's left of the budget (seam map D25).
+                remaining = max(SEND_BUDGET_S - spent, 0.0)
+                asyncio.run(asyncio.wait_for(self._send(pending), timeout=remaining))
                 return
+            except TimeoutError:
+                raise DeliveryFailed("Telegram didn't answer within the send budget") from None
             except TelegramError as exc:
                 spent += self._clock() - began
                 wait = _retry_wait(exc, attempt)

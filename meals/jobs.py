@@ -45,6 +45,7 @@ ALARM_S = 45 * 60
 REASON_MAX_CHARS = 500
 NUDGE_AFTER = timedelta(hours=3)
 RECONCILE_DAYS = 6
+PICKUP_MINIMUM_CENTS = 3500  # Meijer pickup is free at $35 or more (PLAN.md, Costs)
 DEFAULT_CUSTODY: Custody = "wed+sat_sun"  # the first week's guess (seam map D2)
 
 _SAT, _SUN = 5, 6
@@ -261,8 +262,10 @@ def _effect_recorded(run: _Run) -> bool:
 def _start(run: _Run) -> None:
     """Claim the week, or with --retry reopen the interrupted or failed claim."""
     if run.retry:
-        prior = plan_state.reset_for_retry(run.conn, run.name, run.week)
+        prior = plan_state.get_run(run.conn, run.name, run.week)
+        # Logged before the reset clears it (ADR :179, seam map D26).
         logger.info("retrying %s for week %s; prior claim: %s", run.name, run.week, prior)
+        plan_state.reset_for_retry(run.conn, run.name, run.week)
         return
     state = plan_state.claim(run.conn, run.name, run.week)
     if state != "claimed":
@@ -270,9 +273,10 @@ def _start(run: _Run) -> None:
 
 
 def _catch_all(run: _Run, exc: BaseException, inspected: bool) -> int:
-    """Always report (ADR-0001, Job contract step 7). Once Inspect has passed, an unfinished
+    """Always report (ADR-0001, Job contract step 7). A committed result is never touched,
+    whoever's claim it is (D23): Inspect redelivers it. Once Inspect has passed, an unfinished
     claim for this job and week can only be ours: that's re-read here rather than tracked, so a
-    signal landing just after the claim commits is still handled (seam map D18)."""
+    signal landing just after the claim commits is still handled (D18)."""
     signal.alarm(0)
     reason = _reason(exc)
     logger.error(
@@ -280,10 +284,11 @@ def _catch_all(run: _Run, exc: BaseException, inspected: bool) -> int:
     )
     if isinstance(exc, DeliveryFailed):
         return 1  # nothing was delivered: the claim stays unfinished for the next tick
-    claim = plan_state.get_run(run.conn, run.name, run.week) if inspected else None
-    ours = claim is not None and claim.outcome is None
-    if ours and _effect_recorded(run):
-        return 1  # never rewrite a committed result; Inspect redelivers it
+    claim = plan_state.get_run(run.conn, run.name, run.week)
+    unfinished = claim is not None and claim.outcome is None
+    if unfinished and _effect_recorded(run):
+        return 1  # never rewrite a committed result, or advise against it; Inspect redelivers it
+    ours = inspected and unfinished
     if ours:
         plan_state.set_detail(run.conn, run.name, run.week, reason)
     advice = f" {_EMPTY_THE_CART}" if run.name == "cart_fill" else ""  # seam map D12
@@ -609,10 +614,17 @@ def _reconcile_week(run: _Run, week: date) -> None:
     if stored.status in APPROVED_OR_LATER and stored.mealie_plan_ref is None:
         _publish(run, stored)
     if _needs_fill(run, stored):
-        try:
-            run.deps.spawn("cart_fill", "--week", week.isoformat())
-        except OSError as exc:
-            logger.error("couldn't start cart_fill for week %s: %s", week, exc)
+        _spawn(run, "cart_fill", week)
+    approval = plan_state.get_run(run.conn, "sun_autoapprove", week)
+    if approval is not None and approval.outcome is None:
+        _spawn(run, "sun_autoapprove", week)  # its message outlives Sunday's ticks (seam map D24)
+
+
+def _spawn(run: _Run, job: JobName, week: date) -> None:
+    try:
+        run.deps.spawn(job, "--week", week.isoformat())
+    except OSError as exc:
+        logger.error("couldn't start %s for week %s: %s", job, week, exc)
 
 
 def _publish(run: _Run, stored: StoredWeek) -> None:
@@ -700,6 +712,8 @@ def _report_text(week: date, report: CartReport, published: bool) -> str:
         lines.append("Couldn't find: " + ", ".join(report.missing))
     dollars, cents = divmod(report.subtotal_cents, 100)
     lines.append(f"Subtotal: ${dollars}.{cents:02d}")
+    if report.subtotal_cents < PICKUP_MINIMUM_CENTS:  # PLAN: warn under $35 (seam map D27)
+        lines.append("Heads up: the order is under $35, so Meijer charges a $4.95 pickup fee.")
     lines.append("Mealie plan: published" if published else "Mealie plan: pending, retrying hourly")
     return "\n".join(lines)
 
