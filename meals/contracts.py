@@ -289,7 +289,12 @@ class Pantry(Protocol):
         Status becomes `have`, and the next ask moves to a week after `on` (still good) or one
         interval after it (plenty; a week with no interval), unless the ask date is already
         later: this never pulls an ask earlier. Logs no purchase and never changes the interval.
-        Repeating a reply for the same `on` changes nothing. Returns the updated item."""
+        Returns the updated item.
+
+        Repeating a reply for the same `on` changes nothing only while nothing else has written
+        the item: a redelivered "still good" after an "out of X" flip sets `have` again, and one
+        after a purchase sets the ask again. Callers dedupe replies (e.g. on the Telegram
+        update_id) before calling."""
         ...
 
     def log_purchase(
