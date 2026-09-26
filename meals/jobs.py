@@ -24,7 +24,7 @@ import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from datetime import time as dt_time
 from pathlib import Path
 from types import FrameType
@@ -36,7 +36,7 @@ from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError
 
 from meals import plan_state
 from meals.background import first_line, split_message
-from meals.contracts import CartReport, Custody, MealieClient, WeekProposal
+from meals.contracts import CartReport, Custody, MealieClient, MealieUnavailable, WeekProposal
 from meals.plan_state import APPROVED_OR_LATER, JobRun, StoredWeek
 
 logger = logging.getLogger(__name__)
@@ -56,6 +56,11 @@ DEFAULT_CUSTODY: Custody = "wed+sat_sun"  # the first week's guess (seam map D2)
 _BACKOFF_S = (5.0, 15.0)
 _SAT, _SUN = 5, 6
 _FILLED = ("cart_filled", "ordered")
+_EXPIRED = "expired"  # cart_fill's detail when the week passed before it filled
+_EMPTY_THE_CART = (
+    "The cart may already hold some or all items. Empty it in the Meijer app, "
+    "then reply 'retry cart'."
+)
 # Spelled out rather than strftime, which follows the process locale.
 _DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
@@ -84,6 +89,7 @@ class Deps:
     propose: Callable[[date, Custody, Sequence[WeekProposal]], WeekProposal]
     fill: Callable[[WeekProposal, tuple[int, ...]], CartReport]
     mealie: MealieClient
+    clock: Callable[[], float] = time.monotonic  # elapsed time since `now` (seam map D22)
 
 
 @dataclass(frozen=True)
@@ -93,6 +99,7 @@ class _Run:
     now: datetime  # America/Detroit
     week: date
     retry: bool
+    started: float  # deps.clock() when the run began
     lock_fd: int = -1
 
     @property
@@ -102,6 +109,10 @@ class _Run:
     @property
     def today(self) -> date:
         return self.now.date()
+
+    def current(self) -> datetime:
+        """`now` plus the time this run has taken so far (America/Detroit)."""
+        return self.now + timedelta(seconds=self.deps.clock() - self.started)
 
 
 # ── entry point ──────────────────────────────────────────────────────────────
@@ -120,7 +131,7 @@ def run_job(
     if week is not None and week.weekday() != _SUN:
         raise ValueError(f"week {week} is not a Sunday")
     local = now.astimezone(TZ)
-    run = _Run(name, deps, local, week or _target_week(local.date()), retry)
+    run = _Run(name, deps, local, week or _target_week(local.date()), retry, deps.clock())
     with _signal_handlers(), _job_lock(deps.lock_dir, name) as lock_fd:
         if lock_fd is None:
             return _busy(run)
@@ -133,22 +144,22 @@ def _target_week(today: date) -> date:
 
 
 def _guarded(run: _Run) -> int:
-    claimed = False
+    inspected = False
     try:
         if run.name == "reconcile":
             return _reconcile(run)
         settled = _inspect(run)
         if settled is not None:
             return settled
+        inspected = True
         act = _DECIDE[run.name](run)
         if act is None:
             return 0
         _start(run)
-        claimed = True
         act()
         return 0
     except (Exception, JobTimeout, JobTerminated) as exc:
-        return _catch_all(run, exc, claimed)
+        return _catch_all(run, exc, inspected)
 
 
 # ── the lock and the signals ─────────────────────────────────────────────────
@@ -199,17 +210,30 @@ def _signal_handlers() -> Iterator[None]:
 def _busy(run: _Run) -> int:
     """Another process holds the lock: say so only when Steve asked, or when it looks stuck."""
     if run.name == "reconcile":
+        logger.info("reconcile is already running; skipping this tick")
         return 0
-    holder = plan_state.running(run.conn, run.name)
     if run.retry:
+        holder = plan_state.running(run.conn, run.name)  # any week's: whoever holds the lock
         since = f" (since {_clock(holder.started_at)})" if holder is not None else ""
-        _try_send(run, f"{run.name} is still running{since}. Try again once it has finished.")
-    elif holder is not None and run.now - holder.started_at > timedelta(seconds=ALARM_S):
-        _try_send(
-            run,
-            f"{run.name} has been running since {_clock(holder.started_at)}, longer than it "
-            "should. It may be stuck: see deploy/README.md, Stuck run.",
+        logger.warning(
+            "%s --retry for week %s: the job is still running%s", run.name, run.week, since
         )
+        _try_send(run, f"{run.name} is still running{since}. Try again once it has finished.")
+        return 0
+    claim = plan_state.get_run(run.conn, run.name, run.week)  # this week's (seam map D13)
+    if claim is not None and claim.outcome is None:
+        if run.now - claim.started_at > timedelta(seconds=ALARM_S):
+            logger.warning(
+                "%s for week %s has held its lock since %s; sending a stale alert",
+                run.name,
+                run.week,
+                claim.started_at,
+            )
+            _try_send(
+                run,
+                f"{run.name} has been running since {_clock(claim.started_at)}, longer than it "
+                "should. It may be stuck: see deploy/README.md, Stuck run.",
+            )
     return 0
 
 
@@ -225,8 +249,16 @@ def _inspect(run: _Run) -> int | None:
     if claim.outcome is not None:
         return None if run.retry else 0
     if _effect_recorded(run):
+        logger.info("%s for week %s: settling an earlier run's recorded result", run.name, run.week)
         _REDELIVER[run.name](run, claim)
     else:
+        logger.warning(
+            "%s for week %s: an earlier run stopped before its effect was recorded (%s); "
+            "sending the notice",
+            run.name,
+            run.week,
+            claim.detail,
+        )
         _deliver(run, _NOTICES[run.name](run, claim.detail))
         plan_state.finish(run.conn, run.name, run.week, "interrupted")
     return 0
@@ -248,22 +280,40 @@ def _start(run: _Run) -> None:
         raise plan_state.PlanStateError(f"{run.name} for week {run.week} is already {state}")
 
 
-def _catch_all(run: _Run, exc: BaseException, claimed: bool) -> int:
-    """Always report (ADR-0001, Job contract step 7)."""
+def _catch_all(run: _Run, exc: BaseException, inspected: bool) -> int:
+    """Always report (ADR-0001, Job contract step 7). Once Inspect has passed, an unfinished
+    claim for this job and week can only be ours: that's re-read here rather than tracked, so a
+    signal landing just after the claim commits is still handled (seam map D18)."""
     signal.alarm(0)
     reason = _reason(exc)
-    logger.error("job %s for week %s failed: %s", run.name, run.week, reason, exc_info=exc)
+    logger.error(
+        "job %s for week %s failed: %s", run.name, run.week, reason, exc_info=safe_exc_info(exc)
+    )
     if isinstance(exc, DeliveryFailed):
         return 1  # nothing was delivered: the claim stays unfinished for the next tick
-    if claimed and _effect_recorded(run):
+    claim = plan_state.get_run(run.conn, run.name, run.week) if inspected else None
+    ours = claim is not None and claim.outcome is None
+    if ours and _effect_recorded(run):
         return 1  # never rewrite a committed result; Inspect redelivers it
-    if claimed:
+    if ours:
         plan_state.set_detail(run.conn, run.name, run.week, reason)
-    if not _try_send(run, f"job {run.name} failed: {reason}"):
+    advice = f" {_EMPTY_THE_CART}" if run.name == "cart_fill" else ""  # seam map D12
+    if not _try_send(run, f"job {run.name} failed: {reason}.{advice}"):
         return 1
-    if claimed:
+    if ours:
         plan_state.finish(run.conn, run.name, run.week, "failed")
     return 1
+
+
+def safe_exc_info(exc: BaseException) -> BaseException | None:
+    """`exc`, to log with its traceback, or None when its chain holds a MealieUnavailable: that
+    one's chained cause isn't vetted, so only its message is logged (contracts)."""
+    link: BaseException | None = exc
+    while link is not None:
+        if isinstance(link, MealieUnavailable):
+            return None
+        link = link.__cause__ or link.__context__
+    return exc
 
 
 def _reason(exc: BaseException) -> str:
@@ -343,6 +393,10 @@ def _propose(run: _Run) -> None:
 
 
 def _send_proposal(run: _Run, proposal: WeekProposal) -> None:
+    if not _propose_window(run.current()):  # planning ran past Sat 20:00 (seam map D22)
+        logger.warning("the proposal for week %s is ready after its window; not sending", run.week)
+        _fail_quietly(run, "proposal not delivered")
+        return
     _deliver(run, _proposal_text(proposal))
     plan_state.finish(run.conn, run.name, run.week, "done")
 
@@ -375,7 +429,8 @@ def _decide_nudge(run: _Run) -> Callable[[], None] | None:
     if stored is None or stored.status != "proposed" or proposed is None:
         return None
     finished = proposed.finished_at
-    if proposed.outcome != "done" or finished is None or finished > run.now - NUDGE_AFTER:
+    waited_since = run.now.astimezone(UTC) - NUDGE_AFTER  # real hours, across a DST change
+    if proposed.outcome != "done" or finished is None or finished > waited_since:
         return None
     return lambda: _send_nudge(run)
 
@@ -474,6 +529,13 @@ def _redeliver_autoapprove(run: _Run, claim: JobRun) -> None:
     stored = plan_state.get_week(run.conn, run.week)
     if stored is None:
         raise plan_state.PlanStateError(f"week {run.week} vanished after it was approved")
+    last = plan_state.recent_proposals(run.conn, run.week, limit=1)
+    if not last or stored.proposal != last[0].model_copy(update={"week_start": run.week}):
+        # Approved with other picks (the bot, after this run died before approving): nothing
+        # of ours to announce (seam map D16).
+        logger.info("week %s was approved with other picks; no autoapprove message", run.week)
+        plan_state.finish(run.conn, run.name, run.week, "done")
+        return
     _deliver(run, _autoapproved_text(run, stored.proposal, None))
     plan_state.finish(run.conn, run.name, run.week, "done")
 
@@ -485,6 +547,8 @@ def _decide_fill(run: _Run) -> Callable[[], None] | None:
     stored = plan_state.get_week(run.conn, run.week)
     if run.retry:
         refusal = _retry_refusal(run)
+        if refusal is None and run.week < run.today - timedelta(days=RECONCILE_DAYS):
+            refusal = "that week is too old to fill now"  # seam map D14
         if refusal is None and stored is not None and stored.status in _FILLED:
             refusal = "the cart is already filled"
         if refusal is None and (stored is None or stored.status != "approved"):
@@ -503,13 +567,16 @@ def _decide_fill(run: _Run) -> Callable[[], None] | None:
 
 
 def _expire(run: _Run) -> None:
-    plan_state.set_detail(run.conn, run.name, run.week, "expired")
-    _deliver(
-        run,
-        f"The week of {_day(run.week)} was approved but its cart never filled. "
-        "Reply 'retry cart' if you still want it.",
-    )
+    plan_state.set_detail(run.conn, run.name, run.week, _EXPIRED)
+    _deliver(run, _expired_text(run.week))
     plan_state.finish(run.conn, run.name, run.week, "failed")
+
+
+def _expired_text(week: date) -> str:
+    return (
+        f"The week of {_day(week)} was approved but its cart never filled. "
+        "Reply 'retry cart' if you still want it."
+    )
 
 
 def _fill(run: _Run, plan: WeekProposal) -> None:
@@ -537,15 +604,26 @@ def _redeliver_report(run: _Run, claim: JobRun) -> None:
 def _reconcile(run: _Run) -> int:
     """Publish approved plans to Mealie and restart or redeliver cart fills, week by week. It
     claims nothing, and one week's failure doesn't stop the others."""
-    for stored in plan_state.weeks_since(run.conn, run.today - timedelta(days=RECONCILE_DAYS)):
-        if stored.status in APPROVED_OR_LATER and stored.mealie_plan_ref is None:
-            _publish(run, stored)
-        if _needs_fill(run, stored):
-            try:
-                run.deps.spawn("cart_fill", "--week", stored.week_start.isoformat())
-            except OSError as exc:
-                logger.error("couldn't start cart_fill for week %s: %s", stored.week_start, exc)
+    since = run.today - timedelta(days=RECONCILE_DAYS)
+    for week in plan_state.week_starts_since(run.conn, since):
+        try:
+            _reconcile_week(run, week)
+        except Exception as exc:  # this week only (seam map D15); the message, not the cause
+            logger.error("reconcile couldn't handle week %s: %s", week, first_line(exc))
     return 0
+
+
+def _reconcile_week(run: _Run, week: date) -> None:
+    stored = plan_state.get_week(run.conn, week)
+    if stored is None:
+        return
+    if stored.status in APPROVED_OR_LATER and stored.mealie_plan_ref is None:
+        _publish(run, stored)
+    if _needs_fill(run, stored):
+        try:
+            run.deps.spawn("cart_fill", "--week", week.isoformat())
+        except OSError as exc:
+            logger.error("couldn't start cart_fill for week %s: %s", week, exc)
 
 
 def _publish(run: _Run, stored: StoredWeek) -> None:
@@ -566,13 +644,13 @@ def _publish(run: _Run, stored: StoredWeek) -> None:
 
 
 def _needs_fill(run: _Run, stored: StoredWeek) -> bool:
-    """Approved with no fill claim, or an unfinished one; or filled with its report undelivered
-    (seam map D5)."""
+    """Approved with no fill claim, or an unfinished one; or filled (or already ordered) with its
+    report undelivered (seam map D5, D19)."""
     claim = plan_state.get_run(run.conn, "cart_fill", stored.week_start)
     unfinished = claim is not None and claim.outcome is None
     if stored.status == "approved":
         return claim is None or unfinished
-    return stored.status == "cart_filled" and unfinished
+    return stored.status in _FILLED and unfinished
 
 
 # ── notices and message text ─────────────────────────────────────────────────
@@ -583,10 +661,10 @@ def _with_reason(text: str, reason: str | None) -> str:
 
 
 _NOTICES: dict[str, Callable[[_Run, str | None], str]] = {
-    "cart_fill": lambda run, reason: _with_reason(
-        "The cart fill stopped partway. The cart may already hold some or all items. "
-        "Empty it in the Meijer app, then reply 'retry cart'.",
-        reason,
+    "cart_fill": lambda run, reason: (
+        _expired_text(run.week)  # the expiry message never went out; no fill ran (D17)
+        if reason == _EXPIRED
+        else _with_reason(f"The cart fill stopped partway. {_EMPTY_THE_CART}", reason)
     ),
     "sat_propose": lambda run, reason: _with_reason(
         "Saturday's proposal may not have gone out. Reply 'resend plan'.", reason
@@ -606,7 +684,8 @@ def _proposal_text(proposal: WeekProposal) -> str:
     if proposal.recipe_options:
         lines.append("Recipes (reply with the numbers you want):")
         for number, option in enumerate(proposal.recipe_options, start=1):
-            minutes = f", {option.hands_on_min} min hands-on" if option.hands_on_min else ""
+            hands_on = option.hands_on_min
+            minutes = f", {hands_on} min hands-on" if hands_on is not None else ""
             lines.append(f"{number}. {option.name} ({option.source}{minutes}): {option.fit_note}")
     parts = proposal.components.model_dump()
     slots = [f"{slot}: {', '.join(items)}" for slot, items in parts.items() if items]
@@ -672,7 +751,8 @@ _REDELIVER: dict[str, Callable[[_Run, JobRun], None]] = {
 class TelegramSend:
     """Deps.send for a job process: plain text to Steve's chat, split at Telegram's limit, with a
     fresh `telegram.Bot` per attempt. Transient errors (network, flood control) are retried up to
-    SEND_ATTEMPTS within SEND_BUDGET_S; anything else, or running out, raises DeliveryFailed.
+    SEND_ATTEMPTS within SEND_BUDGET_S, which counts the attempts themselves as well as the waits
+    (no attempt or wait starts past it); anything else, or running out, raises DeliveryFailed.
 
     DeliveryFailed carries only the error's type, never its text, and drops the chain: PTB's
     InvalidToken message includes the token."""
@@ -683,26 +763,30 @@ class TelegramSend:
         chat_id: int,
         *,
         sleep: Callable[[float], object] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._token = token
         self._chat_id = chat_id
         self._sleep = sleep
+        self._clock = clock
 
     def __call__(self, text: str) -> None:
         pending = list(split_message(text))
-        waited = 0.0
+        spent = 0.0  # attempts timed on the clock, plus each wait (the sleep may be injected)
         for attempt in range(1, SEND_ATTEMPTS + 1):
+            began = self._clock()
             try:
                 asyncio.run(self._send(pending))
                 return
             except TelegramError as exc:
+                spent += self._clock() - began
                 wait = _retry_wait(exc, attempt)
                 kind = type(exc).__name__
-                if wait is None or attempt == SEND_ATTEMPTS or waited + wait > SEND_BUDGET_S:
+                if wait is None or attempt == SEND_ATTEMPTS or spent + wait > SEND_BUDGET_S:
                     raise DeliveryFailed(f"Telegram didn't take the message ({kind})") from None
                 logger.warning("Telegram send attempt %d failed (%s); retrying", attempt, kind)
                 self._sleep(wait)
-                waited += wait
+                spent += wait
 
     async def _send(self, pending: list[str]) -> None:
         """Send the chunks in order, dropping each from `pending` once it's delivered, so a retry

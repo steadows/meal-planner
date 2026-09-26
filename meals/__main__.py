@@ -13,12 +13,20 @@ import sys
 from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import NoReturn
 
 from pydantic import TypeAdapter, ValidationError
 
 from meals import background, jobs, planner
 from meals.config import PROJECT_ROOT, get_settings
-from meals.contracts import CartReport, Custody, SundayDate, WeekProposal
+from meals.contracts import (
+    CartReport,
+    Custody,
+    MealieClient,
+    RecipeOption,
+    SundayDate,
+    WeekProposal,
+)
 from meals.db import get_db
 from meals.mealie_client import HttpMealieClient
 from meals.pantry import SqlitePantry
@@ -53,6 +61,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         now = args.now or datetime.now(UTC)
         return jobs.run_job(args.name, deps, now=now, week=args.week, retry=args.retry)
+    except (Exception, jobs.JobTimeout, jobs.JobTerminated) as exc:
+        # run_job reports its own failures; this is its catch-all or lock handling failing
+        # (a locked database, a signal outside the catch-all). Always report (ADR-0001, step 7).
+        return _report(send, args.name, exc, "failed")
     finally:
         conn.close()
 
@@ -97,7 +109,12 @@ def _configure_logging() -> None:
 
 def _deps(conn: sqlite3.Connection, send: jobs.TelegramSend, lock_dir: Path) -> jobs.Deps:
     pantry = SqlitePantry(conn)
-    mealie = HttpMealieClient.from_settings()
+    mealie: MealieClient
+    try:
+        mealie = HttpMealieClient.from_settings()
+    except RuntimeError as exc:  # MEALIE_TOKEN missing or malformed (seam map D20)
+        logger.warning("Mealie isn't configured (%s); jobs that need it will fail", exc)
+        mealie = _MealieNotConfigured(str(exc))
 
     def propose(week: date, custody: Custody, recent: Sequence[WeekProposal]) -> WeekProposal:
         return planner.propose(week, custody, recent=recent, pantry=pantry, mealie=mealie)
@@ -120,13 +137,42 @@ def _cart_not_wired(plan: WeekProposal, hold_fds: tuple[int, ...]) -> CartReport
     )
 
 
+class _MealieNotConfigured:
+    """`deps.mealie` when MEALIE_TOKEN is missing or malformed. Jobs that never reach Mealie (the
+    nudge, redeliveries, reconcile's cart recovery) still run; any call raises the problem."""
+
+    def __init__(self, problem: str) -> None:
+        self._problem = problem
+
+    def _fail(self) -> NoReturn:
+        raise RuntimeError(self._problem)
+
+    def import_url(self, url: str) -> str:
+        self._fail()
+
+    def get_recipe(self, slug: str) -> RecipeOption:
+        self._fail()
+
+    def list_by_tag(self, tag: str) -> tuple[str, ...]:
+        self._fail()
+
+    def set_meal_plan(self, week_start: date, slugs: Sequence[str]) -> str:
+        self._fail()
+
+
 def _report_startup_failure(send: jobs.TelegramSend, name: str, exc: Exception) -> int:
-    """The job couldn't even start (a bad path, a missing token): say so, loudly."""
-    logger.exception("job %s couldn't start", name)
+    """The job couldn't even start (a bad path, a database that won't open)."""
+    return _report(send, name, exc, "failed to start")
+
+
+def _report(send: jobs.TelegramSend, name: str, exc: BaseException, what: str) -> int:
+    """Log the failure to jobs.log and tell Steve, loudly, then exit 1."""
+    reason = background.first_line(exc)
+    logger.error("job %s %s: %s", name, what, reason, exc_info=jobs.safe_exc_info(exc))
     try:
-        send(f"job {name} failed to start: {background.first_line(exc)}"[: jobs.REASON_MAX_CHARS])
+        send(f"job {name} {what}: {reason}"[: jobs.REASON_MAX_CHARS])
     except jobs.DeliveryFailed:
-        logger.error("couldn't send the start-up failure for job %s", name)
+        logger.error("couldn't tell Steve that job %s %s", name, what)
     return 1
 
 

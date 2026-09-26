@@ -25,6 +25,9 @@ Outcome = Literal["done", "failed", "interrupted"]
 Claim = Literal["claimed", "finished", "running", "interrupted"]
 
 _SQLITE_TIME = "%Y-%m-%d %H:%M:%S"
+# job_run is read by named columns: a later (append-only) migration may add one, and JobRun
+# forbids unknown fields.
+_RUN_COLUMNS = "job, week_start, started_at, finished_at, outcome, detail"
 APPROVED_OR_LATER: tuple[Status, ...] = ("approved", "cart_filled", "ordered")
 
 
@@ -68,6 +71,11 @@ class StoredWeek(Contract):
 # ── reads ────────────────────────────────────────────────────────────────────
 
 
+def _marks(values: Sequence[object]) -> str:
+    """One `?` per value, for an `IN (...)` list."""
+    return ", ".join("?" * len(values))
+
+
 def _rows(conn: sqlite3.Connection, sql: str, params: Sequence[object]) -> list[sqlite3.Row]:
     cursor = conn.cursor()
     cursor.row_factory = sqlite3.Row  # whatever the caller's connection uses
@@ -100,7 +108,8 @@ def recent_proposals(
     """Approved-or-later weeks before `before`, newest first: the planner's `recent` weeks."""
     rows = _rows(
         conn,
-        "SELECT * FROM weekly_plan WHERE status IN (?, ?, ?) AND week_start < ?"
+        f"SELECT * FROM weekly_plan WHERE status IN ({_marks(APPROVED_OR_LATER)})"
+        " AND week_start < ?"
         " ORDER BY week_start DESC LIMIT ?",
         (*APPROVED_OR_LATER, before.isoformat(), limit),
     )
@@ -117,20 +126,21 @@ def latest_week(conn: sqlite3.Connection, before: date) -> StoredWeek | None:
     return _week(rows[0]) if rows else None
 
 
-def weeks_since(conn: sqlite3.Connection, since: date) -> tuple[StoredWeek, ...]:
-    """Every week from `since` on, oldest first."""
+def week_starts_since(conn: sqlite3.Connection, since: date) -> tuple[date, ...]:
+    """Every stored week from `since` on, oldest first, in any status. The caller reads each with
+    `get_week`, so one unreadable row can't hide the others."""
     rows = _rows(
         conn,
-        "SELECT * FROM weekly_plan WHERE week_start >= ? ORDER BY week_start",
+        "SELECT week_start FROM weekly_plan WHERE week_start >= ? ORDER BY week_start",
         (since.isoformat(),),
     )
-    return tuple(_week(row) for row in rows)
+    return tuple(date.fromisoformat(row["week_start"]) for row in rows)
 
 
 def get_run(conn: sqlite3.Connection, job: str, week_start: date) -> JobRun | None:
     rows = _rows(
         conn,
-        "SELECT * FROM job_run WHERE job = ? AND week_start = ?",
+        f"SELECT {_RUN_COLUMNS} FROM job_run WHERE job = ? AND week_start = ?",
         (job, week_start.isoformat()),
     )
     return _run(rows[0]) if rows else None
@@ -140,7 +150,7 @@ def running(conn: sqlite3.Connection, job: str) -> JobRun | None:
     """The oldest unfinished claim for `job`, in any week: the lock holder's may not be ours."""
     rows = _rows(
         conn,
-        "SELECT * FROM job_run WHERE job = ? AND outcome IS NULL"
+        f"SELECT {_RUN_COLUMNS} FROM job_run WHERE job = ? AND outcome IS NULL"
         " ORDER BY started_at, week_start LIMIT 1",
         (job,),
     )
@@ -149,10 +159,9 @@ def running(conn: sqlite3.Connection, job: str) -> JobRun | None:
 
 def latest_run(conn: sqlite3.Connection, job: str, outcomes: Sequence[Outcome]) -> JobRun | None:
     """The newest week whose `job` claim ended with one of `outcomes` ("retry cart")."""
-    marks = ", ".join("?" * len(outcomes))  # only placeholders are formatted into the SQL
     rows = _rows(
         conn,
-        f"SELECT * FROM job_run WHERE job = ? AND outcome IN ({marks})"
+        f"SELECT {_RUN_COLUMNS} FROM job_run WHERE job = ? AND outcome IN ({_marks(outcomes)})"
         " ORDER BY week_start DESC LIMIT 1",
         (job, *outcomes),
     )
@@ -208,7 +217,8 @@ def set_mealie_ref(conn: sqlite3.Connection, week_start: date, ref: str) -> bool
     with conn:
         cursor = conn.execute(
             "UPDATE weekly_plan SET mealie_plan_ref = ?"
-            " WHERE week_start = ? AND mealie_plan_ref IS NULL AND status IN (?, ?, ?)",
+            " WHERE week_start = ? AND mealie_plan_ref IS NULL"
+            f" AND status IN ({_marks(APPROVED_OR_LATER)})",
             (ref, week_start.isoformat(), *APPROVED_OR_LATER),
         )
     return cursor.rowcount == 1
