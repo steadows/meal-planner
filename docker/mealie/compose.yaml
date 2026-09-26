@@ -1,0 +1,27 @@
+# Mealie for the meal planner (PLAN.md, Phase 1). Setup and tag conventions: README.md here.
+#
+# Keep the tag at v3.28.0 or later. That release's scraper pins every fetch to the address it
+# validated, which closes the DNS-rebinding hole in its SSRF guard (CVE-2026-71210). The meal
+# planner relies on that guard for recipe URLs that come from web search.
+services:
+  mealie:
+    image: ghcr.io/mealie-recipes/mealie:v3.28.0
+    container_name: mealie
+    restart: always
+    ports:
+      - "9925:9000" # host:container
+    deploy:
+      resources:
+        limits:
+          memory: 1000M
+    volumes:
+      - mealie-data:/app/data/
+    environment:
+      ALLOW_SIGNUP: "false"
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: America/Detroit # meal-plan dates are wrong without it
+      BASE_URL: ${MEALIE_BASE_URL:-http://localhost:9925} # the Tailscale hostname after Phase 2
+
+volumes:
+  mealie-data:
