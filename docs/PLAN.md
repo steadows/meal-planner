@@ -483,8 +483,8 @@ Not yet tested: whether the importer handles every recipe site Steve uses.
 - [ ] Voice notes: transcribe (Whisper locally or through an API), then send the text down the same path. Always repeat the transcript back.
 - [ ] Commands: `/pantry`, `/plan`, `/due`.
 
-* [ ] Write the preferences profile file (likes, dislikes, grains, goals, effort, Miles, sources).
-* [ ] Recipe search: `/find` plus plain words returns 3–5 options filtered by the profile. "save N" imports to Mealie, and "add N to this week" puts it on the plan.
+* [x] Write the preferences profile file (likes, dislikes, grains, goals, effort, Miles, sources).
+* [~] Recipe search: `/find` plus plain words returns 3–5 options filtered by the profile. "save N" imports to Mealie, and "add N to this week" puts it on the plan. (`/find` shipped in #10; "save N" and "add N" wait on the bot and `plan_state`.)
 
 This estimate assumes the agentic OS bot scaffolding already exists. Without it, double the time.
 
@@ -597,7 +597,7 @@ Lane G wires up the scheduled jobs, which is what turns M1 and M2 into M3. The B
 | Seed run | Steve with Claude | Manual first week, two seed CSVs | Nothing | Order placed, CSVs saved | 1 hr + cook |
 | B Pantry | Agent | `pantry`, `rollup`, seed loader, `mcp_tools` | Lane 0; seed CSV (a fixture is fine to start) | Unit math tests pass; `staples_due()` right on seed data | 3 hr |
 | C Mealie | Agent | `mealie_client`, tag conventions | Lane 0; Lane A's Mealie for integration tests | Imports a real URL and writes a meal plan | 2 hr |
-| D Bot | Agent | `bot/`, voice | Lane 0; bot token; the runtime-model design (see Architecture gates) | "Out of eggs" by text and voice updates the pantry | 3–4 hr |
+| D Bot | Agent | `bot/`, voice | Lane 0; bot token; wiring's `meals/background.py` (ADR-0001, phase P1) | "Out of eggs" by text and voice updates the pantry | 3–4 hr |
 | E Search and planner | Agent | `search`, `planner`, `prefs.yaml`, prompts | Lane 0; Mealie fake | `/find` returns 3–5 valid options; planner produces a valid proposal from fixtures | 4 hr |
 | F Cart | Steve with an agent (needs his Chrome) | `cart`, Chrome prompt, report parsing | Lane 0; Lane A Chrome; seed product map; the cart spike and the cart-path design (see Architecture gates) | A 10-item list lands in the real Meijer cart with an accurate report | 4 hr, mostly testing |
 | G Wiring | One agent: designs early, builds last | The runtime-model design (see Architecture gates), then `jobs`, schedule, end-to-end test | Nothing for the design; M1 and M2 for the build | A full Saturday dry run works | 2 hr |
@@ -606,7 +606,7 @@ Lane G wires up the scheduled jobs, which is what turns M1 and M2 into M3. The B
 
 1. **This weekend:** Steve does Lane A and the seed run. One agent builds Lane 0. Lane G runs the runtime-model architecture gate, which is design only and needs no code.
 2. **Early week one:** Run a cart spike, asking `claude --chrome -p` to add five items to the Meijer cart. If Meijer's site fights it, switch Lane F to the Instacart path. Either way, Lane F runs the cart-path architecture gate with the spike's results before building.
-3. **Week one:** Lanes B, C and E run in parallel, each in its own git worktree. Lane D starts once the runtime-model design is confirmed.
+3. **Week one:** Lanes B, C and E run in parallel, each in its own git worktree. Lane D starts once wiring ships `meals/background.py` (ADR-0001, phase P1). The runtime-model design itself is accepted.
 4. **Week two:** Hit M1 and M2, then Lane G wires the jobs. Do a real Saturday dry run for M4.
 
 ### Architecture gates
@@ -615,7 +615,7 @@ Two decisions are expensive to undo, so each gets a `/steadows-architect` run be
 
 | Gate | Run by | When | Blocks | Inputs |
 | --- | --- | --- | --- | --- |
-| **Runtime model:** the bot process, background runs that reply when done, the Saturday schedule, the one-Chrome-at-a-time queue, and safe reruns after a restart | Lane G | Now. Design needs no code | Lane D's start and Lane G's build | Runtime concurrency and Where the weekly planning job runs (above). `claude_runner`'s process limit is a given, not something to redesign |
+| **Runtime model** (done: `docs/adr/ADR-0001-runtime-model.md`, accepted 2026-09-26)**:** the bot process, background runs that reply when done, the Saturday schedule, the one-Chrome-at-a-time queue, and safe reruns after a restart | Lane G | Now. Design needs no code | Lane D's start and Lane G's build | Runtime concurrency and Where the weekly planning job runs (above). `claude_runner`'s process limit is a given, not something to redesign |
 | **Cart path:** Meijer in Chrome or Instacart, the meijer.com-only boundary, parsing the cart report | Lane F | After the week-one cart spike | Lane F's build | The spike's results |
 
 ### Rules so parallel agents don't collide
@@ -636,7 +636,7 @@ The repo runs the agent-brain vault (`.brain/`), which tracks each lane, the bra
 | pantry | `feat/pantry` | contracts |
 | mealie | `feat/mealie` | contracts |
 | search | `feat/search` | contracts |
-| bot | `feat/bot` | contracts, plus the runtime-model design |
+| bot | `feat/bot` | contracts, plus wiring's `meals/background.py` (ADR-0001 P1) |
 | cart | `feat/cart` | contracts, pantry, plus the cart spike and cart-path design |
 | wiring | `feat/wiring` | pantry, mealie, search, bot |
 
