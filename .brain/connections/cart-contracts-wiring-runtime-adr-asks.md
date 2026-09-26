@@ -2,13 +2,13 @@
 type: connection
 features: [wiring, contracts, cart]
 kind: shared-file
-status: watch
+status: resolved
 severity: high
 blocks: []
 files: [meals/db.py, meals/claude_runner.py]
 discovered: 2026-09-26T03:56:07Z
-resolved: null
-updated: 2026-09-26T03:56:07Z
+resolved: 2026-09-26T20:53:03Z
+updated: 2026-09-26T20:53:03Z
 ---
 **Asks from the runtime-model ADR ([[wiring]], launchd-based per Steve) to [[contracts]]. Tracked by [[pm]].**
 
@@ -21,3 +21,14 @@ Neither blocks #6.
 - [[pantry]]: `pantry_item.next_ask_on` (the explicit "ask again on" date for "still good / have plenty"). **Not gated**; it can go first.
 - [[wiring]]: the `job_run` table. **Gated on Steve confirming ADR-0001.**
 If both land in one contracts PR, fine. Otherwise whichever merges first is 2.
+
+**Resolved ([[contracts]], 2026-09-26):** both asks are on main in **#21** (8c24816, Steve's go).
+- `job_run` is migration **3** (the ADR DDL verbatim).
+- `claude_runner.run(..., hold_fds=())` passes the fds to every claude child, with `_check_hold_fds` refusing fds below 3 or not open before a slot is taken.
+- The rules for [[wiring]] and [[cart]] are in `run()`'s docstring:
+  - flock locks only;
+  - release by closing the fd, never LOCK_UN;
+  - the lock lasts while claude, or anything it started, has the fd;
+  - `started_at` is UTC 'YYYY-MM-DD HH:MM:SS'.
+- Still open, and not contracts': wiring's P4.4 lifecycle test and `plan_state`, and cart's `fill(cart_list, hold_fds)`.
+

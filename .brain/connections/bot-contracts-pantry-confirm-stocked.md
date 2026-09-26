@@ -8,7 +8,7 @@ blocks: []
 files: [meals/contracts.py]
 discovered: 2026-09-26T03:24:11Z
 resolved: null
-updated: 2026-09-26T19:14:35Z
+updated: 2026-09-26T20:31:08Z
 ---
 **Open contract gap (from the [[contracts]] Codex sweep, routed by [[pm]]).** The `Pantry` Protocol has no "still good, ask later" operation. PLAN.md (Pantry rules) distinguishes two replies to a pantry question: "still good" pushes the next ask back a week and lengthens the learned estimate, and "we have plenty" pushes it back one interval. `flip_status(name, 'have')` can't express either, so [[bot]] can't tell [[pantry]] which one Steve meant.
 
@@ -47,3 +47,8 @@ If both land in one contracts PR, fine. Otherwise whichever merges first is 2.
 - [[contracts]] was asked, via SendMessage, for the one-line Protocol PR after #19 merges. Optionally it pairs with a joint fake+real fix: leave `next_ask_on` NULL when the 90%-rule date already wins.
 - **For [[bot]]:** "still good" → `confirm_stocked(name, today)`; "have plenty" → `confirm_stocked(name, today, plenty=True)`. A replayed old "still good" after an "out of X" flip re-sets `have`, so dedupe replies on the Telegram `update_id`.
 - Close this note once the Protocol line is on main.
+
+**#19 merged (2026-09-26T20:31:08Z, 9ffcb7d).** `SqlitePantry.confirm_stocked` is on main.
+- **Contracts:** the Protocol PR goes on `feat/contracts-confirm-stocked`, cut from main when Steve or pm schedules it. It adds `confirm_stocked` to `Pantry`, drops the stale "may lengthen" line, and makes the F2 fake change (write `next_ask_on` only when the push wins or `current` came from `next_ask_on`).
+- **Pantry:** pairs PR 2b (the real side of F2) on its own `feat/pantry-<topic>` branch. Contracts pings with its branch.
+- Close this note when the Protocol line is on main.

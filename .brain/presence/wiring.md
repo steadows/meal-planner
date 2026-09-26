@@ -3,15 +3,15 @@ type: presence
 agent: wiring
 feature: "Scheduled jobs and end-to-end: sat_propose, sat_nudge, sun_autoapprove, cart_fill, entry point"
 status: active
-phase: "P1 meals/background.py (unblocks bot): seams, RED (test-writer + spec-watchdog), GREEN (22/22, 100% cov), and /simplify done; /steadows-code-review in progress; then PR, ultra, verify. Adds python-telegram-bot>=22.8 to pyproject. P0 contracts gated PR (job_run, hold_fds, layers) in contracts' hands."
+phase: "P1 meals/background.py MERGED (PR #20, merge commit 28885e1, 2026-09-26); bot unblocked. Next: P2 plan_state + jobs + CLI on feat/wiring-p2 (cut from synced feat/wiring), building against contracts #21 (job_run, hold_fds, layers), merged as 8c24816, so P2 is unblocked."
 owns_branches: ["wiring"]
 plan: docs/PLAN.md (Implementation plan, Concurrency lanes)
 tracker_epic: none
 current_worktree: /Users/stevemeadows/meal-planner-wiring
 current_branch: feat/wiring
 current_ticket: none
-touches: [meals/background.py, tests/test_background.py, pyproject.toml, uv.lock, architecture-plan.html]
-updated: 2026-09-26T19:04:52Z
+touches: [.brain/connections/bot-background-py-waiting-on.md, .brain/connections/bot-contracts-pantry-confirm-stocked.md, .brain/connections/cart-contracts-wiring-runtime-adr-asks.md, .brain/journal/2026-09-26.md, .brain/presence/contracts.md, .brain/presence/pantry.md, .brain/presence/wiring.md, architecture-plan.html, docs/PLAN.md, docs/prompts/pantry-pr2-adversarial-review.md, docs/prompts/pantry-pr2-ultrareview.md, docs/prompts/wiring-p1-background-adversarial-review.md, docs/prompts/wiring-p1-background-ultrareview.md, meals/background.py, meals/claude_runner.py, meals/contracts.py, meals/db.py, meals/fakes/claude.py, meals/fakes/mealie.py, meals/pantry.py, meals/seed_loader.py, pyproject.toml, tests/conftest.py, tests/test_background.py, tests/test_claude_runner.py, tests/test_contracts.py, tests/test_db.py, tests/test_pantry_confirm.py, tests/test_pantry_parity.py, tests/test_pantry_writes.py, tests/test_seed_loader.py, uv.lock]
+updated: 2026-09-26T20:53:55Z
 ---
 Lane G — last. Jobs keyed on weekly_plan.status so every job is safe to rerun; one Chrome session at a time via a lock; bot never blocks (background subprocesses); max two concurrent claude processes. Done when a full Saturday dry run works end to end (M4). Waits on [[pantry-wiring-waiting-on]], [[mealie-wiring-waiting-on]], [[search-wiring-waiting-on]] and [[bot-wiring-waiting-on]].
 
@@ -32,3 +32,6 @@ A stored `WeekProposal` read back from `weekly_plan.components` must be validate
 - `job_run.started_at` is SQLite `CURRENT_TIMESTAMP`, UTC text `'YYYY-MM-DD HH:MM:SS'`. Compare it, and write any `--retry` reset, in that form, not in local time or isoformat with a `T`.
 - Write `outcome` and `finished_at` in one statement. Nothing in the DDL ties them together; a CHECK would need an ADR amendment plus a migration.
 - `run()` will raise ValueError for a hold fd of 0-2, a negative fd, or one that isn't open, before taking a slot.
+
+## For P4.4 (from [[contracts]] #21, via [[pm]], 2026-09-26)
+`hold_fds` inheritance by claude's **own descendants** is tested only one level deep (claude → one grandchild). If P4's integration or acceptance tests rely on a deeper process tree holding the lock, add that case there.

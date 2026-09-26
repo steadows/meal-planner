@@ -3,7 +3,7 @@ type: presence
 agent: pm
 feature: "PM/coordination lane: sweeps the vault, unblocks waiting-on edges, tracks merge order against PLAN.md, files follow-ups — owns no meals/ code"
 status: active
-phase: "PRs 9-15 merged; no open PRs. Next: ADR-gated contracts PR (after feat/contracts resync), mealie TRUSTED one-liner, wiring P1 background.py, then bot; cart waits on the Meijer spike"
+phase: "PRs 17-21 merged today; 22 (.python-version) open. Bot fully unblocked; wiring P2 unblocked; contracts on confirm_stocked Protocol PR; pantry PR 3 + 2b next"
 owns_branches: ["pm"]
 plan: docs/PLAN.md (Concurrency lanes, Coordination with agent-brain)
 tracker_epic: none
@@ -11,7 +11,7 @@ current_worktree: /Users/stevemeadows/meal-planner-pm
 current_branch: feat/pm
 current_ticket: none
 touches: [docs/PLAN.md, CLAUDE.md, .claude/settings.json, .gitignore, .github/, .brain/presence/, .brain/connections/, .brain/journal/]
-updated: 2026-09-26T15:24:23Z
+updated: 2026-09-26T20:54:07Z
 ---
 Coordination lane, not a build lane — owns no files under `meals/`. Job: periodic sweep of `.brain/` (presence notes, `connections/`, journal) to catch stalled lanes, unresolved `waiting-on` edges, and merge-order violations against the diagram in PLAN.md (`Concurrency lanes`); message a stuck lane; keep this note's `status` honest. Comms: live `SendMessage` between lanes (Steve, 2026-09-25) — do NOT arm a watcher on `dm/pm/pending`.
 
@@ -80,3 +80,4 @@ Pre-checked on 2026-09-25: none of these files existed, `~/.gitconfig` had no in
   2. [[mealie]] wraps HTTP, transport and validation failures in it (separate PR; acked).
   3. [[search]] skips on it in `_rotation_pool`, with a one-bad-favourite test.
   pm pings each lane when the step before it lands.
+- [ ] **ADR-0001 fitness suite** (`tests/architecture/`): verify warned on #20 and #21. Today the layer, lint-imports and `job_run` DDL tests are partial fitness checks. Owner TBD (wiring owns the ADR). Raise with Steve.
