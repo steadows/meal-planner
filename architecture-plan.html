@@ -190,14 +190,14 @@ tr:last-child td { border-bottom: 0; }
 "tasks": [
 {
 "id": "1.1",
-"text": "`/steadows-seams`: design pass + TDD-tier declaration (writes `.context/tdd-tier`)",
-"status": "todo",
+"text": "`/steadows-seams`: design pass + TDD-tier declaration (writes `.context/tdd-tier`). Done 2026-09-26: tier HIGH; seam map `.context/seams/P1.md`",
+"status": "done",
 "gate": true
 },
 {
 "id": "1.2",
-"text": "RED: ack → task → render; exception → one line; 15-min deadline; second update acked while a first `work` blocks; a 3rd in flight gets 'busy' and never starts; `spawn_job` detached + OSError → message (fake PTB Update/Context)",
-"status": "todo",
+"text": "RED: ack → task → render; exception → one line; 15-min deadline; second update acked while a first `work` blocks; a 3rd in flight gets 'busy' and never starts; `spawn_job` detached (own session, stdin closed) + OSError propagates to the caller, who composes the message (fake PTB Update/Context)",
+"status": "in_progress",
 "gate": true
 },
 {
