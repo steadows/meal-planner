@@ -467,11 +467,11 @@ Not yet tested: whether the importer handles every recipe site Steve uses.
 
 ### Phase 3: pantry table (about 2 hours)
 
-- [ ] Create `pantry_item` and `purchase_log` in the agentic OS SQLite file, or in a standalone `pantry.sqlite`.
-- [ ] Load the Phase 0 CSV, assign categories, and set first-guess intervals.
+- [x] Create `pantry_item` and `purchase_log` in the agentic OS SQLite file, or in a standalone `pantry.sqlite`. (Standalone; `meals/db.py` migrations, #6.)
+- [~] Load the Phase 0 CSV, assign categories, and set first-guess intervals. (`meals/seed_loader` shipped in #12; waits on Steve's real Phase 0 CSV, whose header is in #12's description.)
 - [ ] Add MCP tools: `list_pantry`, `set_status`, `log_purchase`, `staples_due`, `resolve_product`.
-- [ ] Write the function that combines quantities across recipes, with tests for ½ + ½, "1 lb" + "8 oz", and "2 cloves" + "1 head."
-- [ ] Check that the module runs with no agentic OS imports.
+- [x] Write the function that combines quantities across recipes, with tests for ½ + ½, "1 lb" + "8 oz", and "2 cloves" + "1 head." (`meals/rollup.py`, #12.)
+- [x] Check that the module runs with no agentic OS imports. (Enforced by import-linter, #12.)
 
 ### Phase 4: Telegram bot, capture first (about 2–3 hours)
 
