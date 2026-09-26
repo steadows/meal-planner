@@ -3,7 +3,7 @@ type: presence
 agent: bot
 feature: "Telegram bot: handlers, free-text intents, voice notes, commands"
 status: idle
-phase: waiting on contracts + existing-bot answers
+phase: "PLAN Phase 4 / Lane D: UNBLOCKED 2026-09-26 (contracts done; existing-bot questions answered = start fresh; background.py P1 merged #20). Not started; waits for Steve to open a bot session"
 owns_branches: ["bot"]
 plan: docs/PLAN.md (Implementation plan, Concurrency lanes)
 tracker_epic: none
@@ -11,7 +11,7 @@ current_worktree: /Users/stevemeadows/meal-planner-bot
 current_branch: feat/bot
 current_ticket: none
 touches: [meals/bot/, meals/prompts/intents/, tests/test_bot/]
-updated: 2026-09-25T14:17:50Z
+updated: 2026-09-26T20:57:54Z
 ---
 Lane D. Separate bot token, shared codebase pattern with the agentic-OS bot (PLAN.md → Reuse the existing bot). Free text and voice → Intent list via claude_runner → pantry ops; always echo back what was understood; lock to Steve's chat ID. Done when 'out of eggs' by text and by voice updates the pantry (milestone M1 with [[pantry]]). Waits on [[bot-contracts-waiting-on]] and on Steve's answers in [[bot-waiting-on]]. Unblocks [[bot-wiring-waiting-on]].
 
