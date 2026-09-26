@@ -546,15 +546,16 @@ tests/
 | `Intent` | kind (pick, swap, custody, pantry\_flip, add\_item, find, save, rate, mode), args | bot, pantry, planner |
 | `CartList` / `CartReport` | Items with qty, unit, meijer\_url, preferred\_name / added\[\], substituted\[\], missing\[\], subtotal | cart, bot |
 | `mealie_client` interface | `import_url()`, `get_recipe()`, `list_by_tag()`, `set_meal_plan()` | search, planner, cart |
+| `pantry` interface | `staples_due()`, status flips | planner, bot |
 
-Every contract ships with a fake in `meals/fakes/`, so each lane can test against the fakes before the real pieces exist.
+Every contract ships with a fake in `meals/fakes/`, so each lane can test against the fakes before the real pieces exist. The `mealie_client` and `pantry` interfaces are `typing.Protocol` classes in `contracts.py`. `mealie_client.py` and `pantry.py` implement them, and the modules that use them take an implementation as an argument instead of importing it.
 
 ### Definition of done for every module
 
 - [ ] Unit tests pass against the fakes
-- [ ] No imports from other `meals` modules except `contracts`, `db`, `config` and `claude_runner`
+- [ ] No imports from other `meals` modules except `contracts`, `db`, `config`, `claude_runner` and `rollup` (pure math). Only the entry points (`bot/`, `jobs`, `mcp_tools`, `__main__`) import the real modules and wire them together. `import-linter` enforces this in the test run.
 - [ ] Runs standalone with a local `pantry.sqlite` and `.env`
-- [ ] Claude prompts live in files next to the module, not inline strings
+- [ ] Claude prompts live in files under `meals/prompts/<lane>/`, not inline strings
 
 ## Concurrency lanes
 
@@ -606,9 +607,10 @@ Lane G wires up the scheduled jobs, which is what turns M1 and M2 into M3. The B
 ### Rules so parallel agents don't collide
 
 - Each lane owns its files and works on its own branch or worktree.
-- Only Lane 0 edits `contracts.py`. Other lanes request changes as small PRs and never edit it directly.
+- Only Lane 0 edits `contracts.py`, `db.py`, `config.py`, `claude_runner.py` and `meals/fakes/`. Other lanes request changes as small PRs and never edit them directly.
+- Any lane may add to `pyproject.toml` and `tests/conftest.py`, but only by adding. Changing or removing what's there goes through Lane 0.
 - Lanes test against `meals/fakes/`. Real services are only used in integration tests.
-- Merge order follows the diagram: 0, then B, C, D and E in any order, then F, then G.
+- Merge order follows the diagram: 0, then B, C, D and E in any order, then F and G in either order. G doesn't wait for F; if F lands second, G wires the cart-fill job in a small follow-up.
 
 ### Coordination with agent-brain
 

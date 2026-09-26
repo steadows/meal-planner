@@ -11,7 +11,9 @@ Read this, then `docs/PLAN.md` (the sections named below), before writing code.
 ## Lane rules
 
 - Work only in the files your lane owns (listed in `touches` in your presence note). Anything else: create or update a `connections/` note first.
-- Only the `contracts` lane edits `meals/contracts.py`, `meals/db.py`, `meals/config.py` and `meals/claude_runner.py`. Other lanes request changes with `brain dm @contracts` and a small PR.
+- Only the `contracts` lane edits `meals/contracts.py`, `meals/db.py`, `meals/config.py`, `meals/claude_runner.py` and `meals/fakes/`. Other lanes request changes with `brain dm @contracts` and a small PR.
+- Any lane may add to `pyproject.toml` and `tests/conftest.py`, but only by adding lines.
+- Modules reach Mealie and the pantry through the interfaces in `contracts.py`. Only the entry points (`bot/`, `jobs`, `mcp_tools`, `__main__`) import the real modules and wire them together (PLAN.md, Definition of done).
 - Test against `meals/fakes/`. Real services (Mealie, Telegram, Chrome/Meijer, `claude -p`) only in integration tests marked `@pytest.mark.integration`.
 - Rebase on `main` at the start of every session.
 
