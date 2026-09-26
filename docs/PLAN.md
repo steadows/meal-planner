@@ -544,8 +544,8 @@ tests/
 
 | Contract | Shape | Used by |
 | --- | --- | --- |
-| Database schema | `pantry_item`, `purchase_log`, `weekly_plan`, `meal_rating` (Pantry rules section) | pantry, planner, cart, bot |
-| `claude_runner.run(prompt, schema=None, chrome=False, timeout=600)` | Returns validated JSON, or raises with the raw output attached | search, planner, intents, cart |
+| Database schema | `pantry_item`, `purchase_log`, `weekly_plan`, `meal_rating` (Pantry rules section); `job_run`, one claim per scheduled job per week (ADR-0001; only `plan_state` reads and writes it) | pantry, planner, cart, bot, plan\_state |
+| `claude_runner.run(prompt, schema=None, chrome=False, timeout=600, hold_fds=())` | Returns validated JSON, or raises with the raw output attached. The child holds every fd in `hold_fds` (a job or Chrome lock) until it exits, even if the caller dies first (ADR-0001) | search, planner, intents, cart |
 | `RecipeOption` | name, url, source, hands\_on\_min, servings, batch\_ok, fit\_note, ingredients\[\], steps\[\], mealie\_slug (set only by the Mealie client; Claude's output can never set it) | search, planner, bot |
 | `WeekProposal` | week\_start (must be a Sunday, the cook day), mode, recipe\_options\[\], components{}, lunch\_builds\[\], kid\_nights\[\], pantry\_questions\[\] | planner, bot, cart |
 | `Intent` | kind (pick, swap, custody, pantry\_flip, add\_item, find, save, rate, mode), args | bot, pantry, planner |
@@ -558,7 +558,7 @@ Every contract ships with a fake in `meals/fakes/`, so each lane can test agains
 ### Definition of done for every module
 
 - [ ] Unit tests pass against the fakes
-- [ ] No imports from other `meals` modules except `contracts`, `db`, `config`, `claude_runner` and `rollup` (pure math). Only the entry points (`bot/`, `jobs`, `mcp_tools`, `__main__`, `seed_loader`) import the real modules and wire them together. `import-linter` enforces this in the test run.
+- [ ] No imports from other `meals` modules except `contracts`, `db`, `config`, `claude_runner` and `rollup` (pure math). Only the entry points (`bot/`, `jobs`, `mcp_tools`, `seed_loader`, and above them `__main__`, the composition root, per ADR-0001) import the real modules and wire them together. `import-linter` enforces this in the test run.
 - [ ] Runs standalone with a local `pantry.sqlite` and `.env`
 - [ ] Claude prompts live in files under `meals/prompts/<lane>/`, not inline strings
 
