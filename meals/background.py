@@ -53,7 +53,7 @@ async def start(
         return
     if _in_flight >= MAX_IN_FLIGHT:
         logger.info("refused a request: %d already in flight", _in_flight)
-        await message.reply_text(BUSY_TEXT, parse_mode=None)
+        await _reply(message, BUSY_TEXT)
         return
     _in_flight += 1  # no await since the check, so two handlers can't both take the last slot
     context.application.create_task(
@@ -64,29 +64,32 @@ async def start(
 async def _run(
     message: Message, work: Callable[[], T], render: Callable[[T], str], ack: str
 ) -> None:
-    submitted = False
+    future: asyncio.Future[T] | None = None
     try:
-        await message.reply_text(ack, parse_mode=None)
+        await _reply(message, ack)
         started = time.monotonic()
         future = asyncio.get_running_loop().run_in_executor(None, work)
         future.add_done_callback(_release)  # when the thread ends, not when we stop waiting
-        submitted = True
         done, _ = await asyncio.wait({future}, timeout=DEADLINE_S)
         if not done:
             logger.warning("gave up after %ss; the abandoned work still holds its slot", DEADLINE_S)
             future.add_done_callback(lambda f: _log_abandoned(f, time.monotonic() - started))
-            await message.reply_text(TIMEOUT_TEXT, parse_mode=None)
+            await _reply(message, TIMEOUT_TEXT)
             return
-        await message.reply_text(render(future.result()), parse_mode=None)
+        await _reply(message, render(future.result()))
     except Exception as exc:
         logger.exception("background work failed")
         try:
-            await message.reply_text(_one_line(exc), parse_mode=None)
+            await _reply(message, _one_line(exc))
         except Exception:
             logger.exception("couldn't send the error reply")
     finally:
-        if not submitted:
+        if future is None:  # work never started, so no done-callback will free the slot
             _release()
+
+
+async def _reply(message: Message, text: str) -> None:
+    await message.reply_text(text, parse_mode=None)  # plain text: replies carry web/Claude text
 
 
 def _release(_future: object = None) -> None:
