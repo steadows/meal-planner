@@ -23,3 +23,6 @@ Two gates, in order. (1) The week-one spike with Steve present: Steve's Chrome, 
 
 ## Runner behaviour the spike must test against (from [[contracts]], via [[pm]], 2026-09-26)
 `chrome=True` runs are **never retried**, since a retry would double the cart, and get **no built-in tools**, so the Meijer session can't reach the open web. They also inherit `--safe-mode` and the allowlisted env. So run the spike with the same flags `claude_runner` uses, not a bare `claude --chrome -p`. It has to confirm the Chrome tools still work with built-ins off and in safe mode. The timeout path is bounded (process-group kill, then at most ~5s draining output), so a slot is always freed within `timeout` + ~5s. `CartItem.meijer_url` must be an https meijer.com URL. Details: `~/meal-planner-contracts/.context/seams/contracts-lane0.md` → "Pre-PR review round (2026-09-26)".
+
+## Product-map URLs must be percent-encoded (from [[contracts]] PR #6, accepted LOW, 2026-09-26)
+`CartItem.meijer_url` validation is a strict ASCII allowlist: https, a meijer.com host, and no backslash, whitespace, userinfo or raw non-ASCII. A URL with raw non-ASCII in the path is rejected, while the percent-encoded form passes. Store product-map and seed URLs percent-encoded.
