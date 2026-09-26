@@ -1,12 +1,17 @@
 """The pantry's MCP tools: how Claude reads and updates the pantry (PLAN Phase 3).
 
-`uv run python -m meals.mcp_tools` serves them over stdio. Register with
-`claude mcp add --transport stdio pantry --scope project -- uv run python -m meals.mcp_tools`.
+`uv run python -m meals.mcp_tools` serves them over stdio, on the pantry `PANTRY_DB` names. Mount
+the server only in the Claude run that handles Steve's replies, through that run's own MCP config,
+and never in the project `.mcp.json`, which also mounts chrome-devtools (see the rule below).
 
 The arguments come from Claude reading Steve's free text, so this is a trust boundary:
-- every expected failure becomes a `ToolError` whose text Claude can act on (any other exception
-  reaches the client only as "Error executing tool <name>");
-- dates are kept to a window around today, checked before the pantry is opened;
+- arguments are strictly typed and dates kept to a window around today, all checked before the
+  pantry is opened (the SDK ignores argument names it doesn't know, so a misnamed optional
+  argument falls back to its default);
+- the writes take the date of Steve's message, never the clock, so a retried call repeats the
+  same date and the pantry treats it as a replay;
+- an unknown name or a corrupt row becomes a `ToolError` Claude can act on; anything else reaches
+  the client only as "Error executing tool <name>", with the traceback logged here;
 - no tool can write the product map, because the cart opens those URLs in Steve's logged-in
   Chrome session.
 
@@ -24,19 +29,24 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, closing, contextmanager
 from datetime import date, timedelta
-from typing import Protocol
+from typing import Annotated, Protocol
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from pydantic import Field, StrictBool, StrictFloat, StrictInt
 
+from meals.config import get_settings
 from meals.contracts import Pantry, PantryItem, PantryStatus
 from meals.db import get_db
-from meals.pantry import SqlitePantry
+from meals.pantry import PantryRowError, SqlitePantry
 
 # How far `on` may sit from today: a year back covers a late-logged purchase; one day ahead covers
 # a clock that has just ticked past midnight. Anything else is a transcription slip.
 PAST_DAYS = 366
 FUTURE_DAYS = 1
+
+Qty = Annotated[StrictFloat, Field(gt=0, allow_inf_nan=False)]
+PriceCents = Annotated[StrictInt, Field(ge=0)]
 
 
 class _PantryTools(Pantry, Protocol):
@@ -53,87 +63,93 @@ def open_real_pantry() -> Iterator[SqlitePantry]:
     """The real pantry over a fresh connection, closed on exit.
 
     One per tool call: the SDK runs sync tools in a worker thread, and a sqlite connection can't
-    be shared across threads.
+    be shared across threads. A missing database is refused rather than created empty, so a wrong
+    `PANTRY_DB` can't pass for an empty pantry.
     """
-    with closing(get_db()) as conn:
+    path = get_settings().pantry_db
+    if not path.exists():
+        raise ToolError(f"no pantry database at {path}: run the seed loader first")
+    with closing(get_db(path)) as conn:
         yield SqlitePantry(conn)
+
+
+@contextmanager
+def _opened(open_pantry: OpenPantry) -> Iterator[_PantryTools]:
+    """One pantry for one call. A PantryRowError names the bad row and its fix, so it reaches
+    Claude; anything else stays opaque."""
+    with open_pantry() as pantry:
+        try:
+            yield pantry
+        except PantryRowError as err:
+            raise ToolError(str(err)) from err
+
+
+def _check_on(on: date, today: date) -> date:
+    earliest, latest = today - timedelta(days=PAST_DAYS), today + timedelta(days=FUTURE_DAYS)
+    if not earliest <= on <= latest:
+        raise ToolError(
+            f"{on.isoformat()} is out of range: use a date from {earliest.isoformat()} "
+            f"to {latest.isoformat()}"
+        )
+    return on
+
+
+def _found(item: PantryItem | None, name: str) -> PantryItem:
+    if item is None:
+        raise ToolError(f"no pantry item called {name!r}")
+    return item
 
 
 def build_server(open_pantry: OpenPantry, today: Callable[[], date] = date.today) -> MCPServer:
     """The six pantry tools. `open_pantry` yields a pantry for one call; `today` is read per call."""
     server = MCPServer("pantry")
 
-    @contextmanager
-    def pantry() -> Iterator[_PantryTools]:
-        with open_pantry() as opened:
-            try:
-                yield opened
-            except ValueError as err:  # bad qty or price, or a PantryRowError naming the fix
-                raise ToolError(str(err)) from err
-
-    def day(on: date | None) -> date:
-        now = today()
-        earliest, latest = now - timedelta(days=PAST_DAYS), now + timedelta(days=FUTURE_DAYS)
-        if on is None:
-            return now
-        if not earliest <= on <= latest:
-            raise ToolError(
-                f"{on.isoformat()} is out of range: use a date from {earliest.isoformat()} "
-                f"to {latest.isoformat()}"
-            )
-        return on
-
-    def found(item: PantryItem | None, name: str) -> PantryItem:
-        if item is None:
-            raise ToolError(f"no pantry item called {name!r}")
-        return item
-
     @server.tool()
     def list_pantry() -> tuple[PantryItem, ...]:
         """Every pantry item with its status, category, last purchase and product details."""
-        with pantry() as p:
-            return p.list_items()
+        with _opened(open_pantry) as pantry:
+            return pantry.list_items()
 
     @server.tool()
     def staples_due(on: date | None = None) -> tuple[PantryItem, ...]:
-        """Staples to ask Steve about on `on` (default today): flagged buy-next-time first, then
-        the most overdue."""
-        checked = day(on)
-        with pantry() as p:
-            return p.staples_due(checked)
+        """Staples to ask Steve about on `on` (default today), most urgent first: flagged
+        buy-next-time, then the most overdue. Ask about three at most."""
+        day = today() if on is None else _check_on(on, today())
+        with _opened(open_pantry) as pantry:
+            return pantry.staples_due(day)
 
     @server.tool()
     def resolve_product(name: str) -> PantryItem:
         """The pantry item with this name or alias (case-insensitive), with its Meijer product."""
-        with pantry() as p:
-            return found(p.get_item(name), name)
+        with _opened(open_pantry) as pantry:
+            return _found(pantry.get_item(name), name)
 
     @server.tool()
     def set_status(name: str, status: PantryStatus) -> PantryItem:
-        """Mark an item as `have` or `buy_next_time` (Steve ran out, or used the last of it)."""
-        with pantry() as p:
-            return found(p.flip_status(name, status), name)
+        """Set `buy_next_time` when Steve has run out or used the last of an item. `have` only
+        undoes that: it records no purchase and doesn't move the next question, so use
+        log_purchase for "bought it" and confirm_stocked for "still have it"."""
+        with _opened(open_pantry) as pantry:
+            return _found(pantry.flip_status(name, status), name)
 
     @server.tool()
     def log_purchase(
-        name: str,
-        on: date | None = None,
-        qty: float | None = None,
-        price_cents: int | None = None,
+        name: str, on: date, qty: Qty | None = None, price_cents: PriceCents | None = None
     ) -> PantryItem:
-        """Record that Steve bought the item on `on` (default today). Repeating the same day is
-        harmless."""
-        checked = day(on)
-        with pantry() as p:
-            return found(p.log_purchase(name, checked, qty, price_cents), name)
+        """Record that Steve bought the item. `on` is the date of his message, not today's date,
+        so a retried call repeats it. One purchase per item per day: calling again for the same
+        day changes nothing, so it can't correct qty or price."""
+        day = _check_on(on, today())
+        with _opened(open_pantry) as pantry:
+            return _found(pantry.log_purchase(name, day, qty, price_cents), name)
 
     @server.tool()
-    def confirm_stocked(name: str, plenty: bool = False, on: date | None = None) -> PantryItem:
-        """Steve says the item is still good: ask again in a week, or after a full interval when
-        `plenty` is true ("we have plenty")."""
-        checked = day(on)
-        with pantry() as p:
-            return found(p.confirm_stocked(name, checked, plenty), name)
+    def confirm_stocked(name: str, on: date, plenty: StrictBool = False) -> PantryItem:
+        """Steve says the item is still good: don't ask again for a week, or for a full interval
+        when `plenty` is true ("we have plenty"). `on` is the date of his message."""
+        day = _check_on(on, today())
+        with _opened(open_pantry) as pantry:
+            return _found(pantry.confirm_stocked(name, day, plenty), name)
 
     return server
 
