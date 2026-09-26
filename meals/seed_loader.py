@@ -164,7 +164,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         items = read_seed_csv(args.csv)
         conn = get_db(args.db)
         try:
-            result = SqlitePantry(conn).load_seed(items)
+            result = SqlitePantry(conn).load_seed(items, date.today())
         finally:
             conn.close()
     except SeedError as error:
