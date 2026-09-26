@@ -6,7 +6,9 @@ from urllib.parse import parse_qs
 
 import httpx
 import pytest
+from pydantic import SecretStr
 
+from meals.config import Settings
 from meals.contracts import Ingredient, MealieClient
 from meals.mealie_client import BATCH_OK_TAG, PLAN_ENTRY_MARKER, HttpMealieClient
 
@@ -382,3 +384,211 @@ def test_set_meal_plan_raises_when_mealie_rejects_a_write(
     stub.create_entry_status = 500
     with pytest.raises(httpx.HTTPStatusError):
         client.set_meal_plan(WEEK, ["fajitas"])
+
+
+# ── guards (C2) ──────────────────────────────────────────────────────────────
+# Seam map lane-c-mealie: `_require_public_url`, the slug and tag allowlist, `from_settings`.
+# Mealie fetches import URLs from inside the home network, so only a public http(s) URL may reach
+# it. Slugs and tags go into URL paths, so anything outside [A-Za-z0-9_-]+ is unknown, unsent.
+
+NON_PUBLIC_URLS = [
+    pytest.param("file:///etc/passwd", id="file-scheme"),
+    pytest.param("ftp://example.com/r", id="ftp-scheme"),
+    pytest.param("gopher://example.com/", id="gopher-scheme"),
+    pytest.param("javascript:alert(1)", id="javascript-scheme"),
+    pytest.param("httpx://example.com/r", id="http-prefixed-scheme"),
+    pytest.param("www.budgetbytes.com/fajitas/", id="no-scheme"),
+    pytest.param("", id="empty"),
+    pytest.param("https:///path", id="no-host"),
+    pytest.param("http://:80/", id="port-only"),
+    pytest.param("https://user:pass@example.com/r", id="userinfo"),
+    pytest.param("https://example.com@evil.example/r", id="userinfo-lookalike"),
+    pytest.param("http://localhost:9925/api/users", id="localhost"),
+    pytest.param("http://LOCALHOST/", id="localhost-uppercase"),
+    pytest.param("http://localhost./", id="localhost-trailing-dot"),
+    pytest.param("http://app.localhost/", id="localhost-subdomain"),
+    pytest.param("http://mealie:9000/", id="docker-service-name"),
+    pytest.param("http://mealie./", id="single-label-trailing-dot"),
+    pytest.param("http://router/", id="lan-name"),
+    pytest.param("http://2130706433/", id="decimal-ip"),
+    pytest.param("http://0x7f000001/", id="hex-ip"),
+    pytest.param("http://127.0.0.1/x", id="loopback"),
+    pytest.param("http://127.0.0.1./x", id="loopback-trailing-dot"),
+    pytest.param("http://10.0.0.5/x", id="private-10"),
+    pytest.param("http://172.16.0.1/x", id="private-172"),
+    pytest.param("http://192.168.1.1:9925/", id="private-192-with-port"),
+    pytest.param("http://169.254.169.254/x", id="link-local-metadata"),
+    pytest.param("http://100.100.100.100/x", id="cgnat-tailscale"),
+    pytest.param("http://0.0.0.0/x", id="unspecified"),
+    pytest.param("http://224.0.0.1/x", id="multicast"),
+    pytest.param("http://255.255.255.255/x", id="broadcast"),
+    pytest.param("http://[::1]/x", id="ipv6-loopback"),
+    pytest.param("http://[::]/x", id="ipv6-unspecified"),
+    pytest.param("http://[fe80::1]:8080/x", id="ipv6-link-local-with-port"),
+    pytest.param("http://[fc00::1]/x", id="ipv6-ula"),
+    pytest.param("http://[::ffff:127.0.0.1]/x", id="ipv4-mapped-loopback"),
+    pytest.param("http://[::ffff:192.168.1.1]/x", id="ipv4-mapped-private"),
+    pytest.param("http://[::ffff:100.100.100.100]/x", id="ipv4-mapped-cgnat"),
+    pytest.param("http://0x7f.0.0.1/", id="inet-aton-hex"),
+    pytest.param("http://0177.0.0.1/", id="inet-aton-octal"),
+    pytest.param("http://127.1/", id="inet-aton-short"),
+    # The host is judged as the fetcher (httpx) parses it, IDNA-normalised: this is 127.0.0.1.
+    pytest.param("http://127。0.0.1/", id="idna-dot-loopback"),
+]
+
+PUBLIC_URLS = [
+    pytest.param("https://www.budgetbytes.com/sheet-pan-fajitas/", id="recipe-site"),
+    pytest.param("http://example.com/recipe", id="plain-http"),
+    pytest.param("https://sub.example.co.uk:8443/r?id=1#top", id="port-query-fragment"),
+    pytest.param("https://example.com./r", id="fqdn-trailing-dot"),
+    pytest.param("https://8.8.8.8/r", id="global-ipv4"),
+    pytest.param("https://[2606:4700:4700::1111]/r", id="global-ipv6"),
+    pytest.param("https://bücher.example/r", id="idn-host"),
+    # .example never resolves (RFC 2606), so a guard that looks the host up would refuse it.
+    pytest.param("https://recipes.example/r", id="unresolvable-no-dns-lookup"),
+]
+
+
+@pytest.mark.parametrize("url", NON_PUBLIC_URLS)
+def test_import_url_refuses_a_non_public_url_before_contacting_mealie(
+    client: HttpMealieClient, stub: MealieStub, url: str
+) -> None:
+    with pytest.raises(ValueError):
+        client.import_url(url)
+
+    assert stub.requests == []
+
+
+@pytest.mark.parametrize("url", PUBLIC_URLS)
+def test_import_url_sends_a_public_url_to_mealie_unchanged(
+    client: HttpMealieClient, stub: MealieStub, url: str
+) -> None:
+    assert client.import_url(url) == "imported-recipe"
+
+    [request] = stub.requests
+    assert json.loads(request.content)["url"] == url
+
+
+BAD_SLUGS = [
+    pytest.param("../users/self", id="traversal"),
+    pytest.param("..", id="dot-dot"),
+    pytest.param(".", id="dot"),
+    pytest.param("a/b", id="slash"),
+    pytest.param("a%2Fb", id="encoded-slash"),
+    pytest.param("fajitas?x=1", id="query"),
+    pytest.param("fajitas#x", id="fragment"),
+    pytest.param("fa jitas", id="space"),
+    pytest.param("", id="empty"),
+    pytest.param("fajitas\n", id="trailing-newline"),
+    pytest.param("fajítas", id="non-ascii"),
+]
+
+
+@pytest.mark.usefixtures("three_recipes")
+@pytest.mark.parametrize("slug", BAD_SLUGS)
+def test_get_recipe_treats_a_slug_outside_the_allowlist_as_unknown(
+    client: HttpMealieClient, stub: MealieStub, slug: str
+) -> None:
+    with pytest.raises(KeyError):
+        client.get_recipe(slug)
+
+    assert stub.requests == []
+
+
+@pytest.mark.usefixtures("three_recipes")
+@pytest.mark.parametrize("slug", BAD_SLUGS)
+def test_set_meal_plan_treats_a_slug_outside_the_allowlist_as_unknown(
+    client: HttpMealieClient, stub: MealieStub, slug: str
+) -> None:
+    with pytest.raises(KeyError):
+        client.set_meal_plan(WEEK, ["fajitas", slug])
+
+    assert stub.writes() == []
+    # Resolving the good slug first is allowed; nothing may be sent for the bad one.
+    assert {str(r.url) for r in stub.requests} - {"http://mealie.test/api/recipes/fajitas"} == set()
+
+
+@pytest.mark.parametrize("tag", BAD_SLUGS)
+def test_list_by_tag_treats_a_tag_outside_the_allowlist_as_unknown(
+    client: HttpMealieClient, stub: MealieStub, tag: str
+) -> None:
+    assert client.list_by_tag(tag) == ()
+    assert stub.requests == []
+
+
+def test_a_slug_may_mix_case_digits_underscores_and_hyphens(
+    client: HttpMealieClient, stub: MealieStub
+) -> None:
+    stub.recipes["Sheet_Pan-Fajitas-2"] = recipe_json("Sheet_Pan-Fajitas-2")
+
+    client.get_recipe("Sheet_Pan-Fajitas-2")
+
+    assert [r.url.path for r in stub.requests] == ["/api/recipes/Sheet_Pan-Fajitas-2"]
+
+
+TOKEN = "tok-123"
+
+
+def test_from_settings_sends_the_bearer_token_to_the_configured_host(stub: MealieStub) -> None:
+    settings = Settings(mealie_url="http://mealie.test", mealie_token=SecretStr(TOKEN))
+    client = HttpMealieClient.from_settings(settings, transport=httpx.MockTransport(stub))
+    stub.recipes["fajitas"] = recipe_json("fajitas")
+
+    client.get_recipe("fajitas")
+
+    [request] = stub.requests
+    assert request.url.host == "mealie.test"
+    assert request.headers["Authorization"] == f"Bearer {TOKEN}"
+
+
+def test_from_settings_keeps_a_path_prefix_in_mealie_url() -> None:
+    seen: list[httpx.Request] = []
+
+    def not_found(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(404, json={"detail": "not found"})
+
+    settings = Settings(mealie_url="http://mealie.test/mealie", mealie_token=SecretStr(TOKEN))
+    client = HttpMealieClient.from_settings(settings, transport=httpx.MockTransport(not_found))
+
+    with pytest.raises(KeyError):
+        client.get_recipe("fajitas")
+    assert [r.url.path for r in seen] == ["/mealie/api/recipes/fajitas"]
+
+
+def test_from_settings_without_a_token_raises_naming_mealie_token() -> None:
+    settings = Settings(mealie_url="http://mealie.test", mealie_token=None)
+
+    with pytest.raises(RuntimeError, match="MEALIE_TOKEN"):
+        HttpMealieClient.from_settings(settings)
+
+
+@pytest.mark.usefixtures("isolated_settings")
+def test_from_settings_defaults_to_the_process_settings(
+    stub: MealieStub, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MEALIE_URL", "http://env-mealie.test")
+    monkeypatch.setenv("MEALIE_TOKEN", "env-tok")
+    stub.recipes["fajitas"] = recipe_json("fajitas")
+
+    HttpMealieClient.from_settings(transport=httpx.MockTransport(stub)).get_recipe("fajitas")
+
+    [request] = stub.requests
+    assert request.url.host == "env-mealie.test"
+    assert request.headers["Authorization"] == "Bearer env-tok"
+
+
+def test_the_token_stays_out_of_repr_and_error_text(stub: MealieStub) -> None:
+    settings = Settings(mealie_url="http://mealie.test", mealie_token=SecretStr(TOKEN))
+    client = HttpMealieClient.from_settings(settings, transport=httpx.MockTransport(stub))
+    assert TOKEN not in repr(client)
+
+    stub.import_status = 401
+    with pytest.raises(httpx.HTTPStatusError) as unauthorized:
+        client.import_url("https://www.budgetbytes.com/fajitas/")
+    assert TOKEN not in str(unauthorized.value)
+
+    stub.import_status = 400
+    with pytest.raises(ValueError) as unscrapable:
+        client.import_url("https://www.budgetbytes.com/fajitas/")
+    assert TOKEN not in str(unscrapable.value)
