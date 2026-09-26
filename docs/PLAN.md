@@ -388,11 +388,11 @@ Only one program can read a Telegram bot token at a time. If two scripts poll th
 
 To confirm before building:
 
-- [ ] What language and Telegram library does the existing bot use?
-- [ ] Does it use polling or a webhook?
-- [ ] Does it run on the home machine?
-- [ ] Does it already call Claude, and if so through an API key or Claude Code?
-- [ ] Does it already handle voice notes?
+- [x] What language and Telegram library does the existing bot use? (Answered: start fresh; see below.)
+- [x] Does it use polling or a webhook?
+- [x] Does it run on the home machine?
+- [x] Does it already call Claude, and if so through an API key or Claude Code?
+- [x] Does it already handle voice notes?
 
 **Decided 2026-09-25: start fresh.** The agentic-OS bot isn't available to build against, and DinnerBot runs on Google Cloud with Gemini, so neither is reused. The new bot uses python-telegram-bot with polling on the home machine, calls Claude through `claude_runner`, and handles voice itself (Phase 4). DinnerBot's handler code is fair game to borrow from.
 
@@ -478,7 +478,7 @@ Not yet tested: whether the importer handles every recipe site Steve uses.
 
 ### Phase 4: Telegram bot, capture first (about 2–3 hours)
 
-- [ ] Create the bot with BotFather (`/newbot`) and lock it to Steve's chat ID.
+- [~] Create the bot with BotFather (`/newbot`) and lock it to Steve's chat ID. (@steve_meals_bot created 2026-09-25; token and chat ID are in `.env`. The chat-ID lock in code is Lane D's.)
 - [ ] Free text goes to Claude, which turns it into pantry operations, applies them through the MCP tools, and repeats back what changed.
 - [ ] Voice notes: transcribe (Whisper locally or through an API), then send the text down the same path. Always repeat the transcript back.
 - [ ] Commands: `/pantry`, `/plan`, `/due`.
@@ -491,7 +491,7 @@ This estimate assumes the agentic OS bot scaffolding already exists. Without it,
 ### Phase 5: weekly planning job (about 2–3 hours)
 
 - [ ] Add a Saturday 8 am job to the home-machine scheduler. Feed Claude the last three weeks of plans, Mealie recipes by tag, `staples_due()`, the fallback items, and this week's custody pattern.
-- [ ] Output is JSON: 4–5 recipe options from Mealie or the web, proteins, grains, veg trays, sauces, two lunch builds, kid-night coverage, and up to three pantry questions. Save it as a proposed `weekly_plan` and create the Mealie meal-plan entries.
+- [x] Output is JSON: 4–5 recipe options from Mealie or the web, proteins, grains, veg trays, sauces, two lunch builds, kid-night coverage, and up to three pantry questions. Save it as a proposed `weekly_plan` and create the Mealie meal-plan entries. (`planner.propose`, #10.)
 - [ ] Send the Telegram message and parse the reply into recipe picks, swaps and pantry answers.
 - [ ] Nudge at 4 pm Saturday if there's no reply. Reuse last week's plan Sunday at 8 am if there's still no reply.
 
@@ -506,7 +506,7 @@ This estimate assumes the agentic OS bot scaffolding already exists. Without it,
 ### Phase 7: improvements (ongoing, 1–2 hours each)
 
 - [ ] Thumbs up or down after kid dinners, so well-liked meals come back more often.
-- [ ] Staple intervals learned from the purchase log.
+- [x] Staple intervals learned from the purchase log. (Median gap in `meals/pantry.py`, #12.)
 - [ ] Pair components that finish a package, such as the second half of the cilantro.
 - [ ] Instacart backup path as `/cart instacart`.
 - [ ] Track mac and cheese variations and the chickpea-pasta trial as rated components.
