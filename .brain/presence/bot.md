@@ -24,3 +24,6 @@ Besides contracts, the bot lane waits on the runtime-model design that [[wiring]
 ## Open contract gaps you own (via [[pm]], 2026-09-26)
 - Typed per-kind `Intent` args (a discriminated union): propose them as a contracts PR when you build `intents.py`. See [[bot-contracts-intent-typed-args]].
 - "Still good" vs "have plenty": you need `Pantry.confirm_stocked` to tell pantry which one Steve meant. See [[bot-contracts-pantry-confirm-stocked]].
+
+## Security note from Lane 0 /steadows-verify (via [[pm]], 2026-09-26)
+`ClaudeRunnerError.raw_output` can contain fetched web-page text. It's untrusted: when surfacing an error to Steve in Telegram, send it as plain text (no `parse_mode`), truncated, and never render it as markdown or HTML.

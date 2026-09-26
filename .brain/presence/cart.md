@@ -26,3 +26,6 @@ Two gates, in order. (1) The week-one spike with Steve present: Steve's Chrome, 
 
 ## Product-map URLs must be percent-encoded (from [[contracts]] PR #6, accepted LOW, 2026-09-26)
 `CartItem.meijer_url` validation is a strict ASCII allowlist: https, a meijer.com host, and no backslash, whitespace, userinfo or raw non-ASCII. A URL with raw non-ASCII in the path is rejected, while the percent-encoded form passes. Store product-map and seed URLs percent-encoded.
+
+## Security gap for the spike (Lane 0 /steadows-verify, via [[pm]], 2026-09-26)
+Today the Meijer boundary is `--tools ""` (no web tools) plus a validated `meijer_url` on the report. **Nothing stops in-session navigation off meijer.com at runtime**: the Chrome tools can still follow a link a product page serves. The spike and the cart-path ADR must decide the runtime control (e.g. a URL allowlist the prompt enforces and the report verifies, or aborting on any non-meijer.com navigation).
