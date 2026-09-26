@@ -14,9 +14,11 @@ from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+from pydantic import TypeAdapter, ValidationError
+
 from meals import background, jobs, planner
 from meals.config import PROJECT_ROOT, get_settings
-from meals.contracts import CartReport, Custody, WeekProposal
+from meals.contracts import CartReport, Custody, SundayDate, WeekProposal
 from meals.db import get_db
 from meals.mealie_client import HttpMealieClient
 from meals.pantry import SqlitePantry
@@ -24,7 +26,7 @@ from meals.pantry import SqlitePantry
 logger = logging.getLogger("meals")
 
 JOB_LOG = PROJECT_ROOT / "data" / "logs" / "jobs.log"
-_SUNDAY = 6
+_SUNDAY_DATE: TypeAdapter[date] = TypeAdapter(SundayDate)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -76,13 +78,11 @@ def _now(text: str) -> datetime:
 
 
 def _sunday(text: str) -> date:
+    """A week is named by its Sunday (contracts.SundayDate)."""
     try:
-        day = date.fromisoformat(text)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"not a date (YYYY-MM-DD): {text!r}") from exc
-    if day.weekday() != _SUNDAY:
-        raise argparse.ArgumentTypeError(f"{text} isn't a Sunday; a week is named by its Sunday")
-    return day
+        return _SUNDAY_DATE.validate_python(text)
+    except ValidationError as exc:
+        raise argparse.ArgumentTypeError(f"{text!r}: {exc.errors()[0]['msg']}") from exc
 
 
 def _configure_logging() -> None:
@@ -124,8 +124,7 @@ def _report_startup_failure(send: jobs.TelegramSend, name: str, exc: Exception) 
     """The job couldn't even start (a bad path, a missing token): say so, loudly."""
     logger.exception("job %s couldn't start", name)
     try:
-        first_line = (str(exc).strip().splitlines() or [""])[0]
-        send(f"job {name} failed to start: {type(exc).__name__}: {first_line}"[:500])
+        send(f"job {name} failed to start: {background.first_line(exc)}"[: jobs.REASON_MAX_CHARS])
     except jobs.DeliveryFailed:
         logger.error("couldn't send the start-up failure for job %s", name)
     return 1

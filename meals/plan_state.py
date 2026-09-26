@@ -25,7 +25,7 @@ Outcome = Literal["done", "failed", "interrupted"]
 Claim = Literal["claimed", "finished", "running", "interrupted"]
 
 _SQLITE_TIME = "%Y-%m-%d %H:%M:%S"
-_APPROVED_OR_LATER = ("approved", "cart_filled", "ordered")
+APPROVED_OR_LATER: tuple[Status, ...] = ("approved", "cart_filled", "ordered")
 
 
 class PlanStateError(RuntimeError):
@@ -86,7 +86,7 @@ def _week(row: sqlite3.Row) -> StoredWeek:
 
 
 def _run(row: sqlite3.Row) -> JobRun:
-    return JobRun.model_validate({key: row[key] for key in row.keys()})
+    return JobRun.model_validate(dict(row))
 
 
 def get_week(conn: sqlite3.Connection, week_start: date) -> StoredWeek | None:
@@ -102,7 +102,7 @@ def recent_proposals(
         conn,
         "SELECT * FROM weekly_plan WHERE status IN (?, ?, ?) AND week_start < ?"
         " ORDER BY week_start DESC LIMIT ?",
-        (*_APPROVED_OR_LATER, before.isoformat(), limit),
+        (*APPROVED_OR_LATER, before.isoformat(), limit),
     )
     return tuple(_week(row).proposal for row in rows)
 
@@ -209,7 +209,7 @@ def set_mealie_ref(conn: sqlite3.Connection, week_start: date, ref: str) -> bool
         cursor = conn.execute(
             "UPDATE weekly_plan SET mealie_plan_ref = ?"
             " WHERE week_start = ? AND mealie_plan_ref IS NULL AND status IN (?, ?, ?)",
-            (ref, week_start.isoformat(), *_APPROVED_OR_LATER),
+            (ref, week_start.isoformat(), *APPROVED_OR_LATER),
         )
     return cursor.rowcount == 1
 

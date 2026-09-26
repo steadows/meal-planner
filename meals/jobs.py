@@ -35,9 +35,9 @@ import telegram
 from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError
 
 from meals import plan_state
-from meals.background import split_message
+from meals.background import first_line, split_message
 from meals.contracts import CartReport, Custody, MealieClient, WeekProposal
-from meals.plan_state import JobRun, StoredWeek
+from meals.plan_state import APPROVED_OR_LATER, JobRun, StoredWeek
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,6 @@ DEFAULT_CUSTODY: Custody = "wed+sat_sun"  # the first week's guess (seam map D2)
 
 _BACKOFF_S = (5.0, 15.0)
 _SAT, _SUN = 5, 6
-_APPROVED_OR_LATER = ("approved", "cart_filled", "ordered")
 _FILLED = ("cart_filled", "ordered")
 # Spelled out rather than strftime, which follows the process locale.
 _DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
@@ -235,16 +234,7 @@ def _inspect(run: _Run) -> int | None:
 
 def _effect_recorded(run: _Run) -> bool:
     """Whether the job's effect is persisted, so only its message can be outstanding."""
-    if run.name == "sat_nudge":
-        return True  # the message is the whole effect: an unfinished claim means it's owed
-    stored = plan_state.get_week(run.conn, run.week)
-    if stored is None:
-        return False
-    if run.name == "sat_propose":
-        return True
-    if run.name == "sun_autoapprove":
-        return stored.status in _APPROVED_OR_LATER
-    return stored.status in _FILLED
+    return _RECORDED[run.name](plan_state.get_week(run.conn, run.week))
 
 
 def _start(run: _Run) -> None:
@@ -277,9 +267,7 @@ def _catch_all(run: _Run, exc: BaseException, claimed: bool) -> int:
 
 
 def _reason(exc: BaseException) -> str:
-    text = str(exc).strip()
-    first = text.splitlines()[0] if text else type(exc).__name__
-    return first[:REASON_MAX_CHARS]
+    return first_line(exc)[:REASON_MAX_CHARS]
 
 
 def _deliver(run: _Run, text: str) -> None:
@@ -459,7 +447,7 @@ def _approve(run: _Run, plan: WeekProposal) -> bool:
     if plan_state.insert_week(run.conn, plan, "approved"):
         return True
     stored = plan_state.get_week(run.conn, run.week)  # lost a race: re-read
-    if stored is not None and stored.status in _APPROVED_OR_LATER:
+    if stored is not None and stored.status in APPROVED_OR_LATER:
         return False
     if plan_state.transition(run.conn, run.week, "proposed", "approved", proposal=plan):
         return True
@@ -550,7 +538,7 @@ def _reconcile(run: _Run) -> int:
     """Publish approved plans to Mealie and restart or redeliver cart fills, week by week. It
     claims nothing, and one week's failure doesn't stop the others."""
     for stored in plan_state.weeks_since(run.conn, run.today - timedelta(days=RECONCILE_DAYS)):
-        if stored.status in _APPROVED_OR_LATER and stored.mealie_plan_ref is None:
+        if stored.status in APPROVED_OR_LATER and stored.mealie_plan_ref is None:
             _publish(run, stored)
         if _needs_fill(run, stored):
             try:
@@ -662,6 +650,13 @@ _DECIDE: dict[str, Callable[[_Run], Callable[[], None] | None]] = {
     "sat_nudge": _decide_nudge,
     "sun_autoapprove": _decide_autoapprove,
     "cart_fill": _decide_fill,
+}
+# What "the effect is recorded" means per job (ADR-0001, Job contract step 2).
+_RECORDED: dict[str, Callable[[StoredWeek | None], bool]] = {
+    "sat_propose": lambda stored: stored is not None,
+    "sat_nudge": lambda stored: True,  # the message is the whole effect: the claim means it's owed
+    "sun_autoapprove": lambda stored: stored is not None and stored.status in APPROVED_OR_LATER,
+    "cart_fill": lambda stored: stored is not None and stored.status in _FILLED,
 }
 _REDELIVER: dict[str, Callable[[_Run, JobRun], None]] = {
     "sat_propose": _redeliver_proposal,

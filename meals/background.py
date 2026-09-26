@@ -118,10 +118,15 @@ def _log_abandoned(future: asyncio.Future[T], elapsed_s: float) -> None:
 
 
 def _one_line(exc: Exception) -> str:
-    """The first line of `exc`, or its type name if it has no text, cut to ERROR_MAX_CHARS."""
+    """The error reply: `exc`'s first line after the prefix, cut to ERROR_MAX_CHARS."""
+    return (_ERROR_PREFIX + first_line(exc))[:ERROR_MAX_CHARS]
+
+
+def first_line(exc: BaseException) -> str:
+    """The first line of `exc`'s text, or its type name if it has none. Chat replies and job
+    reports show only this: the rest (a traceback, a scraped page) belongs in the log."""
     text = str(exc).strip()
-    first = text.splitlines()[0] if text else type(exc).__name__
-    return (_ERROR_PREFIX + first)[:ERROR_MAX_CHARS]
+    return text.splitlines()[0] if text else type(exc).__name__
 
 
 def spawn_job(name: str, *args: str) -> int:
