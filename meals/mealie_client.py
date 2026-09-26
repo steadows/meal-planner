@@ -43,9 +43,9 @@ _BEARER_TOKEN = re.compile(r"[A-Za-z0-9._~+/-]+=*", re.ASCII)
 # also answers 500 for a server fault, which it can't be told apart from here, so it is logged.
 _SCRAPE_FAILURES = frozenset({400, 408, 500})
 # A term of a Mealie duration: "1 hour 30 minutes" (its scraper's format), "25 min", "PT1H30M".
-# The number must start the token (not "5" in ".5" or "2" in "1/2"); unsupported forms read None.
+# The number must start the token (not "5" in ".5"); fractions are refused before matching.
 _DURATION_PART = re.compile(
-    r"(?<![\d./])(\d+(?:\.\d+)?|\.\d+)\s*(days?|d|hours?|hrs?|h|minutes?|mins?|m)(?![a-z])",
+    r"(?<![\d.])(\d+(?:\.\d+)?|\.\d+)\s*(days?|d|hours?|hrs?|h|minutes?|mins?|m)(?![a-z])",
     re.IGNORECASE,
 )
 _UNIT_MINUTES = {"d": 24 * 60, "h": 60, "m": 1}
@@ -355,8 +355,9 @@ def _to_ingredient(line: _IngredientLine, fallback: str) -> Ingredient:
 
 
 def _minutes(text: str | None) -> int | None:
-    """Minutes in a Mealie duration string; a bare number is minutes. None if unreadable."""
-    if not text:
+    """Minutes in a Mealie duration string; a bare number is minutes. None if unreadable,
+    including any fraction ("1/2 hour"): summing the parts around it would be wrong."""
+    if not text or "/" in text:
         return None
     parts = _DURATION_PART.findall(text)
     if parts:
