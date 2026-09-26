@@ -9,8 +9,8 @@ never work around it. Scratch work goes only under `/tmp`.
 
 ## Data boundary (hard rule)
 
-You may read `meals/`, `tests/`, `docs/`, `pyproject.toml`, `uv.lock`, `.github/`, `CLAUDE.md` and
-`.context/seams/P1.md`. You must NOT read `.env`, anything under `data/`, `seed/`, or any real
+You may read `meals/`, `tests/`, `docs/`, `pyproject.toml`, `uv.lock`, `.github/`, `CLAUDE.md`,
+`.context/seams/P1.md` and `.context/reviews/p1-*`. You must NOT read `.env`, anything under `data/`, `seed/`, or any real
 Telegram, Mealie or Meijer content. Describe data by its shape, never its contents.
 
 ## Deference rule
@@ -34,7 +34,17 @@ happened yet. The callers of this module don't exist yet: the bot lane's `/find`
 
 ## The diff to review
 
-`git diff origin/main...HEAD` on branch `feat/wiring` (commits 25bec98 RED, f49049e GREEN, 0411db2
+**Don't run `uv`, `pytest` or `python` against the repo either.** They write caches such as
+`.pytest_cache` and `__pycache__` that the sandbox may deny. Reason from the code: the suite is
+already green (24/24; the five CI commands pass on Python 3.11).
+
+**Don't run `git`.** On this Mac, `/usr/bin/git` writes an xcrun cache under `/tmp` that the
+sandbox denies (the first dispatch of this brief stopped on exactly that). The diff is already
+written for you: read `.context/reviews/p1-diff.patch`, which is `git diff origin/main...HEAD` limited
+to `meals/`, `tests/`, `pyproject.toml` and this brief, and `.context/reviews/p1-commits.txt` for the
+commit list. Every file named below is in the working tree at HEAD; read it directly.
+
+It is `git diff origin/main...HEAD` on branch `feat/wiring` (commits 25bec98 RED, f49049e GREEN, 0411db2
 simplify, bd79edf repair RED, d0bc110 repairs; the older commits in the range are pre-squash
 history already on main). Read these in full:
 - `meals/background.py` (the whole product change, about 136 lines)
