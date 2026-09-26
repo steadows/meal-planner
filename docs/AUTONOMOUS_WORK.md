@@ -67,7 +67,12 @@ The `pm` lane sweeps the brain and relays to Steve.
    may open its own PR; **only merging needs Steve's explicit go** (§6).
 8. **`/steadows-ultrareview`** after the PR is open (§3.2).
 9. **`/steadows-verify`** once at the end of each phase, not per task or per PR.
-10. **Update status right away:** tick the PLAN.md checkbox the task closes, and keep your presence
+10. **Merge and clean up, once Steve says go** *(Steve, 2026-09-26)*. The lane merges its own PR
+    (a rebase merge, never `--admin`), then **deletes its merged branch on GitHub**
+    (`git push origin --delete feat/<lane>`), then **syncs its local `feat/<lane>` back to main**
+    (`git fetch --prune && git reset --hard origin/main` on a clean tree). Because the remote branch is
+    gone, the next PR pushes a fresh branch with `-u`, and no force-push is needed.
+11. **Update status right away:** tick the PLAN.md checkbox the task closes, and keep your presence
     note's `status`, `phase` and `touches` honest. When your lane merges, set `status: done`; that's
     what unblocks the lanes waiting on you.
 
@@ -155,7 +160,8 @@ instrument, not to stop the loop.** Keep going, and change what the next fix tar
 ## 6. Boundaries
 
 - **Merging is Steve's, always, explicitly and separately from any other approval.** A lane stops
-  at a clean, mergeable PR. Never use `gh pr merge --admin` to get past a failing check.
+  at a clean, mergeable PR. Once Steve says go, the lane does the merge and the branch clean-up
+  itself (§2 step 10). Never use `gh pr merge --admin` to get past a failing check.
 - **The cart lane stops at a filled cart.** Claude in Chrome must never complete a purchase, and
   must never open a non-meijer.com URL in the logged-in session. That's the prompt-injection
   boundary in PLAN.md → Risks, edge cases and costs.
