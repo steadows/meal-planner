@@ -3,7 +3,7 @@ type: presence
 agent: pm
 feature: "PM/coordination lane: sweeps the vault, unblocks waiting-on edges, tracks merge order against PLAN.md, files follow-ups — owns no meals/ code"
 status: active
-phase: #9–#13 and #15 merged; PLAN PR #14 open (CI green). Next: the ADR-gated contracts PR (after feat/contracts resync), the mealie TRUSTED one-liner, wiring P1 background.py, then the bot
+phase: "PRs 9-13 and 15 merged; PLAN PR 14 open (CI green). Next: ADR-gated contracts PR (after feat/contracts resync), mealie TRUSTED one-liner, wiring P1 background.py, then bot"
 owns_branches: ["pm"]
 plan: docs/PLAN.md (Concurrency lanes, Coordination with agent-brain)
 tracker_epic: none
