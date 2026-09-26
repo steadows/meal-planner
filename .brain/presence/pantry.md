@@ -3,7 +3,7 @@ type: presence
 agent: pantry
 feature: "Pantry table logic, staples_due, learned intervals, unit-aware roll-up, seed loader, MCP tools"
 status: active
-phase: "PR 3 mcp_tools on feat/pantry-mcp (Steve go 2026-09-26 ~16:54 EDT): RED via tw-pantry-mcp from .context/seams/lane-b-pantry-pr3-mcp-tools.md, tier high. Protocol lacks confirm_stocked, so a local _PantryTools Protocol (deleted when contracts adds it). PR 2b still waits on contracts feat/contracts-confirm-stocked"
+phase: "Phase 3 / Lane B — PR 3 mcp_tools on feat/pantry-mcp (Steve go 2026-09-26 ~16:54 EDT): RED via tw-pantry-mcp from .context/seams/lane-b-pantry-pr3-mcp-tools.md, tier high. Protocol lacks confirm_stocked, so a local _PantryTools Protocol (deleted when contracts adds it). PR 2b still waits on contracts feat/contracts-confirm-stocked"
 owns_branches: ["pantry"]
 plan: docs/PLAN.md (Implementation plan, Concurrency lanes)
 tracker_epic: none

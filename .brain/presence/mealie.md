@@ -10,7 +10,7 @@ tracker_epic: none
 current_worktree: /Users/stevemeadows/meal-planner-mealie
 current_branch: feat/mealie
 current_ticket: none
-touches: [.brain/presence/mealie.md]
-updated: 2026-09-26T20:54:33Z
+touches: [.brain/presence/pantry.md]
+updated: 2026-09-26T20:58:53Z
 ---
 Lane C. `import_url()`, `get_recipe()`, `list_by_tag()`, `set_meal_plan()` against the Mealie API (bearer token; endpoints from `/docs` on the running instance — verify, don't guess). Owns the compose file from PLAN.md Phase 1 and the tag conventions (protein, grain, veg-tray, sauce, kid-cook, lunch-build). Integration tests need Steve's running Mealie; unit tests use the fake. Waits on [[contracts-mealie-waiting-on]]. Unblocks [[mealie-wiring-waiting-on]].
