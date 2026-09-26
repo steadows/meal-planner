@@ -6,5 +6,8 @@
     "allow": [
       "Bash(/Users/stevemeadows/meal-planner/.brain/bin/brain:*)"
     ]
-  }
+  },
+  "enabledMcpjsonServers": [
+    "chrome-devtools"
+  ]
 }

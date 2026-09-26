@@ -24,6 +24,7 @@ Read this, then `docs/AUTONOMOUS_WORK.md` (how a lane runs its build loop: gates
 - Never commit secrets. Configuration comes from `.env` via `meals/config.py`.
 - Never let the cart lane open non-meijer.com URLs in the logged-in Chrome session (prompt-injection boundary — see PLAN.md, Risks).
 - Claude Code in Chrome cannot and must not complete a purchase. The cart lane stops at a filled cart.
+- End-to-end browser checks use the `chrome-devtools` MCP server from `.mcp.json`. It runs headless with a throwaway profile, so it never sees Steve's Meijer login. Don't point it at a real profile or a running Chrome (`--userDataDir`, `--browserUrl`), and don't turn Google's usage or CrUX reporting back on.
 
 ## Git
 
