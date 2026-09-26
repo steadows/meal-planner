@@ -32,7 +32,7 @@ class FakeMealieClient:
         return slug
 
     def get_recipe(self, slug: str) -> RecipeOption:
-        return self.recipes[slug]
+        return self.recipes[slug].model_copy(update={"mealie_slug": slug})
 
     def list_by_tag(self, tag: str) -> tuple[str, ...]:
         return self._tags.get(tag, ())
