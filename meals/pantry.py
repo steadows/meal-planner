@@ -64,13 +64,16 @@ class _Existing(NamedTuple):
     aliases: tuple[str, ...]
     category: str
     typical_interval_days: int | None
-    has_ask_date: bool  # a stored `last_purchased` or `next_ask_on`
+    has_purchase_or_reminder: bool  # a stored `last_purchased` or `next_ask_on`
 
 
 class SeedResult(Contract):
     inserted: tuple[str, ...] = Field(description="New items, in seed order")
     updated: tuple[str, ...] = Field(description="Existing items, in seed order")
     untouched: tuple[str, ...] = Field(description="Items not in the seed, left as they were")
+    reminded: tuple[str, ...] = Field(
+        default=(), description="Items given a first reminder by this load, in seed order"
+    )
 
 
 def _as_day(on: date) -> date:
@@ -142,16 +145,6 @@ def _postponed_ask(item: PantryItem, on: date, plenty: bool) -> date:
     return pushed if current is None else max(current, pushed)
 
 
-def _still_good_interval(item: PantryItem, on: date) -> int | None:
-    """PLAN: "still good" lengthens the estimate a little. A staple's interval becomes at least how
-    long it has lasted, plus a week. Staples only: their next purchase re-learns the median and
-    undoes any overshoot, but nothing re-learns another category's, so it would only ratchet up."""
-    interval, last = item.typical_interval_days, item.last_purchased
-    if item.category != "staple" or interval is None or last is None:
-        return interval
-    return max(interval, (on - last).days + STILL_GOOD_DAYS)
-
-
 def _due_sort_key(item: PantryItem, on: date) -> tuple[bool, bool, int, str]:
     """Flagged first, then most days past the ask date, then name. Sorted ascending."""
     asked_from = _ask_date(item)
@@ -172,12 +165,12 @@ def _is_due(item: PantryItem, on: date) -> bool:
 
 
 def _seed_reminder(
-    category: str, interval: int | None, has_ask_date: bool, on: date
+    category: str, interval: int | None, has_purchase_or_reminder: bool, on: date
 ) -> date | None:
     """The first ask for a staple already in the house (no purchase date, no ask date yet): 90% of
     its interval from the load day `on`, as if bought that day. For the reminder only; no purchase
     date is invented."""
-    if category != "staple" or interval is None or has_ask_date:
+    if category != "staple" or interval is None or has_purchase_or_reminder:
         return None
     return _ninety_percent_point(on, interval)
 
@@ -270,9 +263,10 @@ class SqlitePantry:
 
         Status becomes 'have', and the next ask moves to a week after `on` (still good) or one
         interval after it (plenty; a week with no interval), unless the current ask date is already
-        later: this never pulls an ask earlier. "Still good" on a staple also lengthens its
-        interval to at least how long it has lasted plus a week. Logs no purchase, and repeating
-        it for the same `on` changes nothing. Returns the updated item, or None if unknown.
+        later: this never pulls an ask earlier. Never changes the interval: a longer-lasting item
+        lengthens it through the gap its next purchase records. Logs no purchase, and repeating
+        any mix of these replies for the same `on` changes nothing. Returns the updated item, or
+        None if unknown.
         """
         on = _as_day(on)
         with self._write():
@@ -280,11 +274,10 @@ class SqlitePantry:
             if item is None:
                 return None
             ask = _postponed_ask(item, on, plenty)
-            interval = item.typical_interval_days if plenty else _still_good_interval(item, on)
             self._conn.execute(
                 "UPDATE pantry_item SET status = 'have', next_ask_on = ?, "
-                "typical_interval_days = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (ask.isoformat(), interval, item.id),
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (ask.isoformat(), item.id),
             )
             updated = self._reread(item.id)  # before COMMIT, so no other writer's change leaks in
         logger.info(
@@ -304,8 +297,9 @@ class SqlitePantry:
         The latest purchase restocks the item (`status` 'have', `last_purchased` = `on`) and clears
         any postponed ask (`next_ask_on`). A back-dated one only adds history. A staple with two or
         more distinct purchase dates learns its interval: the median gap. A purchase already logged
-        for that item and day writes nothing, so replays are safe. Returns the updated item, or None if the name is unknown.
-        Raises ValueError for a quantity that isn't positive and finite, or a negative price.
+        for that item and day writes nothing, so replays are safe. Returns the updated item, or
+        None if the name is unknown. Raises ValueError for a quantity that isn't positive and
+        finite, or a negative price.
         """
         if qty is not None:
             require_positive(qty, "qty")
@@ -350,7 +344,11 @@ class SqlitePantry:
             "pantry: logged %s purchase on %s (%s)",
             item.name,
             on,
-            "restocked" if latest else "history only",
+            "history only"
+            if not latest
+            else "restocked, postponed ask cleared"
+            if item.next_ask_on is not None
+            else "restocked",
         )
         return updated
 
@@ -378,28 +376,33 @@ class SqlitePantry:
                 raise ValueError(
                     "the seed would give two items the same name or alias: " + "; ".join(clashes)
                 )
-            inserted, updated = [], []
+            inserted, updated, reminded = [], [], []
             for seed in seeds:
                 match = existing.get(name_key(seed.name))
                 if match is None:
-                    self._insert_seed(seed, on)
+                    reminder = self._insert_seed(seed, on)
                     inserted.append(seed.name)
                 else:
-                    self._update_from_seed(match, seed, on)
+                    reminder = self._update_from_seed(match, seed, on)
                     updated.append(match.name)
+                if reminder is not None:
+                    reminded.append(seed.name if match is None else match.name)
         logger.info(
-            "pantry: seed loaded, %d inserted, %d updated, %d untouched",
+            "pantry: seed loaded, %d inserted, %d updated, %d untouched, %d first reminders set",
             len(inserted),
             len(updated),
             len(untouched),
+            len(reminded),
         )
         return SeedResult(
             inserted=tuple(inserted),
             updated=tuple(updated),
             untouched=tuple(sorted((item.name for item in untouched), key=name_key)),
+            reminded=tuple(reminded),
         )
 
-    def _insert_seed(self, seed: SeedItem, on: date) -> None:
+    def _insert_seed(self, seed: SeedItem, on: date) -> date | None:
+        """Insert a new item; returns its first reminder, if it got one."""
         interval = seed.typical_interval_days
         # A new row's only possible ask date is the seed's purchase date.
         reminder = _seed_reminder(seed.category, interval, seed.last_purchased is not None, on)
@@ -420,18 +423,24 @@ class SqlitePantry:
                 "INSERT INTO purchase_log (item_id, purchased_on, source) VALUES (?, ?, 'seed')",
                 (cursor.lastrowid, seed.last_purchased.isoformat()),
             )
+        return reminder
 
-    def _update_from_seed(self, item: _Existing, seed: SeedItem, on: date) -> None:
+    def _update_from_seed(self, item: _Existing, seed: SeedItem, on: date) -> date | None:
+        """Rewrite an existing item's product map; returns its first reminder, if it got one."""
         interval = self._seeded_interval(item, seed)
-        columns: dict[str, Any] = {**_product_map(seed), "typical_interval_days": interval}
-        reminder = _seed_reminder(seed.category, interval, item.has_ask_date, on)
-        if reminder is not None:
-            columns["next_ask_on"] = reminder.isoformat()
+        reminder = _seed_reminder(seed.category, interval, item.has_purchase_or_reminder, on)
+        columns = {
+            **_product_map(seed),
+            "typical_interval_days": interval,
+            # Only a new reminder is written; an existing ask date is never moved.
+            **({"next_ask_on": reminder.isoformat()} if reminder is not None else {}),
+        }
         assignments = ", ".join(f"{column} = ?" for column in columns)
         self._conn.execute(
             f"UPDATE pantry_item SET {assignments}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
             (*columns.values(), item.id),
         )
+        return reminder
 
     def _seeded_interval(self, item: _Existing, seed: SeedItem) -> int | None:
         """The interval an existing item ends up with after a seed row. Once a staple has enough
@@ -448,7 +457,7 @@ class SqlitePantry:
     def _existing_rows(self) -> tuple[_Existing, ...]:
         rows = self._conn.execute(
             "SELECT id, name, aliases, category, typical_interval_days, "
-            "last_purchased IS NOT NULL OR next_ask_on IS NOT NULL AS has_ask_date "
+            "last_purchased IS NOT NULL OR next_ask_on IS NOT NULL AS has_purchase_or_reminder "
             "FROM pantry_item ORDER BY id"
         ).fetchall()
         return tuple(
@@ -458,7 +467,7 @@ class SqlitePantry:
                 _stored_aliases(row),
                 row["category"],
                 row["typical_interval_days"],
-                bool(row["has_ask_date"]),
+                bool(row["has_purchase_or_reminder"]),
             )
             for row in rows
         )

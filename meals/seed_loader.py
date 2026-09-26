@@ -9,7 +9,8 @@ The CSV has a header row. `name` and `category` are required; the other columns 
 
 - `category`: staple, perishable or fallback. `aliases`: `;`-separated.
 - `interval_days`: a first guess, in days. `last_purchased`: an ISO date (2026-09-26), and only a
-  real purchase date. Leave it blank for something that was already in the house.
+  real purchase date. Leave it blank for something that was already in the house: a staple like
+  that is first asked about at 90% of its interval from the day you load the CSV.
 - `substitute_ok`, `for_miles`: 1/0, yes/no or true/false.
 - `meijer_url`: a meijer.com https URL. Raw non-ASCII characters are percent-encoded here, and the
   URL is then held to the meijer.com-only rule the cart relies on.
@@ -178,6 +179,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ("inserted", result.inserted),
         ("updated", result.updated),
         ("not in the CSV, left unchanged", result.untouched),
+        ("first reminder set", result.reminded),
     ):
         print(f"{label} {len(names)}" + (f": {', '.join(names)}" if names else ""))
     return 0
