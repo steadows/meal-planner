@@ -13,7 +13,7 @@ import subprocess
 import tempfile
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from string import Template
 from typing import Any, TypeVar, overload
@@ -210,8 +210,9 @@ def _run_once(command: list[str], prompt: str, timeout: int, slot_fd: int) -> tu
         except BaseException as exc:
             # Ctrl-C or any other error: start_new_session keeps the signal from reaching claude,
             # so it would run on (for a Chrome run, still filling the cart). Same as subprocess.run.
-            logger.warning("claude run interrupted by %s; killing it", type(exc).__name__)
-            _terminate(process)
+            _terminate(process)  # first: nothing may run between the error and the kill
+            with suppress(KeyboardInterrupt):  # best effort; the original exception still wins
+                logger.warning("claude run interrupted by %s; killed it", type(exc).__name__)
             raise
     return process.returncode, stdout, stderr
 

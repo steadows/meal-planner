@@ -576,6 +576,47 @@ def test_a_second_interrupt_during_the_kill_still_finishes_it_and_keeps_the_firs
                 _kill(call["grandchild"])
 
 
+def test_an_interrupt_during_the_kill_warning_still_kills_claude_and_keeps_the_first(
+    fake_claude_home: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Logging the kill is I/O too: a Ctrl-C landing in it must not skip the kill or replace the
+    caller's exception."""
+    kill_warnings: list[str] = []
+
+    def interrupt_the_kill_warning(record: logging.LogRecord) -> bool:
+        # A logger filter runs inside logger.warning(), and logging doesn't catch its errors.
+        message = record.getMessage()
+        if not kill_warnings and record.levelno == logging.WARNING and "kill" in message.lower():
+            kill_warnings.append(message)
+            raise KeyboardInterrupt("second")
+        return True
+
+    caplog.set_level(logging.WARNING, logger="meals.claude_runner")
+    _script(fake_claude_home, {"sleep": 20, "grandchild": True, **OK})
+    interrupt = KeyboardInterrupt("marker-ctrl-c")
+    processes: list[subprocess.Popen[str]] = []
+    interrupted = _interrupting(subprocess.Popen.communicate, interrupt, processes)
+    monkeypatch.setattr(subprocess.Popen, "communicate", interrupted)
+    claude_runner.logger.addFilter(interrupt_the_kill_warning)
+    try:
+        with pytest.raises(KeyboardInterrupt) as caught:
+            claude_runner.run(PROMPT, timeout=RUN_TIMEOUT)
+
+        assert kill_warnings, "the kill-path warning was never logged"
+        assert caught.value is interrupt
+        (call,) = _calls(fake_claude_home)
+        assert not _alive(call["pid"])
+        (process,) = processes
+        pipes = (process.stdin, process.stdout, process.stderr)
+        assert [pipe is not None and pipe.closed for pipe in pipes] == [True, True, True]
+    finally:
+        claude_runner.logger.removeFilter(interrupt_the_kill_warning)
+        for call in _calls(fake_claude_home):
+            _kill(call["pid"])
+            if call["grandchild"] is not None:
+                _kill(call["grandchild"])
+
+
 # ── the cross-process slot cap ───────────────────────────────────────────────
 
 DRIVER = (
