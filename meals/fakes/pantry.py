@@ -55,11 +55,7 @@ class FakePantry:
         """Steve says an item is still stocked: status becomes `have`, and the next ask moves to a
         week after `on` ("still good") or one interval after it (`plenty`; a week if there's no
         interval), unless the current ask date is already later: this only ever pushes the ask
-        back. Logs no purchase, and repeating it for the same `on` changes nothing. The real
-        pantry may also lengthen the learned interval.
-
-        Not on the `Pantry` Protocol yet: it joins in a one-line contracts PR once the real pantry
-        implements it, so neither lane's PR has to merge first."""
+        back. Logs no purchase, and repeating it for the same `on` changes nothing."""
         item = self._find(name)
         if item is None:
             return None

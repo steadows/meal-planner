@@ -284,6 +284,14 @@ class Pantry(Protocol):
         """Set the item's status. Returns the updated item."""
         ...
 
+    def confirm_stocked(self, name: str, on: date, plenty: bool = False) -> PantryItem | None:
+        """Steve says the item is still stocked on `on`: "still good", or "have plenty" (`plenty`).
+        Status becomes `have`, and the next ask moves to a week after `on` (still good) or one
+        interval after it (plenty; a week with no interval), unless the ask date is already
+        later: this never pulls an ask earlier. Logs no purchase and never changes the interval.
+        Repeating a reply for the same `on` changes nothing. Returns the updated item."""
+        ...
+
     def log_purchase(
         self, name: str, on: date, qty: float | None = None, price_cents: int | None = None
     ) -> PantryItem | None:
