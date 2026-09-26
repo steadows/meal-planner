@@ -16,6 +16,7 @@ from meals.contracts import (
     Components,
     Intent,
     MealieClient,
+    MealieUnavailable,
     Pantry,
     PantryItem,
     RecipeOption,
@@ -247,6 +248,32 @@ def test_fake_mealie_refuses_slugs_mealie_would_never_issue(sample_recipe: Recip
     mealie = FakeMealieClient(importable={"https://example.com/p": unsluggable})
     with pytest.raises(ValueError, match="slug"):
         mealie.import_url("https://example.com/p")
+    with pytest.raises(ValueError, match="slug"):
+        FakeMealieClient(unavailable=("Bad Slug/..",))
+
+
+def test_mealie_unavailable_is_not_caught_as_a_missing_recipe() -> None:
+    """A caller skipping missing recipes with `except KeyError` must not swallow an outage."""
+    assert issubclass(MealieUnavailable, Exception)
+    assert not issubclass(MealieUnavailable, LookupError)
+
+
+@pytest.mark.parametrize("stored", [True, False], ids=["stored", "not-stored"])
+def test_fake_mealie_can_fail_one_recipe_among_good_ones(
+    sample_recipe: RecipeOption, stored: bool
+) -> None:
+    """One broken rotation favourite fails on its own while the rest still load: the case search's
+    _rotation_pool is to skip. It fails whether or not the fake holds a recipe for it."""
+    recipes = {"good": sample_recipe} | ({"broken": sample_recipe} if stored else {})
+    mealie = FakeMealieClient(
+        recipes=recipes, tags={"rotation": ("good", "broken")}, unavailable=("broken",)
+    )
+    assert mealie.list_by_tag("rotation") == ("good", "broken")
+    with pytest.raises(MealieUnavailable, match="broken"):
+        mealie.get_recipe("broken")
+    assert mealie.get_recipe("good").mealie_slug == "good"
+    with pytest.raises(KeyError):
+        mealie.get_recipe("no-such-recipe")
 
 
 # ── FakePantry ───────────────────────────────────────────────────────────────

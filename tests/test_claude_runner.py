@@ -983,10 +983,37 @@ def test_trusted_validation_rejects_a_mealie_slug_outside_the_sink_allowlist(slu
         )
 
 
+# ── the live-claude gate (tests/conftest.py `live_claude`) ───────────────────
+
+
+@pytest.mark.parametrize("value", [None, "", "0", "true"])
+def test_live_claude_tests_skip_unless_meals_live_claude_is_1(
+    value: str | None, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
+    """`-m integration` alone must spend no Claude usage (connections/contracts-search-live-claude-test-gate)."""
+    if value is None:
+        monkeypatch.delenv("MEALS_LIVE_CLAUDE", raising=False)
+    else:
+        monkeypatch.setenv("MEALS_LIVE_CLAUDE", value)
+    with pytest.raises(pytest.skip.Exception, match="MEALS_LIVE_CLAUDE=1"):
+        request.getfixturevalue("live_claude")
+
+
+def test_live_claude_tests_run_with_meals_live_claude_1(
+    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
+    monkeypatch.setenv("MEALS_LIVE_CLAUDE", "1")
+    try:
+        request.getfixturevalue("live_claude")
+    except pytest.skip.Exception:
+        pytest.fail("live_claude skipped with MEALS_LIVE_CLAUDE=1")
+
+
 # ── integration: the real `claude` ───────────────────────────────────────────
 
 
 @pytest.mark.integration
+@pytest.mark.usefixtures("live_claude")
 def test_real_claude_returns_a_validated_ingredient() -> None:
     """Definition of done for the lane. Needs `claude /login`; run with -m integration."""
     if shutil.which(get_settings().claude_bin) is None:

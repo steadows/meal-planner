@@ -231,6 +231,16 @@ def describe_rejection(schema: type[BaseModel], exc: ValidationError) -> str:
     )
 
 
+class MealieUnavailable(Exception):
+    """Mealie couldn't answer: an HTTP error other than a 404 for the recipe itself (that's KeyError),
+    a rejected token (401/403) included, a network failure, or a response that doesn't parse. The
+    client raises it `from` the underlying error. Its message is safe to log (no token); the chained
+    cause isn't vetted, so log the message, not the traceback. It can mean one recipe Mealie can't
+    serve or Mealie being unusable (down, or the token revoked), and a caller can't tell which, so
+    one that skips a failing recipe should still fail loudly when every call fails. Not a KeyError,
+    so skipping missing recipes doesn't swallow it."""
+
+
 @runtime_checkable
 class MealieClient(Protocol):
     def import_url(self, url: str) -> str:
@@ -238,7 +248,8 @@ class MealieClient(Protocol):
         ...
 
     def get_recipe(self, slug: str) -> RecipeOption:
-        """The recipe, with `mealie_slug` set to `slug`. Raises KeyError for an unknown slug."""
+        """The recipe, with `mealie_slug` set to `slug`. Raises KeyError for an unknown slug, and
+        MealieUnavailable for any other failure."""
         ...
 
     def list_by_tag(self, tag: str) -> tuple[str, ...]:
