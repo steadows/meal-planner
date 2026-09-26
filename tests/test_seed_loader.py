@@ -295,6 +295,9 @@ def test_aliases_split_on_semicolons_and_drop_blank_parts(tmp_path: Path) -> Non
         {"default_qty": "0"},
         {"category": "snack"},
         {"name": "  "},
+        # review finding 9
+        {"interval_days": "4000000"},
+        {"default_qty": "inf"},
     ],
     ids=[
         "boolean maybe",
@@ -308,6 +311,8 @@ def test_aliases_split_on_semicolons_and_drop_blank_parts(tmp_path: Path) -> Non
         "qty zero",
         "unknown category",
         "blank name",
+        "interval absurd",
+        "qty inf",
     ],
 )
 def test_a_bad_cell_is_an_error_on_its_row(tmp_path: Path, cells: dict[str, str]) -> None:
@@ -394,6 +399,26 @@ def test_every_bad_row_is_reported_with_its_row_number(tmp_path: Path) -> None: 
     assert isinstance(excinfo.value, ValueError)
 
 
+def test_a_row_with_more_cells_than_the_header_is_an_error_on_its_row(tmp_path: Path) -> None:
+    # review finding 7: an unquoted comma in a note spills into a cell no column owns
+    path = tmp_path / "seed.csv"
+    path.write_text(
+        "name,category\ncouscous,staple\nrice,staple,stir first, it separates\n", encoding="utf-8"
+    )
+    with pytest.raises(SeedError) as excinfo:
+        read_seed_csv(path)
+    assert _row_numbers(excinfo.value.problems) == {3}
+
+
+def test_row_numbers_are_file_lines_so_blank_lines_count(tmp_path: Path) -> None:
+    # review finding 8: "row N" is the line to open in an editor, the header being line 1
+    path = tmp_path / "seed.csv"
+    path.write_text("name,category\n\nrice,snack\n", encoding="utf-8")
+    with pytest.raises(SeedError) as excinfo:
+        read_seed_csv(path)
+    assert _row_numbers(excinfo.value.problems) == {3}
+
+
 # ── staples_due on seed data (PLAN.md, Concurrency lanes: Lane B done-when) ──
 
 
@@ -456,3 +481,14 @@ def test_main_prints_a_namespace_clash_to_stderr_writes_nothing_and_exits_1(
     assert main([str(csv_path), "--db", str(db_path)]) == 1
     assert "tahini" in capsys.readouterr().err.casefold()
     assert _dump(db_path) == before
+
+
+def test_main_reports_a_database_it_cant_open_and_exits_1(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:  # review finding 10
+    db_path = tmp_path / "cli.sqlite"
+    db_path.write_bytes(b"not a database")
+    assert main([str(FIXTURE), "--db", str(db_path)]) == 1
+    err = capsys.readouterr().err
+    assert err.strip()
+    assert "Traceback" not in err

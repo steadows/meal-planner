@@ -169,5 +169,8 @@ def packages_needed(need: Ingredient, pack_qty: float, pack_unit: str | None) ->
     have, pack = _measure(need.name, need.unit), _measure(need.name, pack_unit)
     if have.dimension != pack.dimension:
         return None
-    packs = need.qty * have.factor / (pack_qty * pack.factor)
-    return math.ceil(packs - _EPSILON)
+    ratio = have.factor / (pack_qty * pack.factor)
+    # combine() rounds to ROUND_DIGITS in the need's unit; an excess within that rounding is noise
+    # (5/3 tbsp stored as 1.666667 is 5 tsp, not a sliver over), not a reason to buy another pack.
+    rounding_slack = 0.5 * 10.0**-ROUND_DIGITS * ratio
+    return math.ceil(need.qty * ratio - rounding_slack - _EPSILON)

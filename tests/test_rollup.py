@@ -111,6 +111,12 @@ def test_real_precision_survives_the_rounding() -> None:
     assert packages_needed(combined[0], 1, "kg") == 2
 
 
+def test_the_rounding_itself_never_costs_an_extra_pack() -> None:
+    # review finding 11: 1 tbsp + 2 tsp is 5 tsp exactly, stored as 1.666667 tbsp
+    combined = combine([_ing("salt", 1, "tbsp"), _ing("salt", 2, "tsp")])
+    assert packages_needed(combined[0], 1, "tsp") == 5
+
+
 def test_empty_input_gives_empty_output() -> None:
     assert combine([]) == ()
 

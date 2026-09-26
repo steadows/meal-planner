@@ -22,8 +22,9 @@ An entry point: it wires the database to the pantry, so it may import both.
 
 import argparse
 import csv
+import sqlite3
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import date
 from pathlib import Path
 from urllib.parse import quote
@@ -85,10 +86,12 @@ def _parse_cell(column: str, cell: str) -> object:
     return cell
 
 
-def _parse_row(row: dict[str, str | None]) -> SeedItem:
+def _parse_row(row: Mapping[str | None, str | list[str] | None]) -> SeedItem:
     """One data row to a SeedItem. Raises ValueError (or ValidationError) naming the bad cells."""
     fields: dict[str, object] = {}
     for column, raw in row.items():
+        if column is None or isinstance(raw, list):  # csv puts cells past the header under None
+            raise ValueError("more cells than the header has columns (quote a cell with a comma)")
         cell = (raw or "").strip()
         if cell:
             fields[_FIELD_FOR_COLUMN.get(column, column)] = _parse_cell(column, cell)
@@ -125,11 +128,12 @@ def read_seed_csv(path: Path) -> tuple[SeedItem, ...]:
             raise SeedError(problems)
         reader.fieldnames = header
         items: list[SeedItem] = []
-        for row_number, row in enumerate(reader, start=2):
+        for row in reader:
             try:
                 items.append(_parse_row(row))
             except ValueError as error:
-                problems.append(f"row {row_number}: {_describe(error)}")
+                # The file line the row ends on (header = row 1), so blank lines count.
+                problems.append(f"row {reader.line_num}: {_describe(error)}")
     if problems:
         raise SeedError(problems)
     return tuple(items)
@@ -154,8 +158,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         for problem in error.problems:
             print(problem, file=sys.stderr)
         return 1
-    except (OSError, ValueError) as error:
-        print(error, file=sys.stderr)
+    except (OSError, ValueError, sqlite3.Error) as error:
+        print(f"{args.csv}: {error}", file=sys.stderr)
         return 1
     for label, names in (
         ("inserted", result.inserted),
