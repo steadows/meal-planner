@@ -18,6 +18,7 @@ from typing import Any
 from pydantic import Field
 
 from meals.contracts import Contract, MeijerUrl, PantryCategory, PantryItem, PantryStatus
+from meals.rollup import require_positive
 
 # PLAN: ask about a staple once 90% of its interval has passed. Kept as a ratio of integers so
 # the due date is exact (0.9 isn't representable in binary floating point).
@@ -191,8 +192,8 @@ class SqlitePantry:
         nothing, so replays are safe. Returns the updated item, or None if the name is unknown.
         Raises ValueError for a quantity that isn't positive and finite, or a negative price.
         """
-        if qty is not None and not (math.isfinite(qty) and qty > 0):
-            raise ValueError(f"qty must be a positive, finite number, got {qty!r}")
+        if qty is not None:
+            require_positive(qty, "qty")
         if price_cents is not None and price_cents < 0:
             raise ValueError(f"price_cents can't be negative, got {price_cents!r}")
         with self._write() as conn:
@@ -281,7 +282,8 @@ class SqlitePantry:
 
     def _update_from_seed(self, conn: sqlite3.Connection, item: PantryItem, seed: SeedItem) -> None:
         interval = item.typical_interval_days
-        if seed.typical_interval_days is not None and len(self._purchase_dates(item.id)) < 2:
+        learning_owns_it = _median_gap(self._purchase_dates(item.id)) is not None
+        if seed.typical_interval_days is not None and not learning_owns_it:
             interval = seed.typical_interval_days
         columns = {**_product_map(seed), "typical_interval_days": interval}
         assignments = ", ".join(f"{column} = ?" for column in columns)
