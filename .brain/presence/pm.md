@@ -3,7 +3,7 @@ type: presence
 agent: pm
 feature: "PM/coordination lane: sweeps the vault, unblocks waiting-on edges, tracks merge order against PLAN.md, files follow-ups — owns no meals/ code"
 status: active
-phase: AUTONOMOUS_WORK.md merged + all worktrees synced; CI workflow parked on branch pm-ci (PR after contracts merges), then branch protection
+phase: contracts PR #6 up (ultrareview in progress); CI PR #7 stacked on it and green; PR #5 (chrome-devtools MCP, coverage ignore, presence path) awaiting merge; branch protection after #7 lands on main
 owns_branches: ["pm"]
 plan: docs/PLAN.md (Concurrency lanes, Coordination with agent-brain)
 tracker_epic: none
@@ -11,7 +11,7 @@ current_worktree: /Users/stevemeadows/meal-planner-pm
 current_branch: feat/pm
 current_ticket: none
 touches: [docs/PLAN.md, CLAUDE.md, .claude/settings.json, .gitignore, .github/, .brain/presence/, .brain/connections/, .brain/journal/]
-updated: 2026-09-26T03:09:55Z
+updated: 2026-09-26T03:36:24Z
 ---
 Coordination lane, not a build lane — owns no files under `meals/`. Job: periodic sweep of `.brain/` (presence notes, `connections/`, journal) to catch stalled lanes, unresolved `waiting-on` edges, and merge-order violations against the diagram in PLAN.md (`Concurrency lanes`); message a stuck lane; keep this note's `status` honest. Comms: live `SendMessage` between lanes (Steve, 2026-09-25) — do NOT arm a watcher on `dm/pm/pending`.
 
@@ -58,4 +58,4 @@ Pre-checked on 2026-09-25: none of these files existed, `~/.gitconfig` had no in
 - **Installed skill:** the global `~/.claude/skills/navigation-standards` is the ERD-customized copy. It references `docs/AUTONOMOUS_WORK.md`, `.brain/pm/punch-list.md` and "87 research notes", none of which exist here, and its whoami folder-name fallback isn't in this engine. `.brain/research/` doesn't exist yet.
 
 ## Follow-ups (pm backlog)
-- [ ] **Chrome DevTools MCP for e2e testing** (Steve, 2026-09-25, "when we get a chance"). It isn't configured anywhere yet: there's no global MCP server and no `.mcp.json`. Plan: [[pm]] adds a committed project `.mcp.json` with the `chrome-devtools` server so every worktree gets it. Main users: [[wiring]] (end-to-end Saturday dry run, M4) and [[mealie]] (checking a meal plan renders in Mealie). **Hard rule:** e2e uses an isolated, throwaway Chrome profile, never Steve's logged-in Meijer profile. Same prompt-injection and no-checkout boundary as the cart lane. Research the current server package and flags before adding it.
+- [~] **Chrome DevTools MCP for e2e testing** (PR #5 open) (Steve, 2026-09-25, "when we get a chance"). It isn't configured anywhere yet: there's no global MCP server and no `.mcp.json`. Plan: [[pm]] adds a committed project `.mcp.json` with the `chrome-devtools` server so every worktree gets it. Main users: [[wiring]] (end-to-end Saturday dry run, M4) and [[mealie]] (checking a meal plan renders in Mealie). **Hard rule:** e2e uses an isolated, throwaway Chrome profile, never Steve's logged-in Meijer profile. Same prompt-injection and no-checkout boundary as the cart lane. Research the current server package and flags before adding it.
