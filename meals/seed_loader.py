@@ -110,9 +110,12 @@ def _describe(error: ValueError) -> str:
 def _header_problems(header: Sequence[str]) -> list[str]:
     missing = [column for column in REQUIRED_COLUMNS if column not in header]
     unknown = [c for c in header if c not in REQUIRED_COLUMNS and c not in OPTIONAL_COLUMNS]
-    return [f"row 1 (header): missing column {column!r}" for column in missing] + [
-        f"row 1 (header): unknown column {column!r}" for column in unknown
-    ]
+    repeated = sorted({column for column in header if header.count(column) > 1})
+    return (
+        [f"row 1 (header): missing column {column!r}" for column in missing]
+        + [f"row 1 (header): unknown column {column!r}" for column in unknown]
+        + [f"row 1 (header): column {column!r} appears more than once" for column in repeated]
+    )
 
 
 def read_seed_csv(path: Path) -> tuple[SeedItem, ...]:
@@ -121,19 +124,26 @@ def read_seed_csv(path: Path) -> tuple[SeedItem, ...]:
     Raises SeedError listing every bad header column or row.
     """
     with path.open(encoding="utf-8-sig", newline="") as file:
-        reader = csv.DictReader(file)
+        reader = csv.DictReader(file, strict=True)  # a bad quote is an error, not a merged row
         header = [column.strip() for column in reader.fieldnames or ()]
         problems = _header_problems(header)
         if problems:
             raise SeedError(problems)
         reader.fieldnames = header
         items: list[SeedItem] = []
-        for row in reader:
-            try:
-                items.append(_parse_row(row))
-            except ValueError as error:
-                # The file line the row ends on (header = row 1), so blank lines count.
-                problems.append(f"row {reader.line_num}: {_describe(error)}")
+        try:
+            for row in reader:
+                try:
+                    items.append(_parse_row(row))
+                except ValueError as error:
+                    # The file line the row ends on (header = row 1), so blank lines count.
+                    problems.append(f"row {reader.line_num}: {_describe(error)}")
+        except csv.Error as error:
+            # The reader stops counting inside the bad record, so point at where it starts.
+            problems.append(
+                f"row {reader.line_num + 1}: malformed CSV from here on ({error}); "
+                "check for an unclosed quote"
+            )
     if problems:
         raise SeedError(problems)
     return tuple(items)
