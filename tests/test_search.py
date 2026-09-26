@@ -1,3 +1,4 @@
+import logging
 import re
 import shutil
 from pathlib import Path
@@ -148,3 +149,17 @@ def test_find_live_against_real_claude(monkeypatch: pytest.MonkeyPatch) -> None:
     for option in options:
         assert option.url.startswith(("https://", "http://")), option.url
         assert option.ingredients and option.steps, option.name
+
+
+def test_find_logs_the_request_and_the_result_count(
+    patched_claude: FakeClaudeRunner,
+    sample_recipe: RecipeOption,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _queue(patched_claude, _options(sample_recipe, 4))
+
+    with caplog.at_level(logging.INFO, logger="meals.search"):
+        search.find("ground turkey, not tacos")
+
+    assert "ground turkey, not tacos" in caplog.text
+    assert "4" in caplog.text
