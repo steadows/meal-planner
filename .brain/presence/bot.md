@@ -14,3 +14,6 @@ touches: [meals/bot/, meals/prompts/intents/, tests/test_bot/]
 updated: 2026-09-25T14:17:50Z
 ---
 Lane D. Separate bot token, shared codebase pattern with the agentic-OS bot (PLAN.md → Reuse the existing bot). Free text and voice → Intent list via claude_runner → pantry ops; always echo back what was understood; lock to Steve's chat ID. Done when 'out of eggs' by text and by voice updates the pantry (milestone M1 with [[pantry]]). Waits on [[bot-contracts-waiting-on]] and on Steve's answers in [[bot-waiting-on]]. Unblocks [[bot-wiring-waiting-on]].
+
+## Telegram setup done (Steve, via [[pm]], 2026-09-25)
+New bot **@steve_meals_bot** ("Meal Planner") created with BotFather. `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ALLOWED_CHAT_ID` (Steve's private chat) are in `~/meal-planner/.env`, symlinked into this worktree as `.env` (git-ignored). getMe and a test sendMessage both succeeded. Only one process may poll this token at a time: if the real bot is ever running on the home machine, integration tests here will get a 409 conflict, so ask Steve for a separate test bot then. The existing-bot decision is "start fresh" (see [[bot-waiting-on]], resolved).
