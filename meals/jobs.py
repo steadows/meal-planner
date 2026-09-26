@@ -22,7 +22,7 @@ import sqlite3
 import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as dt_time
 from pathlib import Path
@@ -50,6 +50,7 @@ DEFAULT_CUSTODY: Custody = "wed+sat_sun"  # the first week's guess (seam map D2)
 
 _SAT, _SUN = 5, 6
 _FILLED = ("cart_filled", "ordered")
+_FINISHING = "finishing"
 _EXPIRED = "expired"  # cart_fill's detail when the week passed before it filled
 _EMPTY_THE_CART = (
     "The cart may already hold some or all items. Empty it in the Meijer app, "
@@ -91,6 +92,8 @@ class _Run:
     retry: bool
     started: float  # deps.clock() when the run began
     lock_fd: int = -1
+    # The one mutable piece: _FINISHING is added before the run finishes its claim (D23b).
+    marks: set[str] = field(default_factory=set)
 
     @property
     def conn(self) -> sqlite3.Connection:
@@ -250,7 +253,7 @@ def _inspect(run: _Run) -> int | None:
             claim.detail,
         )
         _deliver(run, _NOTICES[run.name](run, claim.detail))
-        plan_state.finish(run.conn, run.name, run.week, "interrupted")
+        _finish(run, "interrupted")
     return 0
 
 
@@ -284,6 +287,8 @@ def _catch_all(run: _Run, exc: BaseException, inspected: bool) -> int:
     )
     if isinstance(exc, DeliveryFailed):
         return 1  # nothing was delivered: the claim stays unfinished for the next tick
+    if _FINISHING in run.marks:
+        return 1  # its message went out; if the finish didn't commit, Inspect settles it (D23b)
     claim = plan_state.get_run(run.conn, run.name, run.week)
     unfinished = claim is not None and claim.outcome is None
     if unfinished and _effect_recorded(run):
@@ -291,7 +296,8 @@ def _catch_all(run: _Run, exc: BaseException, inspected: bool) -> int:
     ours = inspected and unfinished
     if ours:
         plan_state.set_detail(run.conn, run.name, run.week, reason)
-    advice = f" {_EMPTY_THE_CART}" if run.name == "cart_fill" else ""  # seam map D12
+    # Only our own claimed fill can have left items in the cart (D12, D23b).
+    advice = f" {_EMPTY_THE_CART}" if ours and run.name == "cart_fill" else ""
     if not _try_send(run, f"job {run.name} failed: {reason}.{advice}"):
         return 1
     if ours:
@@ -308,6 +314,13 @@ def safe_exc_info(exc: BaseException) -> BaseException | None:
             return None
         link = link.__cause__ or link.__context__
     return exc
+
+
+def _finish(run: _Run, outcome: plan_state.Outcome) -> None:
+    """Finish the claim after its message went out. Marked first: a signal landing after the
+    finish commits, before it returns, must not be reported as a failure (seam map D23b)."""
+    run.marks.add(_FINISHING)
+    plan_state.finish(run.conn, run.name, run.week, outcome)
 
 
 def _reason(exc: BaseException) -> str:
@@ -330,7 +343,7 @@ def _try_send(run: _Run, text: str) -> bool:
 def _fail_quietly(run: _Run, reason: str) -> None:
     """Finish a claim `failed` with its reason, sending nothing."""
     plan_state.set_detail(run.conn, run.name, run.week, reason)
-    plan_state.finish(run.conn, run.name, run.week, "failed")
+    _finish(run, "failed")
 
 
 def _refuse(run: _Run, reason: str) -> None:
@@ -381,7 +394,7 @@ def _propose(run: _Run) -> None:
         raise ValueError(f"the planner drafted week {proposal.week_start}, not {run.week}")
     if not plan_state.insert_week(run.conn, proposal, "proposed"):
         logger.warning("week %s was planned by another run meanwhile; not sending", run.week)
-        plan_state.finish(run.conn, run.name, run.week, "done")  # seam map D6
+        _finish(run, "done")  # seam map D6
         return
     _send_proposal(run, proposal)
 
@@ -392,7 +405,7 @@ def _send_proposal(run: _Run, proposal: WeekProposal) -> None:
         _fail_quietly(run, "proposal not delivered")
         return
     _deliver(run, _proposal_text(proposal))
-    plan_state.finish(run.conn, run.name, run.week, "done")
+    _finish(run, "done")
 
 
 def _redeliver_proposal(run: _Run, claim: JobRun) -> None:
@@ -435,13 +448,13 @@ def _send_nudge(run: _Run) -> None:
         f"Reminder: the plan for the week of {_day(run.week)} is waiting for your picks. "
         "If there's no reply by Sunday 8 am, I'll reuse last week's plan.",
     )
-    plan_state.finish(run.conn, run.name, run.week, "done")
+    _finish(run, "done")
 
 
 def _redeliver_nudge(run: _Run, claim: JobRun) -> None:
     stored = plan_state.get_week(run.conn, run.week)
     if stored is None or stored.status != "proposed":
-        plan_state.finish(run.conn, run.name, run.week, "done")  # nothing left to nudge about
+        _finish(run, "done")  # nothing left to nudge about
     elif _nudge_window(run.now):
         _send_nudge(run)
     else:
@@ -472,12 +485,12 @@ def _autoapprove(run: _Run) -> None:
             f"There's no reply to the plan for the week of {_day(run.week)}, and no earlier "
             "week to reuse. Reply to Saturday's proposal to approve it.",
         )
-        plan_state.finish(run.conn, run.name, run.week, "failed")
+        _finish(run, "failed")
         return
     plan = last[0].model_copy(update={"week_start": run.week})
     if not _approve(run, plan):
         logger.warning("week %s was approved by another run meanwhile", run.week)
-        plan_state.finish(run.conn, run.name, run.week, "done")
+        _finish(run, "done")
         return
     try:
         run.deps.spawn("cart_fill", "--week", run.week.isoformat())
@@ -486,7 +499,7 @@ def _autoapprove(run: _Run) -> None:
         logger.error("couldn't start cart_fill for week %s: %s", run.week, exc)
         started = False
     _deliver(run, _autoapproved_text(run, plan, started))
-    plan_state.finish(run.conn, run.name, run.week, "done")
+    _finish(run, "done")
 
 
 def _approve(run: _Run, plan: WeekProposal) -> bool:
@@ -528,10 +541,10 @@ def _redeliver_autoapprove(run: _Run, claim: JobRun) -> None:
         # Approved with other picks (the bot, after this run died before approving): nothing
         # of ours to announce (seam map D16).
         logger.info("week %s was approved with other picks; no autoapprove message", run.week)
-        plan_state.finish(run.conn, run.name, run.week, "done")
+        _finish(run, "done")
         return
     _deliver(run, _autoapproved_text(run, stored.proposal, None))
-    plan_state.finish(run.conn, run.name, run.week, "done")
+    _finish(run, "done")
 
 
 # ── cart_fill ────────────────────────────────────────────────────────────────
@@ -563,7 +576,7 @@ def _decide_fill(run: _Run) -> Callable[[], None] | None:
 def _expire(run: _Run) -> None:
     plan_state.set_detail(run.conn, run.name, run.week, _EXPIRED)
     _deliver(run, _expired_text(run.week))
-    plan_state.finish(run.conn, run.name, run.week, "failed")
+    _finish(run, "failed")
 
 
 def _expired_text(week: date) -> str:
@@ -583,7 +596,7 @@ def _send_report(run: _Run, report: CartReport) -> None:
     stored = plan_state.get_week(run.conn, run.week)
     published = stored is not None and stored.mealie_plan_ref is not None
     _deliver(run, _report_text(run.week, report, published))
-    plan_state.finish(run.conn, run.name, run.week, "done")
+    _finish(run, "done")
 
 
 def _redeliver_report(run: _Run, claim: JobRun) -> None:
