@@ -21,7 +21,7 @@ from typing import Any, TypeVar, overload
 from pydantic import BaseModel, ValidationError
 
 from meals.config import get_settings
-from meals.contracts import ClaudeRunnerError, validate_claude_output
+from meals.contracts import ClaudeRunnerError, describe_rejection, validate_claude_output
 
 logger = logging.getLogger(__name__)
 
@@ -206,11 +206,13 @@ def _run_once(command: list[str], prompt: str, timeout: int, slot_fd: int) -> tu
         except subprocess.TimeoutExpired:
             _kill_tree(process)
             raise _TimedOut(_raw(*_drain(process))) from None
-        except BaseException:
+        except BaseException as exc:
             # Ctrl-C or any other error: start_new_session keeps the signal from reaching claude,
             # so it would run on (for a Chrome run, still filling the cart). Same as subprocess.run.
+            logger.warning("claude run interrupted by %s; killing it", type(exc).__name__)
             _kill_tree(process)
             process.wait()
+            _close_pipes(process)
             raise
     return process.returncode, stdout, stderr
 
@@ -228,11 +230,15 @@ def _drain(process: subprocess.Popen[str]) -> tuple[str, str]:
     try:
         return process.communicate(timeout=_KILL_DRAIN_S)
     except subprocess.TimeoutExpired as exc:
-        for pipe in (process.stdout, process.stderr):
-            if pipe is not None:
-                pipe.close()
+        _close_pipes(process)
         process.wait()
         return _text(exc.output), _text(exc.stderr)
+
+
+def _close_pipes(process: subprocess.Popen[str]) -> None:
+    for pipe in (process.stdin, process.stdout, process.stderr):
+        if pipe is not None:
+            pipe.close()
 
 
 def _text(data: str | bytes | None) -> str:
@@ -260,7 +266,7 @@ def _parse(returncode: int, stdout: str, stderr: str, schema: type[BaseModel] | 
         try:
             return validate_claude_output(schema, envelope["structured_output"])
         except ValidationError as exc:
-            raise ClaudeRunnerError(f"output failed {schema.__name__} validation", raw) from exc
+            raise ClaudeRunnerError(describe_rejection(schema, exc), raw) from exc
     result = envelope.get("result")
     if not isinstance(result, str):
         raise ClaudeRunnerError("claude returned no result text", raw)

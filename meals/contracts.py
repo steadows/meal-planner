@@ -6,7 +6,7 @@ Only the contracts lane edits this file. Other lanes request changes with a smal
 import re
 from collections.abc import Sequence
 from datetime import date
-from typing import Annotated, Literal, Protocol, TypeVar, runtime_checkable
+from typing import Annotated, Any, Literal, Protocol, TypeVar, runtime_checkable
 
 from pydantic import (
     AfterValidator,
@@ -14,6 +14,8 @@ from pydantic import (
     ConfigDict,
     Field,
     StringConstraints,
+    TypeAdapter,
+    ValidationError,
     ValidationInfo,
     field_validator,
 )
@@ -29,11 +31,14 @@ PantryStatus = Literal["have", "buy_next_time"]
 
 MAX_PANTRY_QUESTIONS = 3
 
-# Validation-context key marking a payload as Claude's output (validate_claude_output). Fields only
-# trusted code may set refuse a value under it.
-UNTRUSTED = "untrusted"
+# Validation-context key for trusted code: the Mealie client and loaders of stored data pass
+# `context={TRUSTED: True}`. Fields only trusted code may set refuse a value without it
+# (default-deny), so Claude's output can never set them. Never pass it on anything Claude produced.
+TRUSTED = "trusted"
 
 M = TypeVar("M", bound=BaseModel)
+
+_JSON_DATA: TypeAdapter[Any] = TypeAdapter(Any)  # dumps any payload, models included, to JSON data
 
 
 # Matched against the raw string, not a parsed URL: Python's urlsplit and a browser disagree on
@@ -99,16 +104,20 @@ class RecipeOption(Contract):
     fit_note: str = Field(description="One line on fit against Steve's preferences profile")
     ingredients: tuple[Ingredient, ...]
     steps: tuple[str, ...]
-    # Hidden from Claude's schema; only the Mealie client sets it (get_recipe), so a pick can go on
-    # the meal plan without re-importing, which would duplicate the recipe in Mealie.
+    # Hidden from Claude's schema and accepted only under TRUSTED: the Mealie client sets it
+    # (get_recipe), so a pick can go on the meal plan without re-importing, which would duplicate
+    # the recipe in Mealie.
     mealie_slug: SkipJsonSchema[MealieSlug | None] = None
 
     @field_validator("mealie_slug")
     @classmethod
     def _trusted_mealie_slug(cls, slug: str | None, info: ValidationInfo) -> str | None:
-        if slug is not None and (info.context or {}).get(UNTRUSTED):
+        if slug is not None and not (info.context or {}).get(TRUSTED):
             # An injected page could otherwise point a web find at an existing Mealie recipe.
-            raise ValueError("mealie_slug is set by the Mealie client, never by Claude")
+            raise ValueError(
+                "mealie_slug is set only by trusted code (the Mealie client, stored data), "
+                "never by Claude"
+            )
         return slug
 
 
@@ -205,8 +214,21 @@ class ClaudeRunnerError(Exception):
 
 def validate_claude_output(schema: type[M], payload: object) -> M:
     """Validate Claude's structured output. Both runners use it, and so must any caller that
-    validates a schemaless `run()` result itself: it refuses fields only trusted code may set."""
-    return schema.model_validate(payload, context={UNTRUSTED: True})
+    validates a schemaless `run()` result itself. It passes no TRUSTED context, and it turns the
+    payload into plain JSON data first, so a model instance inside it (which pydantic would
+    otherwise accept as is) is checked field by field too."""
+    return schema.model_validate(_JSON_DATA.dump_python(payload, mode="json"))
+
+
+def describe_rejection(schema: type[BaseModel], exc: ValidationError) -> str:
+    """A ClaudeRunnerError reason naming the first rejected field and why, so a refused field (a
+    possible injection) doesn't read like an ordinary type mismatch in the logs."""
+    first = exc.errors()[0]
+    where = ".".join(str(part) for part in first["loc"]) or "(root)"
+    return (
+        f"output failed {schema.__name__} validation ({exc.error_count()} error(s); "
+        f"first at {where}: {first['msg']})"
+    )
 
 
 @runtime_checkable
