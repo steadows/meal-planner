@@ -81,7 +81,8 @@ class _Measure:
     unit: str | None
 
 
-def _key(name: str) -> str:
+def name_key(name: str) -> str:
+    """How ingredient and pantry names compare: surrounding whitespace and case don't count."""
     return name.strip().casefold()
 
 
@@ -96,9 +97,9 @@ def _measure(name: str, unit: str | None) -> _Measure:
         return _Measure("mass", _MASS[canonical], canonical)
     if canonical in _VOLUME:
         return _Measure("volume", _VOLUME[canonical], canonical)
-    per_ingredient = _PER_INGREDIENT.get(_key(name), {})
+    per_ingredient = _PER_INGREDIENT.get(name_key(name), {})
     if canonical in per_ingredient:
-        return _Measure(f"per:{_key(name)}", per_ingredient[canonical], canonical)
+        return _Measure(f"per:{name_key(name)}", per_ingredient[canonical], canonical)
     return _Measure(f"unit:{canonical}", 1.0, canonical)
 
 
@@ -151,7 +152,7 @@ def combine(ingredients: Iterable[Ingredient]) -> tuple[Ingredient, ...]:
     for ingredient in ingredients:
         if ingredient.qty is not None:
             require_positive(ingredient.qty, f"quantity of {ingredient.name!r}")
-        by_name.setdefault(_key(ingredient.name), []).append(ingredient)
+        by_name.setdefault(name_key(ingredient.name), []).append(ingredient)
     return tuple(line for lines in by_name.values() for line in _combine_one(lines))
 
 

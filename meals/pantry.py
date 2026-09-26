@@ -6,6 +6,7 @@ is the only module that reads or writes those rows, and the only place that maps
 """
 
 import json
+import logging
 import math
 import sqlite3
 import statistics
@@ -18,7 +19,9 @@ from typing import Any
 from pydantic import Field
 
 from meals.contracts import Contract, MeijerUrl, PantryCategory, PantryItem, PantryStatus
-from meals.rollup import require_positive
+from meals.rollup import name_key, require_positive
+
+logger = logging.getLogger(__name__)
 
 # PLAN: ask about a staple once 90% of its interval has passed. Kept as a ratio of integers so
 # the due date is exact (0.9 isn't representable in binary floating point).
@@ -52,10 +55,6 @@ class SeedResult(Contract):
     untouched: tuple[str, ...] = Field(description="Items not in the seed, left as they were")
 
 
-def _match_key(name: str) -> str:
-    return name.strip().casefold()
-
-
 def _iso(day: date | None) -> str | None:
     """Dates go to SQLite as ISO text: sqlite3's default date adapter is deprecated."""
     return day.isoformat() if day is not None else None
@@ -65,8 +64,16 @@ def _to_item(row: sqlite3.Row) -> PantryItem:
     """Map a row to the contract. Validation re-checks every field, including the meijer.com-only
     URL rule, so a bad row fails closed instead of reaching the cart."""
     fields = {key: row[key] for key in row.keys() if key != "updated_at"}
-    fields["aliases"] = tuple(json.loads(row["aliases"] or "[]"))
-    return PantryItem.model_validate(fields)
+    try:
+        fields["aliases"] = tuple(json.loads(row["aliases"] or "[]"))
+        return PantryItem.model_validate(fields)
+    except (ValueError, TypeError):
+        logger.error(
+            "pantry_item %s (%r) is invalid; re-run the seed loader to fix it",
+            row["id"],
+            row["name"],
+        )
+        raise
 
 
 def _ask_date(item: PantryItem) -> date | None:
@@ -86,7 +93,7 @@ def _due_sort_key(item: PantryItem, on: date) -> tuple[bool, bool, int, str]:
         item.status != "buy_next_time",
         asked_from is None,
         -days_past,
-        _match_key(item.name),
+        name_key(item.name),
     )
 
 
@@ -106,20 +113,14 @@ def _median_gap(dates: Sequence[date]) -> int | None:
     return math.floor(statistics.median(gaps) + 0.5)
 
 
+# Seed fields the pantry learns or owns once an item exists; everything else is the product map.
+_LEARNED_SEED_FIELDS = frozenset({"name", "typical_interval_days", "last_purchased"})
+
+
 def _product_map(seed: SeedItem) -> dict[str, Any]:
     """The columns a seed row owns on an existing item: the product map, not what's been learned."""
-    return {
-        "aliases": json.dumps(list(seed.aliases)),
-        "category": seed.category,
-        "default_qty": seed.default_qty,
-        "default_unit": seed.default_unit,
-        "meijer_product_id": seed.meijer_product_id,
-        "meijer_url": seed.meijer_url,
-        "preferred_product_name": seed.preferred_product_name,
-        "substitute_ok": seed.substitute_ok,
-        "for_miles": seed.for_miles,
-        "notes": seed.notes,
-    }
+    columns = seed.model_dump(exclude=set(_LEARNED_SEED_FIELDS))
+    return {**columns, "aliases": json.dumps(list(seed.aliases))}
 
 
 def _namespace_clashes(seeds: Sequence[SeedItem], untouched: Iterable[PantryItem]) -> list[str]:
@@ -129,7 +130,7 @@ def _namespace_clashes(seeds: Sequence[SeedItem], untouched: Iterable[PantryItem
     owners: dict[str, str] = {}
     clashes = []
     for owner, name, aliases in claims:
-        for key in sorted({_match_key(name), *(_match_key(alias) for alias in aliases)}):
+        for key in sorted({name_key(name), *(name_key(alias) for alias in aliases)}):
             if key in owners:
                 clashes.append(f"{key!r} is claimed by both {owners[key]} and {owner}")
             else:
@@ -151,13 +152,13 @@ class SqlitePantry:
     def get_item(self, name: str) -> PantryItem | None:
         """The item called `name`, or carrying it as an alias, ignoring case and surrounding
         whitespace. An exact name match beats another item's alias. None if unknown."""
-        wanted = _match_key(name)
+        wanted = name_key(name)
         items = self.list_items()
-        by_name = next((item for item in items if _match_key(item.name) == wanted), None)
+        by_name = next((item for item in items if name_key(item.name) == wanted), None)
         if by_name is not None:
             return by_name
         return next(
-            (item for item in items if wanted in {_match_key(alias) for alias in item.aliases}),
+            (item for item in items if wanted in {name_key(alias) for alias in item.aliases}),
             None,
         )
 
@@ -171,14 +172,15 @@ class SqlitePantry:
 
     def flip_status(self, name: str, status: PantryStatus) -> PantryItem | None:
         """Set an item's status by name or alias. Returns the updated item, or None if unknown."""
-        with self._write() as conn:
+        with self._write():
             item = self.get_item(name)
             if item is None:
                 return None
-            conn.execute(
+            self._conn.execute(
                 "UPDATE pantry_item SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (status, item.id),
             )
+        logger.info("pantry: %s is now %s", item.name, status)
         return self._reread(item.id)
 
     def log_purchase(
@@ -196,17 +198,20 @@ class SqlitePantry:
             require_positive(qty, "qty")
         if price_cents is not None and price_cents < 0:
             raise ValueError(f"price_cents can't be negative, got {price_cents!r}")
-        with self._write() as conn:
+        with self._write():
             item = self.get_item(name)
             if item is None:
                 return None
-            already = conn.execute(
+            already = self._conn.execute(
                 "SELECT 1 FROM purchase_log WHERE item_id = ? AND purchased_on = ?",
                 (item.id, on.isoformat()),
             ).fetchone()
             if already:
+                logger.info(
+                    "pantry: %s purchase on %s already logged; nothing to do", item.name, on
+                )
                 return item
-            conn.execute(
+            self._conn.execute(
                 "INSERT INTO purchase_log (item_id, purchased_on, qty, price_cents) "
                 "VALUES (?, ?, ?, ?)",
                 (item.id, on.isoformat(), qty, price_cents),
@@ -215,7 +220,7 @@ class SqlitePantry:
             learned = (
                 _median_gap(self._purchase_dates(item.id)) if item.category == "staple" else None
             )
-            conn.execute(
+            self._conn.execute(
                 "UPDATE pantry_item SET status = ?, last_purchased = ?, typical_interval_days = ?, "
                 "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (
@@ -225,6 +230,12 @@ class SqlitePantry:
                     item.id,
                 ),
             )
+        logger.info(
+            "pantry: logged %s purchase on %s (%s)",
+            item.name,
+            on,
+            "restocked" if latest else "history only",
+        )
         return self._reread(item.id)
 
     def load_seed(self, items: Iterable[SeedItem]) -> SeedResult:
@@ -238,9 +249,9 @@ class SqlitePantry:
         claim the same name or alias.
         """
         seeds = tuple(items)
-        with self._write() as conn:
-            existing = {_match_key(item.name): item for item in self.list_items()}
-            seed_keys = {_match_key(seed.name) for seed in seeds}
+        with self._write():
+            existing = {name_key(item.name): item for item in self.list_items()}
+            seed_keys = {name_key(seed.name) for seed in seeds}
             untouched = [item for key, item in existing.items() if key not in seed_keys]
             clashes = _namespace_clashes(seeds, untouched)
             if clashes:
@@ -249,45 +260,51 @@ class SqlitePantry:
                 )
             inserted, updated = [], []
             for seed in seeds:
-                match = existing.get(_match_key(seed.name))
+                match = existing.get(name_key(seed.name))
                 if match is None:
-                    self._insert_seed(conn, seed)
+                    self._insert_seed(seed)
                     inserted.append(seed.name)
                 else:
-                    self._update_from_seed(conn, match, seed)
+                    self._update_from_seed(match, seed)
                     updated.append(match.name)
+        logger.info(
+            "pantry: seed loaded, %d inserted, %d updated, %d untouched",
+            len(inserted),
+            len(updated),
+            len(untouched),
+        )
         return SeedResult(
             inserted=tuple(inserted),
             updated=tuple(updated),
-            untouched=tuple(sorted((item.name for item in untouched), key=_match_key)),
+            untouched=tuple(sorted((item.name for item in untouched), key=name_key)),
         )
 
-    def _insert_seed(self, conn: sqlite3.Connection, seed: SeedItem) -> None:
+    def _insert_seed(self, seed: SeedItem) -> None:
         columns = {
             "name": seed.name,
             "typical_interval_days": seed.typical_interval_days,
             "last_purchased": _iso(seed.last_purchased),
             **_product_map(seed),
         }
-        cursor = conn.execute(
+        cursor = self._conn.execute(
             f"INSERT INTO pantry_item ({', '.join(columns)}) "
             f"VALUES ({', '.join('?' * len(columns))})",
             tuple(columns.values()),
         )
         if seed.last_purchased is not None:
-            conn.execute(
+            self._conn.execute(
                 "INSERT INTO purchase_log (item_id, purchased_on, source) VALUES (?, ?, 'seed')",
                 (cursor.lastrowid, seed.last_purchased.isoformat()),
             )
 
-    def _update_from_seed(self, conn: sqlite3.Connection, item: PantryItem, seed: SeedItem) -> None:
+    def _update_from_seed(self, item: PantryItem, seed: SeedItem) -> None:
         interval = item.typical_interval_days
         learning_owns_it = _median_gap(self._purchase_dates(item.id)) is not None
         if seed.typical_interval_days is not None and not learning_owns_it:
             interval = seed.typical_interval_days
         columns = {**_product_map(seed), "typical_interval_days": interval}
         assignments = ", ".join(f"{column} = ?" for column in columns)
-        conn.execute(
+        self._conn.execute(
             f"UPDATE pantry_item SET {assignments}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
             (*columns.values(), item.id),
         )
@@ -304,7 +321,7 @@ class SqlitePantry:
         return _to_item(row)
 
     @contextmanager
-    def _write(self) -> Iterator[sqlite3.Connection]:
+    def _write(self) -> Iterator[None]:
         """One write transaction, taken with BEGIN IMMEDIATE so reads inside it can't go stale
         before the write (the bot, a job and an MCP process may all write).
 
@@ -318,8 +335,9 @@ class SqlitePantry:
             )
         self._conn.execute("BEGIN IMMEDIATE")
         try:
-            yield self._conn
+            yield
+            self._conn.commit()
         except BaseException:
-            self._conn.rollback()
+            if self._conn.in_transaction:  # a failed COMMIT can leave it open
+                self._conn.rollback()
             raise
-        self._conn.commit()
