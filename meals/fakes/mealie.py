@@ -4,7 +4,7 @@ from datetime import date
 
 from pydantic import TypeAdapter, ValidationError
 
-from meals.contracts import MealieSlug, RecipeOption
+from meals.contracts import TRUSTED, MealieSlug, RecipeOption
 
 
 def _slugify(name: str) -> str:
@@ -47,7 +47,9 @@ class FakeMealieClient:
         return slug
 
     def get_recipe(self, slug: str) -> RecipeOption:
-        return self.recipes[slug].model_copy(update={"mealie_slug": slug})
+        # The idiom the real client uses: validated under TRUSTED, so the slug charset holds too.
+        fields = self.recipes[slug].model_dump() | {"mealie_slug": slug}
+        return RecipeOption.model_validate(fields, context={TRUSTED: True})
 
     def list_by_tag(self, tag: str) -> tuple[str, ...]:
         return self._tags.get(tag, ())

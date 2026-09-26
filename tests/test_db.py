@@ -338,8 +338,13 @@ def test_migration_2_refuses_duplicate_purchases_and_leaves_v1_untouched(
         v1.commit()
 
     monkeypatch.setattr(meals.db, "MIGRATIONS", migrations[:2])
-    with pytest.raises(sqlite3.DatabaseError):
+    with pytest.raises(sqlite3.IntegrityError) as caught:
         meals.db.get_db(path).close()
+    # A note names the failing migration (2) and the version the database stays at (v1).
+    notes = getattr(caught.value, "__notes__", [])
+    assert any(
+        re.search(r"(?<!\d)2(?!\d)", note) and re.search(r"\bv1\b", note) for note in notes
+    ), notes
     with closing(sqlite3.connect(path)) as check:
         assert _version(check) == 1
         assert "next_ask_on" not in _column(

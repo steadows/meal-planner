@@ -442,13 +442,17 @@ def test_timeout_falls_back_to_killing_the_child_when_killpg_is_refused(
 
 
 def _interrupting(
-    communicate: Callable[..., tuple[str, str]], interrupt: BaseException
+    communicate: Callable[..., tuple[str, str]],
+    interrupt: BaseException,
+    processes: list[subprocess.Popen[str]],
 ) -> Callable[..., tuple[str, str]]:
-    """A Popen.communicate that lets claude start, then raises `interrupt` mid-run."""
+    """A Popen.communicate that lets claude start, then raises `interrupt` mid-run. Each process
+    it interrupts is appended to `processes`."""
 
     def interrupted(
         process: subprocess.Popen[str], input: str | None = None, timeout: float | None = None
     ) -> tuple[str, str]:
+        processes.append(process)
         with contextlib.suppress(subprocess.TimeoutExpired):
             communicate(process, input, timeout=1)  # claude starts, as in the timeout tests
         raise interrupt
@@ -462,21 +466,33 @@ def _interrupting(
     ids=["keyboard_interrupt", "exception"],
 )
 def test_any_exception_mid_run_kills_the_process_group_and_propagates_unchanged(
-    fake_claude_home: Path, monkeypatch: pytest.MonkeyPatch, interrupt: BaseException
+    fake_claude_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    interrupt: BaseException,
 ) -> None:
-    """`start_new_session` keeps Ctrl-C from reaching claude, so the runner must kill it. The
-    exception is the caller's: re-raised as is, never retried or turned into ClaudeRunnerError."""
+    """`start_new_session` keeps Ctrl-C from reaching claude, so the runner must kill it, close
+    its pipes and say so. The exception is the caller's: re-raised as is, never retried or turned
+    into ClaudeRunnerError."""
     # Not parametrized over chrome: the kill lives in _run_once, and chrome only changes argv and
     # the attempt count.
     _script(fake_claude_home, {"sleep": 20, "grandchild": True, **OK}, OK)
     monkeypatch.setenv("CLAUDE_MAX_CONCURRENT", "1")
+    caplog.set_level(logging.WARNING, logger="meals.claude_runner")
     communicate = subprocess.Popen.communicate
-    monkeypatch.setattr(subprocess.Popen, "communicate", _interrupting(communicate, interrupt))
+    processes: list[subprocess.Popen[str]] = []
+    interrupted = _interrupting(communicate, interrupt, processes)
+    monkeypatch.setattr(subprocess.Popen, "communicate", interrupted)
     try:
         with pytest.raises(type(interrupt)) as caught:
             claude_runner.run(PROMPT, timeout=RUN_TIMEOUT)
 
         assert caught.value is interrupt
+        (process,) = processes
+        pipes = (process.stdin, process.stdout, process.stderr)
+        assert [pipe is not None and pipe.closed for pipe in pipes] == [True, True, True]
+        name = type(interrupt).__name__
+        assert any(name in m and "kill" in m.lower() for m in _warnings(caplog)), _warnings(caplog)
         (call,) = _calls(fake_claude_home)
         assert _events(fake_claude_home, "end") == []  # killed, not waited out
         assert not _alive(call["pid"])
@@ -506,7 +522,7 @@ def test_exception_mid_run_still_kills_the_child_when_killpg_is_refused(
     monkeypatch.setattr("meals.claude_runner.os.killpg", refuse)
     _script(fake_claude_home, {"sleep": 20, "grandchild": True, **OK})
     interrupt = KeyboardInterrupt("marker-ctrl-c")
-    interrupted = _interrupting(subprocess.Popen.communicate, interrupt)
+    interrupted = _interrupting(subprocess.Popen.communicate, interrupt, [])
     monkeypatch.setattr(subprocess.Popen, "communicate", interrupted)
     try:
         with pytest.raises(KeyboardInterrupt) as caught:
@@ -776,18 +792,24 @@ def test_mealie_slug_is_hidden_from_the_schema_claude_is_given(model: type[BaseM
 @pytest.mark.parametrize(("schema", "answer", "slugged"), NESTINGS)
 def test_claude_setting_mealie_slug_fails_validation_and_is_retried_once(
     fake_claude_home: Path,
+    caplog: pytest.LogCaptureFixture,
     schema: type[BaseModel],
     answer: dict[str, object],
     slugged: dict[str, object],
 ) -> None:
-    """The same answer without the slug is accepted, so the slug alone is what's rejected."""
+    """The same answer without the slug is accepted, so the slug alone is what's rejected, and
+    the reason and the retry warning say so."""
     rejected = {"stdout": _envelope(result="{}", structured_output=slugged)}
     accepted = {"stdout": _envelope(result="{}", structured_output=answer)}
     _script(fake_claude_home, rejected, rejected, accepted)
+    caplog.set_level(logging.WARNING, logger="meals.claude_runner")
 
-    with pytest.raises(ClaudeRunnerError):
+    with pytest.raises(ClaudeRunnerError) as caught:
         claude_runner.run(PROMPT, schema=schema, timeout=RUN_TIMEOUT)
     assert len(_calls(fake_claude_home)) == 2
+    assert "mealie_slug" in caught.value.reason
+    assert "never by Claude" in caught.value.reason
+    assert any("mealie_slug" in m and "never by Claude" in m for m in _warnings(caplog))
 
     result = claude_runner.run(PROMPT, schema=schema, timeout=RUN_TIMEOUT)
     option = result.options[0] if isinstance(result, _Picks) else result
@@ -802,27 +824,56 @@ def test_fake_runner_rejects_mealie_slug_like_the_real_one(
     """A queued model is replayed as its dump, `mealie_slug: null` included, and that's accepted."""
     fake = FakeClaudeRunner([slugged, schema.model_validate(answer)])
 
-    with pytest.raises(ClaudeRunnerError):
+    with pytest.raises(ClaudeRunnerError) as caught:
         fake.run(PROMPT, schema=schema)
+    assert "mealie_slug" in caught.value.reason
+    assert "never by Claude" in caught.value.reason
     result = fake.run(PROMPT, schema=schema)
     option = result.options[0] if isinstance(result, _Picks) else result
     assert isinstance(option, RecipeOption)
     assert option.mealie_slug is None
 
 
-def test_trusted_validation_keeps_mealie_slug_and_untrusted_validation_rejects_it() -> None:
-    """The Mealie client and stored JSON set the slug; Claude's output never can."""
-    trusted = RecipeOption.model_validate(SLUGGED)
+def test_trusted_validation_keeps_mealie_slug_and_claude_output_validation_rejects_it() -> None:
+    """The Mealie client and stored JSON set the slug, under TRUSTED; Claude's output never can."""
+    trusted = RecipeOption.model_validate(SLUGGED, context={contracts.TRUSTED: True})
 
     assert trusted.mealie_slug == "sheet-pan-gnocchi"
-    assert RecipeOption.model_validate_json(trusted.model_dump_json()) == trusted
+    stored = trusted.model_dump_json()
+    assert RecipeOption.model_validate_json(stored, context={contracts.TRUSTED: True}) == trusted
     with pytest.raises(ValidationError):
         contracts.validate_claude_output(RecipeOption, SLUGGED)
-    with pytest.raises(ValidationError):
-        RecipeOption.model_validate(SLUGGED, context={contracts.UNTRUSTED: True})
     assert contracts.validate_claude_output(RecipeOption, RECIPE) == RecipeOption.model_validate(
         RECIPE
     )
+
+
+@pytest.mark.parametrize(("schema", "answer", "slugged"), NESTINGS)
+def test_validation_without_the_trusted_context_rejects_mealie_slug(
+    schema: type[BaseModel], answer: dict[str, object], slugged: dict[str, object]
+) -> None:
+    """Default-deny: only `context={TRUSTED: True}` lets a slug through."""
+    schema.model_validate(answer)  # the same answer without the slug is valid
+
+    with pytest.raises(ValidationError):
+        schema.model_validate(slugged)
+    with pytest.raises(ValidationError):
+        schema.model_validate_json(json.dumps(slugged))
+    with pytest.raises(ValidationError):
+        schema.model_validate(slugged, context={contracts.TRUSTED: False})
+
+
+def test_claude_output_revalidates_a_nested_instance_carrying_a_slug() -> None:
+    """pydantic keeps a model instance as is by default, so one the Mealie client built (as
+    get_recipe does, with model_copy) must not carry its slug through Claude's output."""
+    from_mealie = RecipeOption.model_validate(RECIPE).model_copy(
+        update={"mealie_slug": "sheet-pan-gnocchi"}
+    )
+
+    with pytest.raises(ValidationError):
+        contracts.validate_claude_output(_Picks, {"options": [from_mealie]})
+    with pytest.raises(ClaudeRunnerError):
+        FakeClaudeRunner([{"options": [from_mealie]}]).run(PROMPT, schema=_Picks)
 
 
 # A set slug must ASCII-fullmatch `[A-Za-z0-9_-]+`, the allowlist mealie's HTTP client enforces at
@@ -833,7 +884,10 @@ def test_trusted_validation_keeps_mealie_slug_and_untrusted_validation_rejects_i
     ids=["hyphens", "mixed_case_underscore_digit", "none"],
 )
 def test_trusted_validation_accepts_a_mealie_slug_in_the_sink_allowlist(slug: str | None) -> None:
-    assert RecipeOption.model_validate({**RECIPE, "mealie_slug": slug}).mealie_slug == slug
+    option = RecipeOption.model_validate(
+        {**RECIPE, "mealie_slug": slug}, context={contracts.TRUSTED: True}
+    )
+    assert option.mealie_slug == slug
 
 
 @pytest.mark.parametrize(
@@ -845,7 +899,9 @@ def test_trusted_validation_rejects_a_mealie_slug_outside_the_sink_allowlist(slu
     assert "mealie_slug" in RecipeOption.model_fields, "RecipeOption has no mealie_slug field"
 
     with pytest.raises(ValidationError):
-        RecipeOption.model_validate({**RECIPE, "mealie_slug": slug})
+        RecipeOption.model_validate(
+            {**RECIPE, "mealie_slug": slug}, context={contracts.TRUSTED: True}
+        )
 
 
 # ── integration: the real `claude` ───────────────────────────────────────────
