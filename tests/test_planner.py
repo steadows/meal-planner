@@ -323,26 +323,26 @@ def test_favorites_are_the_exact_mealie_recipes_then_new_finds(
     patched_claude: FakeClaudeRunner,
     fake_mealie: FakeMealieClient,
     fake_pantry: FakePantry,
-    sample_recipe: RecipeOption,
     new_recipes: tuple[RecipeOption, ...],
 ) -> None:
     patched_claude.queue(_draft(new_recipes))
 
     proposal = _propose(fake_mealie, fake_pantry)
 
-    assert proposal.recipe_options == (sample_recipe, *new_recipes)
+    # Compared with what Mealie returns, so it holds once get_recipe also sets mealie_slug.
+    assert proposal.recipe_options == (fake_mealie.get_recipe(FAVORITE), *new_recipes)
 
 
 def test_a_repeated_favorite_is_offered_once(
     patched_claude: FakeClaudeRunner,
     fake_mealie: FakeMealieClient,
     fake_pantry: FakePantry,
-    sample_recipe: RecipeOption,
     new_recipes: tuple[RecipeOption, ...],
 ) -> None:
     patched_claude.queue(_draft(new_recipes, favorites=[FAVORITE, FAVORITE]))
 
-    assert _propose(fake_mealie, fake_pantry).recipe_options == (sample_recipe, *new_recipes)
+    favorite = fake_mealie.get_recipe(FAVORITE)
+    assert _propose(fake_mealie, fake_pantry).recipe_options == (favorite, *new_recipes)
 
 
 def test_a_stale_pool_slug_is_skipped_with_a_warning(
@@ -360,7 +360,7 @@ def test_a_stale_pool_slug_is_skipped_with_a_warning(
     with caplog.at_level(logging.WARNING, logger="meals.planner"):
         proposal = _propose(mealie, fake_pantry)
 
-    assert proposal.recipe_options == (sample_recipe, *new_recipes)
+    assert proposal.recipe_options == (mealie.get_recipe(FAVORITE), *new_recipes)
     assert "deleted-slug" in caplog.text
     assert "deleted-slug" not in patched_claude.calls[0].prompt
 
