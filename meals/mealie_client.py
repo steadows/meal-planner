@@ -5,15 +5,19 @@ Endpoints and field names follow Mealie v3.28.0's OpenAPI spec; see
 a `MealieClient`.
 """
 
+import ipaddress
+import re
+import socket
 from collections.abc import Iterator, Mapping, Sequence
 from datetime import date
-from typing import Any
+from typing import Any, Self
 from urllib.parse import urlsplit
 from uuid import UUID
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
+from meals.config import Settings, get_settings
 from meals.contracts import Ingredient, RecipeOption
 
 BATCH_OK_TAG = "batch-ok"
@@ -22,6 +26,11 @@ BATCH_OK_TAG = "batch-ok"
 PLAN_ENTRY_MARKER = "Planned by meal-planner"
 PLAN_ENTRY_TYPE = "dinner"
 PAGE_SIZE = 100
+# Scrapes can be slow; a client-side timeout would orphan a recipe Mealie still finishes importing.
+MEALIE_TIMEOUT_S = 60.0
+# What Mealie's slugify produces. Slugs and tags go into URL paths, and some come from Claude's
+# output, so anything else is treated as unknown and never sent.
+_SLUG = re.compile(r"[A-Za-z0-9_-]+", re.ASCII)
 # How Mealie answers a URL it can't scrape: no recipe data, timeout, bad URL, scraper crash.
 _SCRAPE_FAILURES = frozenset({400, 408, 422, 500})
 
@@ -96,7 +105,25 @@ class HttpMealieClient:
     def __init__(self, http: httpx.Client) -> None:
         self._http = http
 
+    @classmethod
+    def from_settings(
+        cls, settings: Settings | None = None, *, transport: httpx.BaseTransport | None = None
+    ) -> Self:
+        """The client the entry points use, from `.env`. `transport` is for tests."""
+        settings = get_settings() if settings is None else settings
+        if settings.mealie_token is None:
+            raise RuntimeError("MEALIE_TOKEN is not set: add a Mealie API token to .env")
+        auth = {"Authorization": f"Bearer {settings.mealie_token.get_secret_value()}"}
+        http = httpx.Client(
+            base_url=settings.mealie_url,
+            headers=auth,
+            timeout=MEALIE_TIMEOUT_S,
+            transport=transport,
+        )
+        return cls(http)
+
     def import_url(self, url: str) -> str:
+        _require_public_url(url)
         response = self._http.post(
             "/api/recipes/create/url",
             json={"url": url, "includeTags": False, "includeCategories": False},
@@ -127,6 +154,8 @@ class HttpMealieClient:
         )
 
     def list_by_tag(self, tag: str) -> tuple[str, ...]:
+        if not _SLUG.fullmatch(tag):
+            return ()
         response = self._http.get(f"/api/organizers/tags/slug/{tag}")
         if response.status_code == 404:
             return ()
@@ -153,6 +182,8 @@ class HttpMealieClient:
         return day
 
     def _fetch_recipe(self, slug: str) -> _Recipe:
+        if not _SLUG.fullmatch(slug):
+            raise KeyError(slug)
         response = self._http.get(f"/api/recipes/{slug}")
         if response.status_code == 404:
             raise KeyError(slug)
@@ -199,6 +230,44 @@ class HttpMealieClient:
             if page >= body.total_pages:
                 return
             page += 1
+
+
+def _require_public_url(url: str) -> None:
+    """Refuse a URL Mealie shouldn't fetch from inside the home network (SSRF; see
+    connections/mealie-search-shared-rule). Mealie's own transport is the primary control: it
+    resolves the host, blocks the same ranges and pins the connection. This is defence in depth,
+    with no DNS lookup, judging the host exactly as httpx (the fetcher) parses it."""
+    try:
+        parsed = httpx.URL(url)
+    except httpx.InvalidURL as exc:
+        raise ValueError(f"not a fetchable URL: {url!r}") from exc
+    host = parsed.host.rstrip(".").lower()
+    if parsed.scheme not in {"http", "https"} or not host or parsed.userinfo:
+        raise ValueError(f"only public http(s) URLs can be imported: {url!r}")
+    ip = _ip_literal(host)
+    if ip is not None:
+        local = ip.is_multicast or not ip.is_global  # is_global is True for most multicast
+    else:
+        local = host == "localhost" or host.endswith(".localhost") or "." not in host
+    if local:
+        raise ValueError(f"refusing a local or private address: {url!r}")
+
+
+def _ip_literal(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """The address a host names without DNS, including legacy forms (`0x7f.1`), IPv4-mapped
+    IPv6 unwrapped; None for a hostname."""
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        try:
+            ip = ipaddress.IPv4Address(socket.inet_aton(host))
+        except OSError:
+            return None
+    # Recent CPython patch releases already judge ::ffff:a.b.c.d by its IPv4 address; older 3.11
+    # releases (still allowed by requires-python) don't, so unwrap explicitly.
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        return ip.ipv4_mapped
+    return ip
 
 
 def _to_ingredient(line: _IngredientLine, fallback: str) -> Ingredient:
