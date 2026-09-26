@@ -298,6 +298,28 @@ def test_logging_the_same_item_on_the_same_date_again_writes_nothing(
     )
 
 
+def test_a_new_purchase_restocks_the_item_even_with_count_changes_on(
+    db: sqlite3.Connection, insert_item: Insert
+) -> None:  # [R4] [R7]; Codex pre-PR sweep: a replay check that trusts `cursor.rowcount` reads
+    # 0 for a real insert under this pragma, so the purchase is logged but the item never restocked
+    insert_item(
+        _item(
+            1,
+            "butter",
+            status="buy_next_time",
+            typical_interval_days=21,
+            last_purchased=ON - timedelta(days=30),
+            next_ask_on=ON + timedelta(days=3),
+        )
+    )
+    db.execute("PRAGMA count_changes=ON")
+    expected = _item(1, "butter", typical_interval_days=21, last_purchased=ON)
+    assert SqlitePantry(db).log_purchase("butter", ON) == expected
+    stored = db.execute("SELECT status, last_purchased, next_ask_on FROM pantry_item").fetchone()
+    assert tuple(stored) == ("have", "2026-09-26", None)
+    assert [row[:2] for row in _log_rows(db)] == [(1, "2026-09-26")]
+
+
 def test_a_purchase_another_connection_logged_counts_toward_the_next_one(
     db: sqlite3.Connection, insert_item: Insert
 ) -> None:  # [R9]
