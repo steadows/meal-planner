@@ -97,36 +97,16 @@ def test_confirming_a_flagged_item_restocks_it_and_never_logs_a_purchase(
 
 
 @pytest.mark.parametrize(
-    ("fields", "plenty", "wait"),
-    [
-        ({"typical_interval_days": 42}, False, 7),
-        ({"typical_interval_days": 42}, True, 42),
-        ({}, False, 7),
-        ({}, True, 7),
-        # A purchase date with no interval: still no ask date, and nothing to grow
-        ({"last_purchased": _on(-100)}, False, 7),
-    ],
-    ids=[
-        "still good: a week",
-        "plenty: one interval",
-        "still good, no interval: a week",
-        "plenty, no interval: a week",
-        "still good, bought but no interval: a week",
-    ],
-)
-def test_with_no_ask_date_still_good_asks_in_a_week_and_plenty_in_one_interval(
-    db: sqlite3.Connection, insert_item: Insert, fields: dict[str, object], plenty: bool, wait: int
-) -> None:  # [A3] [A4 "no ask date at all"]; [Rev4] "The push"; [Fake]
-    insert_item(_item(1, "rice", **fields))
-    expected = _item(1, "rice", **fields, next_ask_on=_on(wait))
-    assert SqlitePantry(db).confirm_stocked("rice", ON, plenty=plenty) == expected
-    assert SqlitePantry(db).get_item("rice") == expected
-    assert _column(db, "next_ask_on") == {"rice": str(_on(wait))}
-
-
-@pytest.mark.parametrize(
     ("fields", "plenty", "ask"),
     [
+        # No current ask date: the push alone.
+        ({"typical_interval_days": 42}, False, _on(7)),
+        ({"typical_interval_days": 42}, True, _on(42)),
+        ({}, False, _on(7)),
+        ({}, True, _on(7)),
+        # A purchase date with no interval: still no ask date, and nothing to grow
+        ({"last_purchased": _on(-100)}, False, _on(7)),
+        # A current ask date: the later of it and the push.
         ({"typical_interval_days": 42, "next_ask_on": _on(90)}, False, _on(90)),
         ({"typical_interval_days": 42, "next_ask_on": _on(90)}, True, _on(90)),
         ({"typical_interval_days": 42, "next_ask_on": _on(-3)}, False, _on(7)),
@@ -144,6 +124,11 @@ def test_with_no_ask_date_still_good_asks_in_a_week_and_plenty_in_one_interval(
         ),
     ],
     ids=[
+        "still good: a week",
+        "plenty: one interval",
+        "still good, no interval: a week",
+        "plenty, no interval: a week",
+        "still good, bought but no interval: a week",
         "later next_ask_on kept (still good)",
         "later next_ask_on kept (plenty)",
         "earlier next_ask_on moved to the week (still good)",
@@ -155,7 +140,7 @@ def test_with_no_ask_date_still_good_asks_in_a_week_and_plenty_in_one_interval(
 )
 def test_confirming_moves_the_ask_date_to_the_later_of_the_current_one_and_the_push(
     db: sqlite3.Connection, insert_item: Insert, fields: dict[str, object], plenty: bool, ask: date
-) -> None:  # [A4]; [Rev4] "The new ask date"; [Fake] "this only ever pushes the ask back"
+) -> None:  # [A3] [A4]; [Rev4] "The push", "The new ask date"; [Fake] "only ever pushes back"
     insert_item(_item(1, "rice", **fields))
     expected = _item(1, "rice", **{**fields, "next_ask_on": ask})
     assert SqlitePantry(db).confirm_stocked("rice", ON, plenty=plenty) == expected
