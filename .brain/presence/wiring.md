@@ -3,15 +3,15 @@ type: presence
 agent: wiring
 feature: "Scheduled jobs and end-to-end: sat_propose, sat_nudge, sun_autoapprove, cart_fill, entry point"
 status: active
-phase: "P1 meals/background.py MERGED (PR #20, merge commit 28885e1, 2026-09-26); bot unblocked. Next: P2 plan_state + jobs + CLI on feat/wiring-p2 (cut from synced feat/wiring), building against contracts #21 (job_run, hold_fds, layers), merged as 8c24816, so P2 is unblocked."
+phase: "Phase 5 / Lane G, ADR P2 2.1–2.7: not started, waiting on Steve's go. feat/wiring-p2 is cut from a synced feat/wiring; its first commit 010dc5a marks ADR P0 0.2–0.7 done (contracts #21, 8c24816). Before this: ADR P1 1.1–1.6 merged (PR #20, 28885e1)."
 owns_branches: ["wiring"]
 plan: docs/PLAN.md (Implementation plan, Concurrency lanes)
 tracker_epic: none
 current_worktree: /Users/stevemeadows/meal-planner-wiring
-current_branch: feat/wiring
+current_branch: feat/wiring-p2
 current_ticket: none
-touches: [.brain/connections/bot-background-py-waiting-on.md, .brain/connections/bot-contracts-pantry-confirm-stocked.md, .brain/connections/cart-contracts-wiring-runtime-adr-asks.md, .brain/journal/2026-09-26.md, .brain/presence/contracts.md, .brain/presence/pantry.md, .brain/presence/wiring.md, architecture-plan.html, docs/PLAN.md, docs/prompts/pantry-pr2-adversarial-review.md, docs/prompts/pantry-pr2-ultrareview.md, docs/prompts/wiring-p1-background-adversarial-review.md, docs/prompts/wiring-p1-background-ultrareview.md, meals/background.py, meals/claude_runner.py, meals/contracts.py, meals/db.py, meals/fakes/claude.py, meals/fakes/mealie.py, meals/pantry.py, meals/seed_loader.py, pyproject.toml, tests/conftest.py, tests/test_background.py, tests/test_claude_runner.py, tests/test_contracts.py, tests/test_db.py, tests/test_pantry_confirm.py, tests/test_pantry_parity.py, tests/test_pantry_writes.py, tests/test_seed_loader.py, uv.lock]
-updated: 2026-09-26T20:53:55Z
+touches: [architecture-plan.html]
+updated: 2026-09-26T20:59:11Z
 ---
 Lane G — last. Jobs keyed on weekly_plan.status so every job is safe to rerun; one Chrome session at a time via a lock; bot never blocks (background subprocesses); max two concurrent claude processes. Done when a full Saturday dry run works end to end (M4). Waits on [[pantry-wiring-waiting-on]], [[mealie-wiring-waiting-on]], [[search-wiring-waiting-on]] and [[bot-wiring-waiting-on]].
 
