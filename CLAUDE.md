@@ -1,6 +1,6 @@
 # CLAUDE.md — meal-planner
 
-Read this, then `docs/PLAN.md` (the sections named below), before writing code.
+Read this, then `docs/AUTONOMOUS_WORK.md` (how a lane runs its build loop: gates, verification, stop conditions, Codex), then `docs/PLAN.md` (the sections named below), before writing code.
 
 ## Orientation
 
