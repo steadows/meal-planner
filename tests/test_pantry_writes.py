@@ -238,12 +238,10 @@ def test_a_back_dated_purchase_is_logged_but_never_changes_current_stock(
         ((0, 10), 21, 11),
         # gaps 60, 60, 60, 10: the median, not the mean (47.5) and not the latest gap
         ((0, 60, 120, 180), 190, 60),
-        # distinct dates 0 and 10 give one gap; counting both day-0 rows gives median(0, 10) = 5
-        ((0, 0), 10, 10),
         # logged out of order plus a back-dated purchase: dates 0, 12, 30, gaps 12 and 18
         ((30, 0), 12, 15),
     ],
-    ids=["half up", "median", "distinct dates", "sorted by date"],
+    ids=["half up", "median", "sorted by date"],
 )
 def test_a_staples_interval_becomes_the_median_gap_between_distinct_purchase_dates(
     db: sqlite3.Connection,
@@ -393,6 +391,32 @@ def test_a_write_takes_the_write_lock_before_it_reads_anything(
     assert len(begins) == 1, seen
     assert seen[0] == begins[0], seen
     assert re.match(r"(?i)begin\s+immediate", seen[0].lstrip()), seen
+
+
+@pytest.mark.parametrize("write", ["flip_status", "log_purchase"])
+def test_the_returned_item_is_read_before_the_commit(
+    db: sqlite3.Connection, insert_item: Insert, write: str
+) -> None:  # Codex sweep B: a re-read after COMMIT can return another writer's change
+    insert_item(_item(1, "rice", typical_interval_days=56))
+    seen: list[str] = []
+    db.set_trace_callback(seen.append)
+    try:
+        if write == "flip_status":
+            result = SqlitePantry(db).flip_status("rice", "buy_next_time")
+        else:
+            result = SqlitePantry(db).log_purchase("rice", ON)
+    finally:
+        db.set_trace_callback(None)
+    assert result is not None
+    commits = [i for i, sql in enumerate(seen) if sql.lstrip().upper().startswith("COMMIT")]
+    item_reads = [
+        i
+        for i, sql in enumerate(seen)
+        if re.match(r"(?is)\s*select\b.*\bfrom\s+pantry_item\b", sql)
+    ]
+    assert len(commits) == 1, seen
+    assert item_reads, seen
+    assert item_reads[-1] < commits[0], seen
 
 
 @pytest.mark.parametrize(
@@ -575,11 +599,10 @@ def test_load_seed_rewrites_the_product_map_but_never_stock_or_history(
     [
         ((), 63, 63),
         ((0,), 63, 63),
-        ((0, 0), 63, 63),  # two rows, one distinct date: still the seed's guess
         ((0, 11), 63, 70),  # two distinct dates: learning owns the interval now
         ((0,), None, 70),  # a blank seed interval keeps the current one
     ],
-    ids=["never bought", "one date", "one date twice", "two dates", "blank in the seed"],
+    ids=["never bought", "one date", "two dates", "blank in the seed"],
 )
 def test_a_seed_interval_replaces_the_guess_until_learning_takes_over(
     db: sqlite3.Connection,

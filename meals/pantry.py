@@ -215,8 +215,9 @@ class SqlitePantry:
                 "UPDATE pantry_item SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (status, item.id),
             )
+            updated = self._reread(item.id)  # before COMMIT, so no other writer's change leaks in
         logger.info("pantry: %s is now %s", item.name, status)
-        return self._reread(item.id)
+        return updated
 
     def log_purchase(
         self, name: str, on: date, qty: float | None = None, price_cents: int | None = None
@@ -270,13 +271,14 @@ class SqlitePantry:
                     item.id,
                 ),
             )
+            updated = self._reread(item.id)  # before COMMIT, so no other writer's change leaks in
         logger.info(
             "pantry: logged %s purchase on %s (%s)",
             item.name,
             on,
             "restocked" if latest else "history only",
         )
-        return self._reread(item.id)
+        return updated
 
     def load_seed(self, items: Iterable[SeedItem]) -> SeedResult:
         """Apply the seed CSV (the ingredient → Meijer product map), all or nothing.

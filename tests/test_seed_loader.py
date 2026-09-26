@@ -232,6 +232,27 @@ def test_a_header_missing_name_or_category_or_naming_an_unknown_column_is_reject
     assert excinfo.value.problems
 
 
+@pytest.mark.parametrize(
+    ("text", "column"),
+    [
+        (
+            f"name,category,meijer_url,meijer_url\nrice,staple,{PRODUCT}/example-rice/1.html,\n",
+            "meijer_url",
+        ),
+        ("name,category, name\nrice,staple,butter\n", "name"),
+    ],
+    ids=["meijer_url twice", "name twice after stripping"],
+)
+def test_a_header_naming_a_column_twice_is_rejected(tmp_path: Path, text: str, column: str) -> None:
+    # Codex sweep C: the reader would keep the last copy, and a blank one erases a stored URL
+    path = tmp_path / "seed.csv"
+    path.write_text(text, encoding="utf-8")
+    with pytest.raises(SeedError) as excinfo:
+        read_seed_csv(path)
+    assert _row_numbers(excinfo.value.problems) == {1}
+    assert any(column in problem for problem in excinfo.value.problems), excinfo.value.problems
+
+
 @pytest.mark.parametrize("columns", [("name", "category"), COLUMNS], ids=["two columns", "all"])
 def test_only_name_and_category_are_needed_and_blank_cells_take_the_defaults(
     tmp_path: Path, columns: tuple[str, ...]
@@ -417,6 +438,19 @@ def test_row_numbers_are_file_lines_so_blank_lines_count(tmp_path: Path) -> None
     with pytest.raises(SeedError) as excinfo:
         read_seed_csv(path)
     assert _row_numbers(excinfo.value.problems) == {3}
+
+
+def test_an_unterminated_quote_is_an_error_not_a_merge_of_the_rows_after_it(
+    tmp_path: Path,
+) -> None:  # Codex sweep D: lax csv folds every later row into the open quoted cell
+    path = tmp_path / "seed.csv"
+    path.write_text(
+        'name,category,notes\nrice,staple,"stir first\nbutter,staple,\ntahini,staple,\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(SeedError) as excinfo:
+        read_seed_csv(path)
+    assert excinfo.value.problems
 
 
 # ── staples_due on seed data (PLAN.md, Concurrency lanes: Lane B done-when) ──
