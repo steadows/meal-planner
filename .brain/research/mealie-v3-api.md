@@ -462,3 +462,16 @@ databases; I did not cross-check GHSA IDs directly, only CVE IDs)
      path, and per CVE-2026-71210 that guard has had at least one confirmed bypass
      class. Don't build additional logic on the assumption that Mealie will always
      safely refuse to fetch an internal URL.
+
+### Update 2026-09-26 (mealie lane, verified against tagged source)
+- The DNS-rebinding fix (resolve once, validate, pin via curl `RESOLVE`) **first shipped in
+  v3.26.0** (released 2026-09-14), from PR mealie-recipes/mealie#7914 ("fix: harden
+  server-initiated HTTP against SSRF and DNS rebinding", merged 2026-09-04). Confirmed by grepping
+  `mealie/pkgs/safehttp/transport.py` at tags v3.25.0 (absent), v3.26.0, v3.27.0, v3.28.0 (present).
+- The CVE id CVE-2026-71210 above comes only from third-party trackers; it doesn't appear in
+  Mealie's repo, release notes or that PR. Cite the PR, not the CVE id.
+- `GET /api/organizers/tags/slug/{slug}` returns **500, not 404**, for an unknown slug (the handler
+  returns `repo.get_one(...)` = None against `response_model=RecipeTagResponse`). Resolve a tag by
+  paging `GET /api/organizers/tags` (items `{id, name, slug, recipeCount}`) instead.
+- Re-importing a URL creates a copy named "Name (1)", "Name (2)"… (`RepositoryRecipes.create`),
+  and after 10 collisions it returns 400.

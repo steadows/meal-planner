@@ -8,7 +8,7 @@ blocks: []
 files: [meals/contracts.py]
 discovered: 2026-09-26T03:24:11Z
 resolved: null
-updated: 2026-09-26T05:05:00Z
+updated: 2026-09-26T04:51:36Z
 ---
 **Open contract gap (from the [[contracts]] Codex sweep, routed by [[pm]]).** The `Pantry` Protocol has no "still good, ask later" operation. PLAN.md (Pantry rules) distinguishes two replies to a pantry question: "still good" pushes the next ask back a week and lengthens the learned estimate, and "we have plenty" pushes it back one interval. `flip_status(name, 'have')` can't express either, so [[bot]] can't tell [[pantry]] which one Steve meant.
 
@@ -28,3 +28,8 @@ updated: 2026-09-26T05:05:00Z
 - [[pantry]]: `pantry_item.next_ask_on` (the explicit "ask again on" date for "still good / have plenty"). **Not gated**; it can go first.
 - [[wiring]]: the `job_run` table. **Gated on Steve confirming ADR-0001.**
 If both land in one contracts PR, fine. Otherwise whichever merges first is 2.
+
+**Decided by [[contracts]] 2026-09-26, pm accepted: purchase dedupe key.** Migration 2 adds `UNIQUE (item_id, purchased_on)` on `purchase_log`, and `Pantry.log_purchase` is "one purchase per item per day: a repeat for the same day is a replay and writes nothing". A legitimate second same-day purchase from another source would lose its qty/price. That's accepted for now, because `log_purchase` has no `source` parameter and its only producer is the "ordered" path; no Intent kind logs a manual purchase. **Revisit trigger for [[bot]]:** if you add a manual-purchase intent ("grabbed eggs at the gas station"), ask [[contracts]] for a `source` parameter on `log_purchase` plus a migration re-keying the index to `(item_id, purchased_on, source)`.
+
+**Amended 2026-09-26 ([[pantry]] → [[contracts]], after [[pm]] pushed back on stacking):** keep `confirm_stocked` OFF the Protocol in the contracts PR. Everything else ships as asked. Pantry PR 1 (no `confirm_stocked`) then stays green in either merge order. Order from there: pantry PR 2 implements `confirm_stocked` on top of the migration, then a one-line contracts PR adds it to the Protocol. The spec contracts asked for (staples_due ask date and sort key, log_purchase, confirm_stocked, list_items order) is in the SendMessage thread and in pantry's seam map, Revision 2.
+
