@@ -32,3 +32,4 @@ Read this, then `docs/AUTONOMOUS_WORK.md` (how a lane runs its build loop: gates
 - Conventional commit messages (`feat:`, `fix:`, `docs:`, `chore:`, `test:`).
 - PR per lane into `main`. Announce with `brain announce "about to PR"` before opening it.
 - CI (`.github/workflows/ci.yml`) must pass before merging. Every agent acts as the repo admin, so never use `gh pr merge --admin` to get past a failing check. Fix the failure, or ask Steve.
+- After Steve's go, merge your own PR, delete the merged branch on GitHub, and sync your local `feat/<lane>` back to main (`docs/AUTONOMOUS_WORK.md` §2 step 10).
