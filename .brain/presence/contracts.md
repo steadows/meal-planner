@@ -3,7 +3,7 @@ type: presence
 agent: contracts
 feature: "Shared contracts: config, db schema + migrations, pydantic contracts, claude_runner, fakes"
 status: active
-phase: "Lane 0 (contracts), supporting Phase 3 / Lane B: PR A on feat/contracts-confirm-stocked (Steve go via pm, 17:01 EDT): confirm_stocked joins the Pantry Protocol + stale fake docstring + PLAN pantry row; no behaviour change. F2 (don't freeze a computed ask date) split out as ONE joint PR with pantry 2b, since either half alone breaks test_pantry_parity"
+phase: "Lane 0 (contracts), supporting Phase 3 / Lane B: PR #24 (confirm_stocked joins the Pantry Protocol, no behaviour change) ALL GATES DONE, waiting on Steve's merge (CI green, ultra READY, verify READY, 17:31 EDT). Next: F2 joint PR with pantry 2b (contracts fake half on feat/contracts-f2-ask-date, cut from main after #24 merges; pantry stacks + opens it)"
 owns_branches: ["contracts"]
 plan: docs/PLAN.md (Implementation plan, Concurrency lanes)
 tracker_epic: none
@@ -23,3 +23,7 @@ Read PLAN.md → Shared contracts, Definition of done, and Rules (updated on `fe
 - `pyproject.toml` and `tests/conftest.py` are add-only for other lanes, so lay them out to make appending easy.
 - **Approved by Steve 2026-09-25:** `claude_runner` always strips ANTHROPIC_API_KEY and fails loudly without /login. New domain terms accepted as-is: `Ingredient`, `CartItem`, `PantryItem`, `ClaudeRunnerError`, `MealieClient`, `Pantry`. `.context/` is git-ignored on main (PR #2).
 - **Approved by Steve 2026-09-25 (second batch):** `Components` (fixed slots proteins/grains/veg/sauces/fresh) and `Substitution` (wanted/used). **CI is a go.** Before opening the PR, add ruff and mypy (pydantic plugin) to the dev group, commit `uv.lock`, and pass `uv sync --locked`, `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy` and `uv run pytest` under Python 3.11. The CI workflow lands from [[pm]] right after this lane's first PR merges.
+
+## Backlog from pantry PR #25 (via [[pm]], 2026-09-26)
+- A `claude_runner` **"pantry-run" shape** (MCP pantry tools only; no web, Chrome or file tools). The bot lane will ask for it when it mounts the tools.
+- Pre-existing: `pantry_item.typical_interval_days` has **no upper CHECK** in `db.py`, so a hand-edited huge value overflows the date maths. Your call: add a bound in a future migration, or leave it to the pantry read-side validation.

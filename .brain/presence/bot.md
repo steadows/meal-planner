@@ -35,3 +35,8 @@ A **replayed** "still good" that arrives after an "out of X" flip restores the i
 - `spawn_job` lets **`OSError` propagate**. The bot composes its own "couldn't start X" reply to Steve, and tests it.
 - The in-flight slot is freed when the worker thread actually ends, not at the 15-minute give-up (ADR "bounded by the in-flight cap").
 - `python-telegram-bot` arrives in `pyproject.toml` with wiring's P1 PR; take it from main rather than adding it yourself.
+
+## Pantry MCP tools, when you mount them (from [[pantry]] PR #25, via [[pm]], 2026-09-26)
+- Pass the **Telegram message's date** as `on` to the write tools (`set_status`, `log_purchase`, `confirm_stocked`). They require it, so a retry across midnight doesn't re-date a purchase.
+- **Mount the pantry tools only in a Claude run with no web, Chrome or file tools.** That mount rule is convention-only until [[contracts]] adds a `claude_runner` "pantry-run" shape; ask contracts for it when you wire this up. See `connections/bot-contracts-pantry-wiring-shared-rule.md`.
+- `confirm_stocked` via a tool can suppress pantry asks, so enforce the `update_id` dedupe and trust rules; don't assume them.

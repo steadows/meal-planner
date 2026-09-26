@@ -3,15 +3,15 @@ type: presence
 agent: wiring
 feature: "Scheduled jobs and end-to-end: sat_propose, sat_nudge, sun_autoapprove, cart_fill, entry point"
 status: active
-phase: "Phase 5 / Lane G, ADR P2 2.1–2.7: not started, waiting on Steve's go. feat/wiring-p2 is cut from a synced feat/wiring; its first commit 010dc5a marks ADR P0 0.2–0.7 done (contracts #21, 8c24816). Before this: ADR P1 1.1–1.6 merged (PR #20, 28885e1)."
+phase: "Phase 5 / Lane G, ADR P2 2.1–2.7: 2.1 seams done (tier HIGH, .context/seams/P2.md, D1–D10); 2.2 RED in progress (tw-p2). feat/wiring-p2 on ff4bfaa: aa1a5b9 P0 ticks, 5d7f03f plan. Local, not pushed. Before: ADR P1 merged (PR #20)."
 owns_branches: ["wiring"]
 plan: docs/PLAN.md (Implementation plan, Concurrency lanes)
 tracker_epic: none
 current_worktree: /Users/stevemeadows/meal-planner-wiring
 current_branch: feat/wiring-p2
 current_ticket: none
-touches: [architecture-plan.html]
-updated: 2026-09-26T20:59:11Z
+touches: [architecture-plan.html, meals/plan_state.py, meals/jobs.py, meals/__main__.py, meals/background.py, tests/test_plan_state.py, tests/test_jobs.py, tests/test_main.py, tests/test_background.py]
+updated: 2026-09-26T21:09:50Z
 ---
 Lane G — last. Jobs keyed on weekly_plan.status so every job is safe to rerun; one Chrome session at a time via a lock; bot never blocks (background subprocesses); max two concurrent claude processes. Done when a full Saturday dry run works end to end (M4). Waits on [[pantry-wiring-waiting-on]], [[mealie-wiring-waiting-on]], [[search-wiring-waiting-on]] and [[bot-wiring-waiting-on]].
 

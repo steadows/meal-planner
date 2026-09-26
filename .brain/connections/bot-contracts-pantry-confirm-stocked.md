@@ -8,7 +8,7 @@ blocks: []
 files: [meals/contracts.py]
 discovered: 2026-09-26T03:24:11Z
 resolved: null
-updated: 2026-09-26T20:31:08Z
+updated: 2026-09-26T21:04:01Z
 ---
 **Open contract gap (from the [[contracts]] Codex sweep, routed by [[pm]]).** The `Pantry` Protocol has no "still good, ask later" operation. PLAN.md (Pantry rules) distinguishes two replies to a pantry question: "still good" pushes the next ask back a week and lengthens the learned estimate, and "we have plenty" pushes it back one interval. `flip_status(name, 'have')` can't express either, so [[bot]] can't tell [[pantry]] which one Steve meant.
 
@@ -54,3 +54,13 @@ If both land in one contracts PR, fine. Otherwise whichever merges first is 2.
 - Close this note when the Protocol line is on main.
 
 **Sequencing (from [[contracts]], agreed by [[pm]], 2026-09-26):** (1) **PR A**, contracts alone on `feat/contracts-confirm-stocked`: the `confirm_stocked` Protocol line, a stale fake docstring cleanup and the PLAN pantry row. No behaviour change, so it merges on its own and lets pantry PR 3 drop `_PantryTools`. (2) **The F2 fix is ONE joint PR**, because pantry's parity test (`test_pantry_parity` SCRIPT step 2, rice) compares the fake and the real item for item, so either half alone turns main red. Pantry's 2b branch stacks on contracts' fake-half branch and carries the PR. Each lane commits only its own files; one fleet; both feature branches deleted after merge, and both bases fast-forwarded.
+
+**F2 lands as ONE joint PR, agreed 2026-09-26 17:03 EDT ([[contracts]] proposed, [[pantry]] picked option 1).** Why: `tests/test_pantry_parity.py` SCRIPT step 2 compares FakePantry with SqlitePantry, so either half alone goes red on main.
+1. **PR A** ([[contracts]], `feat/contracts-confirm-stocked`): `confirm_stocked(name, on, plenty=False) -> PantryItem | None` joins the `Pantry` Protocol, stale fake docstrings drop, PLAN pantry row. No behaviour change, so it merges alone. It unblocks pantry PR 3 deleting its local `_PantryTools` stand-in.
+2. **The F2 joint PR:** [[contracts]] cuts `feat/contracts-f2-ask-date` from main after PR A, with the fake half and the Protocol docstring. [[pantry]] cuts its 2b branch FROM that, adds the real half (`meals/pantry.py` `_postponed_ask`) with tw RED (the confirm ask-date table plus parity step 2), runs its gates on the combined diff, and opens the single PR. Each lane edits only its own files.
+3. **Semantics:**
+   - `pushed = on + (interval if plenty and interval else 7)`, and `current` is the ask date.
+   - If `current` is None or `pushed > current`, then `next_ask_on = pushed`.
+   - Else if `current` came from `next_ask_on`, it's unchanged.
+   - Else (the 90% point ≥ pushed, tie included), `next_ask_on` stays NULL.
+   - Status is always `have`. A same-`on` replay is a no-op.
