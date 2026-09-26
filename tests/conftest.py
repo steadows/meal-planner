@@ -5,6 +5,7 @@ ask the contracts lane instead.
 """
 
 import json
+import os
 import sqlite3
 from collections.abc import Iterator
 from datetime import date, timedelta
@@ -137,6 +138,17 @@ def db(tmp_path: Path) -> Iterator[sqlite3.Connection]:
     conn = get_db(tmp_path / "pantry.sqlite")
     yield conn
     conn.close()
+
+
+# ── contracts: live claude gate ──────────────────────────────────────────────
+
+
+@pytest.fixture
+def live_claude() -> None:
+    """Skips the test unless MEALS_LIVE_CLAUDE=1. A live test calls the real `claude -p` and spends
+    Claude usage, so `-m integration` alone never does. Use `@pytest.mark.usefixtures("live_claude")`."""
+    if os.environ.get("MEALS_LIVE_CLAUDE") != "1":
+        pytest.skip("calls the real claude -p and spends usage; set MEALS_LIVE_CLAUDE=1 to run it")
 
 
 # ── search ───────────────────────────────────────────────────────────────────
