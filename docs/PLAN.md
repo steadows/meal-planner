@@ -237,6 +237,7 @@ CREATE TABLE pantry_item (
     status                 TEXT NOT NULL DEFAULT 'have' CHECK (status IN ('have','buy_next_time')),
     typical_interval_days  INTEGER,                     -- NULL for perishables
     last_purchased         DATE,
+    next_ask_on            DATE,                        -- "still good" / "plenty": ask again on or after
     default_qty            REAL,
     default_unit           TEXT,                        -- "bottle", "lb", "dozen"
     meijer_product_id      TEXT,
@@ -256,6 +257,8 @@ CREATE TABLE purchase_log (
     price_cents   INTEGER,
     source        TEXT DEFAULT 'meijer_pickup'
 );
+-- One purchase per item per day: a repeat for the same day is a replayed "ordered" message.
+CREATE UNIQUE INDEX purchase_log_item_day ON purchase_log (item_id, purchased_on);
 
 CREATE TABLE weekly_plan (
     id              INTEGER PRIMARY KEY,
@@ -543,12 +546,12 @@ tests/
 | --- | --- | --- |
 | Database schema | `pantry_item`, `purchase_log`, `weekly_plan`, `meal_rating` (Pantry rules section) | pantry, planner, cart, bot |
 | `claude_runner.run(prompt, schema=None, chrome=False, timeout=600)` | Returns validated JSON, or raises with the raw output attached | search, planner, intents, cart |
-| `RecipeOption` | name, url, source, hands\_on\_min, servings, batch\_ok, fit\_note, ingredients\[\], steps\[\] | search, planner, bot |
-| `WeekProposal` | mode, recipe\_options\[\], components{}, lunch\_builds\[\], kid\_nights\[\], pantry\_questions\[\] | planner, bot, cart |
+| `RecipeOption` | name, url, source, hands\_on\_min, servings, batch\_ok, fit\_note, ingredients\[\], steps\[\], mealie\_slug (set only by the Mealie client; Claude's output can never set it) | search, planner, bot |
+| `WeekProposal` | week\_start (must be a Sunday, the cook day), mode, recipe\_options\[\], components{}, lunch\_builds\[\], kid\_nights\[\], pantry\_questions\[\] | planner, bot, cart |
 | `Intent` | kind (pick, swap, custody, pantry\_flip, add\_item, find, save, rate, mode), args | bot, pantry, planner |
-| `CartList` / `CartReport` | Items with qty, unit, meijer\_url, preferred\_name / added\[\], substituted\[\], missing\[\], subtotal | cart, bot |
+| `CartList` / `CartReport` | week\_start (a Sunday), items with qty, unit, meijer\_url, preferred\_name / added\[\], substituted\[\], missing\[\], subtotal | cart, bot |
 | `mealie_client` interface | `import_url()`, `get_recipe()`, `list_by_tag()`, `set_meal_plan()` | search, planner, cart |
-| `pantry` interface | `staples_due()`, status flips | planner, bot |
+| `pantry` interface | `staples_due()`, `flip_status()`, `log_purchase()`, `get_item()`, `list_items()`; `confirm_stocked()` ("still good" / "have plenty") joins once pantry implements it | planner, bot, cart |
 
 Every contract ships with a fake in `meals/fakes/`, so each lane can test against the fakes before the real pieces exist. The `mealie_client` and `pantry` interfaces are `typing.Protocol` classes in `contracts.py`. `mealie_client.py` and `pantry.py` implement them, and the modules that use them take an implementation as an argument instead of importing it.
 
