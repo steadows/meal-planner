@@ -3,7 +3,7 @@ type: presence
 agent: pm
 feature: "PM/coordination lane: sweeps the vault, unblocks waiting-on edges, tracks merge order against PLAN.md, files follow-ups — owns no meals/ code"
 status: active
-phase: overnight supervision done; PRs #10-#13 green and mergeable, #9 ADR confirmed (merge pending). Post-merge queue: PLAN ticks and doc bumps, ADR-gated contracts PR after #13, bot unblock after #9
+phase: "PRs 9-15 merged; no open PRs. Next: ADR-gated contracts PR (after feat/contracts resync), mealie TRUSTED one-liner, wiring P1 background.py, then bot; cart waits on the Meijer spike"
 owns_branches: ["pm"]
 plan: docs/PLAN.md (Concurrency lanes, Coordination with agent-brain)
 tracker_epic: none
@@ -11,7 +11,7 @@ current_worktree: /Users/stevemeadows/meal-planner-pm
 current_branch: feat/pm
 current_ticket: none
 touches: [docs/PLAN.md, CLAUDE.md, .claude/settings.json, .gitignore, .github/, .brain/presence/, .brain/connections/, .brain/journal/]
-updated: 2026-09-26T14:13:15Z
+updated: 2026-09-26T15:24:23Z
 ---
 Coordination lane, not a build lane — owns no files under `meals/`. Job: periodic sweep of `.brain/` (presence notes, `connections/`, journal) to catch stalled lanes, unresolved `waiting-on` edges, and merge-order violations against the diagram in PLAN.md (`Concurrency lanes`); message a stuck lane; keep this note's `status` honest. Comms: live `SendMessage` between lanes (Steve, 2026-09-25) — do NOT arm a watcher on `dm/pm/pending`.
 
@@ -60,10 +60,23 @@ Pre-checked on 2026-09-25: none of these files existed, `~/.gitconfig` had no in
 ## Follow-ups (pm backlog)
 - [x] **Chrome DevTools MCP for e2e testing** (PR #5, merged 2026-09-26) (Steve, 2026-09-25, "when we get a chance"). It isn't configured anywhere yet: there's no global MCP server and no `.mcp.json`. Plan: [[pm]] adds a committed project `.mcp.json` with the `chrome-devtools` server so every worktree gets it. Main users: [[wiring]] (end-to-end Saturday dry run, M4) and [[mealie]] (checking a meal plan renders in Mealie). **Hard rule:** e2e uses an isolated, throwaway Chrome profile, never Steve's logged-in Meijer profile. Same prompt-injection and no-checkout boundary as the cart lane. Research the current server package and flags before adding it.
 - [x] **`/steadows-verify` for Lane 0's phase: READY** (run by contracts on main @ 6701c11: 152 tests, 95% coverage, gitleaks and pip-audit clean; security WARN, 0 critical/high. MEDIUM `load_prompt` path traversal → next contracts PR; LOW checkout persist-credentials → PR #8). Previously: (the contracts lane wrapped without it). Run it on main; the architecture stage will flag the missing ARCHITECTURE.md, which is known (see AUTONOMOUS_WORK.md §0). Ask Steve who runs it.
-- [~] **ADR-gated contracts PR:** `job_run` (migration 3 if #13 lands first), `run(hold_fds=())`, and layering (`__main__` on top; `background`/`plan_state` in the feature layer; `seed_loader` stays in the entry tier). ADR-0001 is Accepted and the final spec is with contracts. **Starts after Steve merges #13;** pm pings contracts then. PLAN grant: the Definition-of-done entry-point line and the contracts table only. See [[cart-contracts-wiring-runtime-adr-asks]].
+- [~] **ADR-gated contracts PR:** `job_run` (migration 3 if #13 lands first), `run(hold_fds=())`, and layering (`__main__` on top; `background`/`plan_state` in the feature layer; `seed_loader` stays in the entry tier). ADR-0001 is Accepted and the final spec is with contracts. #13 merged 2026-09-26 (1cc239b). It starts in contracts' next session, after the `feat/contracts` resync (Steve's OK requested by contracts). PLAN grant: the Definition-of-done entry-point line and the contracts table only. See [[cart-contracts-wiring-runtime-adr-asks]].
 - [ ] **`feat/contracts` resync to main**: the rebase-merge changed the SHAs. Contracts asked Steve.
 - [ ] **Tooling note:** in one run, a test-writer subagent's scratch command included `rm -f /dev/null`. It failed harmlessly (not root) and `/dev/null` is intact. Contracts queued a feedback draft.
-- [ ] **After #9 merges:** resolve [[bot-runtime-design-waiting-on]]; add the bot → wiring `background.py` edge to PLAN Concurrency lanes.
-- [ ] **After #10/#12 merge:** tick PLAN Phase 4 (prefs file, /find) and Phase 3 (rollup quantities, no agentic-OS imports).
+- [x] **After #9 merges:** [[bot-runtime-design-waiting-on]] resolved (by wiring); new edge [[bot-background-py-waiting-on]] added; PLAN edge plus the ADR-gate status in PR #14.
+- [x] **PLAN ticks:** Phase 3 and Phase 4 merged in PR 14 (df26a87).
 - [ ] **PLAN doc bumps (need Steve's OK):** Mealie v3.28.0; the Phase 2 phone path via `tailscale serve`.
 - [ ] **Queued for Steve:** the CLAUDE.md `seed_loader` entry-point word; `CLAUDE_LOCK_DIR` in `.env.example`; the `/steadows-verify` subagent naming fix. See `~/meal-planner-pm/.context/task-master-2026-09-26.md`.
+- [ ] **ADR-0001 deferred follow-ups (not v1):** a `python -m meals doctor` command (env, claude probe, launchd state, lock holders), and an outside heartbeat or uptime alert for "the Mac is down". File as backlog when Steve wants them.
+- [ ] **Optional for Steve:** set macOS updates to download but not auto-install (ADR-0001 risk #26: FileVault means nothing runs after a reboot until he logs in).
+- [ ] **mealie (merged #11, lane done) punch list:**
+  - [[mealie]] owns the `mealie_slug` TRUSTED one-liner. #13 merged 2026-09-26 and mealie was pinged; it's queued for its next session.
+  - Steve owns the Lane A live Mealie check (compose up, change the default login, `MEALIE_URL`/`MEALIE_TOKEN` in `.env`, then `uv run pytest -m integration tests/test_mealie_client_integration.py`) and the Phase 2 phone path (`tailscale serve --bg 9925`, plus a matching `MEALIE_BASE_URL`).
+  - Deferred: duplicate-import detection (a re-import makes "Name (1)"); plan-entry ownership via a dedicated Mealie bot user.
+  - LOW: the Mealie image is pinned by tag, not digest; double tag I/O.
+  - Handoff: `~/meal-planner-mealie/.context/handoffs/HANDOFF-2026-09-26-lane-c-mealie.md`.
+- [ ] **Mealie error contract** ([[contracts-mealie-search-mealie-error-contract]]):
+  1. [[contracts]] adds `MealieUnavailable` to the `MealieClient` Protocol (it can ride with the ADR-gated PR or go on its own).
+  2. [[mealie]] wraps HTTP, transport and validation failures in it (separate PR; acked).
+  3. [[search]] skips on it in `_rotation_pool`, with a one-bad-favourite test.
+  pm pings each lane when the step before it lands.

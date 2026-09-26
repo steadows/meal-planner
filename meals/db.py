@@ -62,6 +62,14 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
             rated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
         )""",
     ),
+    (
+        # "Still good" / "plenty": ask again on or after this date (Pantry Protocol, ask date).
+        "ALTER TABLE pantry_item ADD COLUMN next_ask_on DATE",
+        # One purchase per item per day: a repeat is a replayed "ordered" message. Keyed without
+        # `source` on purpose (seam map contracts-3-followup). Fails the whole migration, rather
+        # than deleting history, if duplicates already exist.
+        "CREATE UNIQUE INDEX purchase_log_item_day ON purchase_log (item_id, purchased_on)",
+    ),
 )
 
 
@@ -105,9 +113,8 @@ def migrate(conn: sqlite3.Connection) -> int:
             version = _check_version(conn)  # re-read under the lock: another process may have won
             if version < len(MIGRATIONS):
                 logger.info("migrating pantry database from v%d to v%d", version, len(MIGRATIONS))
-            for statements in MIGRATIONS[version:]:
-                for statement in statements:
-                    conn.execute(statement)
+            for number in range(version + 1, len(MIGRATIONS) + 1):
+                _apply_migration(conn, number, version)
             if version < len(MIGRATIONS):
                 conn.execute(f"PRAGMA user_version = {len(MIGRATIONS)}")
             conn.execute("COMMIT")
@@ -118,6 +125,19 @@ def migrate(conn: sqlite3.Connection) -> int:
         return _version(conn)
     finally:
         conn.isolation_level = previous_isolation
+
+
+def _apply_migration(conn: sqlite3.Connection, number: int, from_version: int) -> None:
+    """Run migration `number`; on failure, say which one and where the database was left."""
+    try:
+        for statement in MIGRATIONS[number - 1]:
+            conn.execute(statement)
+    except sqlite3.Error as exc:
+        exc.add_note(
+            f"pantry database migration {number} failed and was rolled back; the database is "
+            f"still at v{from_version} (see the comment on meals.db.MIGRATIONS[{number - 1}])"
+        )
+        raise
 
 
 def _enable_wal(conn: sqlite3.Connection) -> None:

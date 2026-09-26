@@ -1,12 +1,14 @@
 """meals.claude_runner: the `claude -p` wrapper and prompt loading.
 
-Authority: the claude_runner.py docstrings and constants, and the seam map (`run()` /
-`load_prompt()`). Unit tests drive a fake `claude` executable written into tmp_path. The runner
-hands the child an allowlisted env, so the fake can't be told through env where to write: it
-records each call to `calls.jsonl` and reads its scripted behaviours from `script.json`, both
-next to itself.
+Authority: the claude_runner.py docstrings and constants, and the seam maps (`run()` /
+`load_prompt()`; contracts-3-followup: kill on any exception, `load_prompt` hardening,
+`validate_claude_output` and `RecipeOption.mealie_slug`). Unit tests drive a fake `claude`
+executable written into tmp_path. The runner hands the child an allowlisted env, so the fake
+can't be told through env where to write: it records each call to `calls.jsonl` and reads its
+scripted behaviours from `script.json`, both next to itself.
 """
 
+import contextlib
 import json
 import logging
 import os
@@ -15,16 +17,17 @@ import signal
 import subprocess
 import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
-from meals import claude_runner
+from meals import claude_runner, contracts
 from meals.config import get_settings
-from meals.contracts import ClaudeRunnerError, Ingredient
+from meals.contracts import ClaudeRunnerError, Contract, Ingredient, RecipeOption, WeekProposal
+from meals.fakes import FakeClaudeRunner
 
 pytestmark = pytest.mark.usefixtures("isolated_settings")
 
@@ -438,6 +441,182 @@ def test_timeout_falls_back_to_killing_the_child_when_killpg_is_refused(
             _kill(call["pid"])
 
 
+def _interrupting(
+    communicate: Callable[..., tuple[str, str]],
+    interrupt: BaseException,
+    processes: list[subprocess.Popen[str]],
+) -> Callable[..., tuple[str, str]]:
+    """A Popen.communicate that lets claude start, then raises `interrupt` mid-run. Each process
+    it interrupts is appended to `processes`."""
+
+    def interrupted(
+        process: subprocess.Popen[str], input: str | None = None, timeout: float | None = None
+    ) -> tuple[str, str]:
+        processes.append(process)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            communicate(process, input, timeout=1)  # claude starts, as in the timeout tests
+        raise interrupt
+
+    return interrupted
+
+
+@pytest.mark.parametrize(
+    "interrupt",
+    [KeyboardInterrupt("marker-ctrl-c"), RuntimeError("marker-error")],
+    ids=["keyboard_interrupt", "exception"],
+)
+def test_any_exception_mid_run_kills_the_process_group_and_propagates_unchanged(
+    fake_claude_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    interrupt: BaseException,
+) -> None:
+    """`start_new_session` keeps Ctrl-C from reaching claude, so the runner must kill it, close
+    its pipes and say so. The exception is the caller's: re-raised as is, never retried or turned
+    into ClaudeRunnerError."""
+    # Not parametrized over chrome: the kill lives in _run_once, and chrome only changes argv and
+    # the attempt count.
+    _script(fake_claude_home, {"sleep": 20, "grandchild": True, **OK}, OK)
+    monkeypatch.setenv("CLAUDE_MAX_CONCURRENT", "1")
+    caplog.set_level(logging.WARNING, logger="meals.claude_runner")
+    communicate = subprocess.Popen.communicate
+    processes: list[subprocess.Popen[str]] = []
+    interrupted = _interrupting(communicate, interrupt, processes)
+    monkeypatch.setattr(subprocess.Popen, "communicate", interrupted)
+    try:
+        with pytest.raises(type(interrupt)) as caught:
+            claude_runner.run(PROMPT, timeout=RUN_TIMEOUT)
+
+        assert caught.value is interrupt
+        (process,) = processes
+        pipes = (process.stdin, process.stdout, process.stderr)
+        assert [pipe is not None and pipe.closed for pipe in pipes] == [True, True, True]
+        name = type(interrupt).__name__
+        assert any(name in m and "kill" in m.lower() for m in _warnings(caplog)), _warnings(caplog)
+        (call,) = _calls(fake_claude_home)
+        assert _events(fake_claude_home, "end") == []  # killed, not waited out
+        assert not _alive(call["pid"])
+        deadline = time.monotonic() + 5  # the orphaned grandchild is reaped asynchronously
+        while _alive(call["grandchild"]) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not _alive(call["grandchild"])
+        # The only slot is free again: another process's run gets it.
+        monkeypatch.setattr(subprocess.Popen, "communicate", communicate)
+        assert _finish(_start_driver(dict(os.environ)), timeout=15) == {"ok": True}
+    finally:
+        for call in _calls(fake_claude_home):
+            _kill(call["pid"])
+            if call["grandchild"] is not None:
+                _kill(call["grandchild"])
+
+
+def test_exception_mid_run_still_kills_the_child_when_killpg_is_refused(
+    fake_claude_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """macOS refuses killpg with EPERM: the child still dies, and the caller gets its own
+    exception, not the PermissionError. (The grandchild survives a refused killpg.)"""
+
+    def refuse(pgid: int, sig: int) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr("meals.claude_runner.os.killpg", refuse)
+    _script(fake_claude_home, {"sleep": 20, "grandchild": True, **OK})
+    interrupt = KeyboardInterrupt("marker-ctrl-c")
+    interrupted = _interrupting(subprocess.Popen.communicate, interrupt, [])
+    monkeypatch.setattr(subprocess.Popen, "communicate", interrupted)
+    try:
+        with pytest.raises(KeyboardInterrupt) as caught:
+            claude_runner.run(PROMPT, timeout=RUN_TIMEOUT)
+
+        assert caught.value is interrupt
+        (call,) = _calls(fake_claude_home)
+        assert not _alive(call["pid"])
+    finally:
+        for call in _calls(fake_claude_home):
+            _kill(call["pid"])
+            if call["grandchild"] is not None:
+                _kill(call["grandchild"])
+
+
+def test_a_second_interrupt_during_the_kill_still_finishes_it_and_keeps_the_first(
+    fake_claude_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second Ctrl-C while the runner kills claude must not abandon the kill (claude would run
+    on, holding the slot) or replace the caller's exception."""
+    killpg = os.killpg  # the real one: the patch replaces it on the shared os module
+    killpg_calls: list[int] = []
+
+    def interrupt_the_first_killpg(pgid: int, sig: int) -> None:
+        killpg_calls.append(pgid)
+        if len(killpg_calls) == 1:
+            raise KeyboardInterrupt("second")
+        killpg(pgid, sig)
+
+    monkeypatch.setattr("meals.claude_runner.os.killpg", interrupt_the_first_killpg)
+    _script(fake_claude_home, {"sleep": 20, "grandchild": True, **OK})
+    interrupt = KeyboardInterrupt("marker-ctrl-c")
+    processes: list[subprocess.Popen[str]] = []
+    interrupted = _interrupting(subprocess.Popen.communicate, interrupt, processes)
+    monkeypatch.setattr(subprocess.Popen, "communicate", interrupted)
+    try:
+        with pytest.raises(KeyboardInterrupt) as caught:
+            claude_runner.run(PROMPT, timeout=RUN_TIMEOUT)
+
+        assert killpg_calls, "the second interrupt never fired: _kill_tree no longer calls killpg"
+        assert caught.value is interrupt
+        (call,) = _calls(fake_claude_home)
+        assert not _alive(call["pid"])
+        (process,) = processes
+        pipes = (process.stdin, process.stdout, process.stderr)
+        assert [pipe is not None and pipe.closed for pipe in pipes] == [True, True, True]
+    finally:
+        for call in _calls(fake_claude_home):
+            _kill(call["pid"])
+            if call["grandchild"] is not None:
+                _kill(call["grandchild"])
+
+
+def test_an_interrupt_during_the_kill_warning_still_kills_claude_and_keeps_the_first(
+    fake_claude_home: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Logging the kill is I/O too: a Ctrl-C landing in it must not skip the kill or replace the
+    caller's exception."""
+    kill_warnings: list[str] = []
+
+    def interrupt_the_kill_warning(record: logging.LogRecord) -> bool:
+        # A logger filter runs inside logger.warning(), and logging doesn't catch its errors.
+        message = record.getMessage()
+        if not kill_warnings and record.levelno == logging.WARNING and "kill" in message.lower():
+            kill_warnings.append(message)
+            raise KeyboardInterrupt("second")
+        return True
+
+    caplog.set_level(logging.WARNING, logger="meals.claude_runner")
+    _script(fake_claude_home, {"sleep": 20, "grandchild": True, **OK})
+    interrupt = KeyboardInterrupt("marker-ctrl-c")
+    processes: list[subprocess.Popen[str]] = []
+    interrupted = _interrupting(subprocess.Popen.communicate, interrupt, processes)
+    monkeypatch.setattr(subprocess.Popen, "communicate", interrupted)
+    claude_runner.logger.addFilter(interrupt_the_kill_warning)
+    try:
+        with pytest.raises(KeyboardInterrupt) as caught:
+            claude_runner.run(PROMPT, timeout=RUN_TIMEOUT)
+
+        assert kill_warnings, "the kill-path warning was never logged"
+        assert caught.value is interrupt
+        (call,) = _calls(fake_claude_home)
+        assert not _alive(call["pid"])
+        (process,) = processes
+        pipes = (process.stdin, process.stdout, process.stderr)
+        assert [pipe is not None and pipe.closed for pipe in pipes] == [True, True, True]
+    finally:
+        claude_runner.logger.removeFilter(interrupt_the_kill_warning)
+        for call in _calls(fake_claude_home):
+            _kill(call["pid"])
+            if call["grandchild"] is not None:
+                _kill(call["grandchild"])
+
+
 # ── the cross-process slot cap ───────────────────────────────────────────────
 
 DRIVER = (
@@ -610,6 +789,198 @@ def test_load_prompt_leaves_dollar_amounts_alone(prompts_dir: Path) -> None:
 def test_load_prompt_missing_file_raises_file_not_found() -> None:
     with pytest.raises(FileNotFoundError):
         claude_runner.load_prompt("planner", "no-such-prompt", kid="Miles")
+
+
+def test_load_prompt_accepts_digits_underscores_and_hyphens(prompts_dir: Path) -> None:
+    (prompts_dir / "lane_2-b").mkdir()
+    (prompts_dir / "lane_2-b" / "week-1_v2.md").write_text("Shop for $kid.\n")
+
+    assert claude_runner.load_prompt("lane_2-b", "week-1_v2", kid="Miles") == "Shop for Miles.\n"
+
+
+# Each fails the `[a-z0-9_-]+` fullmatch (CWE-22). "<tmp>" stands for tmp_path, which holds
+# secret.md next to prompts/: the path escapes would otherwise read it. Rows whose target doesn't
+# exist also force the check before the read: reading first raises FileNotFoundError instead.
+REJECTED_PROMPT_NAMES = [
+    pytest.param("<tmp>", "secret", id="absolute_lane"),
+    pytest.param("..", "secret", id="dotdot_lane"),
+    pytest.param("planner", "../../secret", id="dotdot_name"),
+    pytest.param("planner", "nested/../../../secret", id="dotdot_after_a_valid_prefix"),
+    pytest.param("planner", "nested/deep", id="slash_in_name"),
+    pytest.param("planner", "nested\\deep", id="backslash_in_name"),
+    pytest.param("", "weekly", id="empty_lane"),
+    pytest.param("planner", "", id="empty_name"),
+    pytest.param("Planner", "weekly", id="uppercase_lane"),
+    pytest.param("planner", "Weekly", id="uppercase_name"),
+    pytest.param("planner", "weekly\n", id="trailing_newline"),
+]
+
+
+@pytest.mark.parametrize(("lane", "name"), REJECTED_PROMPT_NAMES)
+def test_load_prompt_rejects_names_outside_the_allowlist(
+    prompts_dir: Path, tmp_path: Path, lane: str, name: str
+) -> None:
+    (tmp_path / "secret.md").write_text("marker-outside-prompts $kid\n")
+    (prompts_dir / "planner" / "nested").mkdir()
+    (prompts_dir / "planner" / "nested" / "deep.md").write_text("marker-nested $kid\n")
+
+    with pytest.raises(ValueError):
+        claude_runner.load_prompt(lane.replace("<tmp>", str(tmp_path)), name, kid="Miles")
+
+
+# ── Claude can't set RecipeOption.mealie_slug ────────────────────────────────
+
+
+class _Picks(Contract):
+    """Nests RecipeOption in a tuple field, the way a planner's draft would."""
+
+    options: tuple[RecipeOption, ...]
+
+
+# A RecipeOption as Claude returns it, and the same answer carrying a slug only the Mealie client
+# may set.
+RECIPE: dict[str, object] = {
+    "name": "Sheet-pan gnocchi",
+    "url": "https://example.com/sheet-pan-gnocchi",
+    "source": "example.com",
+    "hands_on_min": 10,
+    "servings": 4,
+    "batch_ok": True,
+    "fit_note": "Quick, and Miles eats gnocchi",
+    "ingredients": [{"name": "gnocchi", "qty": 1, "unit": "lb"}],
+    "steps": ["Roast at 425F for 20 minutes."],
+}
+SLUGGED = {**RECIPE, "mealie_slug": "sheet-pan-gnocchi"}
+NESTINGS = [
+    pytest.param(RecipeOption, RECIPE, SLUGGED, id="top_level"),
+    pytest.param(_Picks, {"options": [RECIPE]}, {"options": [SLUGGED]}, id="nested"),
+]
+
+
+@pytest.mark.parametrize("model", [RecipeOption, WeekProposal], ids=["top_level", "nested"])
+def test_mealie_slug_is_hidden_from_the_schema_claude_is_given(model: type[BaseModel]) -> None:
+    """run() sends model_json_schema() as --json-schema (test_argv_carries_the_required_flags)."""
+    assert "mealie_slug" in RecipeOption.model_fields, "RecipeOption has no mealie_slug field"
+    schema = model.model_json_schema()
+
+    assert "mealie_slug" not in json.dumps(schema)
+    definition = schema if model is RecipeOption else schema["$defs"]["RecipeOption"]
+    assert definition["additionalProperties"] is False
+
+
+@pytest.mark.parametrize(("schema", "answer", "slugged"), NESTINGS)
+def test_claude_setting_mealie_slug_fails_validation_and_is_retried_once(
+    fake_claude_home: Path,
+    caplog: pytest.LogCaptureFixture,
+    schema: type[BaseModel],
+    answer: dict[str, object],
+    slugged: dict[str, object],
+) -> None:
+    """The same answer without the slug is accepted, so the slug alone is what's rejected, and
+    the reason and the retry warning say so."""
+    rejected = {"stdout": _envelope(result="{}", structured_output=slugged)}
+    accepted = {"stdout": _envelope(result="{}", structured_output=answer)}
+    _script(fake_claude_home, rejected, rejected, accepted)
+    caplog.set_level(logging.WARNING, logger="meals.claude_runner")
+
+    with pytest.raises(ClaudeRunnerError) as caught:
+        claude_runner.run(PROMPT, schema=schema, timeout=RUN_TIMEOUT)
+    assert len(_calls(fake_claude_home)) == 2
+    assert "mealie_slug" in caught.value.reason
+    assert "never by Claude" in caught.value.reason
+    assert any("mealie_slug" in m and "never by Claude" in m for m in _warnings(caplog))
+
+    result = claude_runner.run(PROMPT, schema=schema, timeout=RUN_TIMEOUT)
+    option = result.options[0] if isinstance(result, _Picks) else result
+    assert isinstance(option, RecipeOption)
+    assert option.mealie_slug is None
+
+
+@pytest.mark.parametrize(("schema", "answer", "slugged"), NESTINGS)
+def test_fake_runner_rejects_mealie_slug_like_the_real_one(
+    schema: type[BaseModel], answer: dict[str, object], slugged: dict[str, object]
+) -> None:
+    """A queued model is replayed as its dump, `mealie_slug: null` included, and that's accepted."""
+    fake = FakeClaudeRunner([slugged, schema.model_validate(answer)])
+
+    with pytest.raises(ClaudeRunnerError) as caught:
+        fake.run(PROMPT, schema=schema)
+    assert "mealie_slug" in caught.value.reason
+    assert "never by Claude" in caught.value.reason
+    result = fake.run(PROMPT, schema=schema)
+    option = result.options[0] if isinstance(result, _Picks) else result
+    assert isinstance(option, RecipeOption)
+    assert option.mealie_slug is None
+
+
+def test_trusted_validation_keeps_mealie_slug_and_claude_output_validation_rejects_it() -> None:
+    """The Mealie client and stored JSON set the slug, under TRUSTED; Claude's output never can."""
+    trusted = RecipeOption.model_validate(SLUGGED, context={contracts.TRUSTED: True})
+
+    assert trusted.mealie_slug == "sheet-pan-gnocchi"
+    stored = trusted.model_dump_json()
+    assert RecipeOption.model_validate_json(stored, context={contracts.TRUSTED: True}) == trusted
+    with pytest.raises(ValidationError):
+        contracts.validate_claude_output(RecipeOption, SLUGGED)
+    assert contracts.validate_claude_output(RecipeOption, RECIPE) == RecipeOption.model_validate(
+        RECIPE
+    )
+
+
+@pytest.mark.parametrize(("schema", "answer", "slugged"), NESTINGS)
+def test_validation_without_the_trusted_context_rejects_mealie_slug(
+    schema: type[BaseModel], answer: dict[str, object], slugged: dict[str, object]
+) -> None:
+    """Default-deny: only `context={TRUSTED: True}` lets a slug through."""
+    schema.model_validate(answer)  # the same answer without the slug is valid
+
+    with pytest.raises(ValidationError):
+        schema.model_validate(slugged)
+    with pytest.raises(ValidationError):
+        schema.model_validate_json(json.dumps(slugged))
+    with pytest.raises(ValidationError):
+        schema.model_validate(slugged, context={contracts.TRUSTED: False})
+
+
+def test_claude_output_revalidates_a_nested_instance_carrying_a_slug() -> None:
+    """pydantic keeps a model instance as is by default, so one the Mealie client built (as
+    get_recipe does, with model_copy) must not carry its slug through Claude's output."""
+    from_mealie = RecipeOption.model_validate(RECIPE).model_copy(
+        update={"mealie_slug": "sheet-pan-gnocchi"}
+    )
+
+    with pytest.raises(ValidationError):
+        contracts.validate_claude_output(_Picks, {"options": [from_mealie]})
+    with pytest.raises(ClaudeRunnerError):
+        FakeClaudeRunner([{"options": [from_mealie]}]).run(PROMPT, schema=_Picks)
+
+
+# A set slug must ASCII-fullmatch `[A-Za-z0-9_-]+`, the allowlist mealie's HTTP client enforces at
+# the sink, on the trusted path too: a stored WeekProposal with a tampered slug fails to load.
+@pytest.mark.parametrize(
+    "slug",
+    ["sheet-pan-chicken-fajitas", "Chili_2", None],
+    ids=["hyphens", "mixed_case_underscore_digit", "none"],
+)
+def test_trusted_validation_accepts_a_mealie_slug_in_the_sink_allowlist(slug: str | None) -> None:
+    option = RecipeOption.model_validate(
+        {**RECIPE, "mealie_slug": slug}, context={contracts.TRUSTED: True}
+    )
+    assert option.mealie_slug == slug
+
+
+@pytest.mark.parametrize(
+    "slug",
+    ["../admin", "a/b", "a b", "", "slug\n", "café", "ｓｌｕｇ"],
+    ids=["dotdot", "slash", "space", "empty", "trailing_newline", "non_ascii", "fullwidth"],
+)
+def test_trusted_validation_rejects_a_mealie_slug_outside_the_sink_allowlist(slug: str) -> None:
+    assert "mealie_slug" in RecipeOption.model_fields, "RecipeOption has no mealie_slug field"
+
+    with pytest.raises(ValidationError):
+        RecipeOption.model_validate(
+            {**RECIPE, "mealie_slug": slug}, context={contracts.TRUSTED: True}
+        )
 
 
 # ── integration: the real `claude` ───────────────────────────────────────────

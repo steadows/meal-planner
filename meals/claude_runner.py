@@ -13,7 +13,7 @@ import subprocess
 import tempfile
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from string import Template
 from typing import Any, TypeVar, overload
@@ -21,7 +21,7 @@ from typing import Any, TypeVar, overload
 from pydantic import BaseModel, ValidationError
 
 from meals.config import get_settings
-from meals.contracts import ClaudeRunnerError
+from meals.contracts import ClaudeRunnerError, describe_rejection, validate_claude_output
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,11 @@ ALLOWED_TOOLS = ("WebSearch", "WebFetch")
 MAX_ATTEMPTS = 2
 _SLOT_POLL_S = 0.1
 _KILL_DRAIN_S = 5
+_CLEANUP_ATTEMPTS = 3  # kill + reap attempts when Ctrl-C keeps landing during the cleanup
 _JSON_FENCE = re.compile(r"\A\s*```(?:json)?[ \t]*\n(.*?)\n?```\s*\Z", re.DOTALL)
+_PROMPT_PART = re.compile(
+    r"[a-z0-9_-]+"
+)  # no ".", "/" or "\": a lane or name can't leave PROMPTS_DIR
 
 
 class _TimedOut(Exception):
@@ -73,8 +77,10 @@ def run(
     """Run `claude -p` and return validated output.
 
     With `schema`: the model's JSON schema goes to `--json-schema`, and the returned
-    `structured_output` is validated into a model instance. Without: `result` parsed as JSON
-    (a surrounding ```json fence is stripped).
+    `structured_output` is validated into a model instance with `validate_claude_output`, which
+    refuses fields only trusted code may set. Without: `result` parsed as JSON (a surrounding
+    ```json fence is stripped); a caller that builds a model from it must use
+    `validate_claude_output` too.
 
     The prompt goes on stdin. The child runs with `--safe-mode --output-format json`, the
     ENV_ALLOWLIST env, and a fresh empty temp dir as cwd. Plain runs get the ALLOWED_TOOLS,
@@ -84,7 +90,10 @@ def run(
     Raises ClaudeRunnerError (with raw_output) on a non-zero exit, an is_error result, output
     that fails parsing or validation, or a timeout. A plain run retries once on anything except a
     timeout; a Chrome run is never retried, because it has side effects (a second run would
-    double the cart). On timeout the whole process group is killed.
+    double the cart). On timeout, and on any other exception once claude has started (Ctrl-C
+    included), its process group is killed; that exception propagates as is, without a retry.
+    Known gaps: Ctrl-C inside `Popen()` itself, before it returns, can't reach the child; and on
+    macOS, if killpg is refused (zombie leader), only the leader is reaped.
     """
     command = _command(schema, chrome)
     attempts = 1 if chrome else MAX_ATTEMPTS
@@ -109,8 +118,13 @@ def load_prompt(lane: str, name: str, **variables: str) -> str:
     """Read PROMPTS_DIR/<lane>/<name>.md and fill `$placeholders`.
 
     A missing variable raises KeyError, never a half-filled prompt. A `$` not followed by a
-    placeholder name (e.g. "$35") is left as written.
+    placeholder name (e.g. "$35") is left as written. `lane` and `name` must each be lowercase
+    letters, digits, `_` or `-`, or ValueError is raised before any file is read, so neither can
+    reach outside PROMPTS_DIR.
     """
+    for part in (lane, name):
+        if not _PROMPT_PART.fullmatch(part):
+            raise ValueError(f"prompt lane and name must match {_PROMPT_PART.pattern}: {part!r}")
     template = (PROMPTS_DIR / lane / f"{name}.md").read_text(encoding="utf-8")
     return _PromptTemplate(template).substitute(variables)
 
@@ -193,7 +207,32 @@ def _run_once(command: list[str], prompt: str, timeout: int, slot_fd: int) -> tu
         except subprocess.TimeoutExpired:
             _kill_tree(process)
             raise _TimedOut(_raw(*_drain(process))) from None
+        except BaseException as exc:
+            # Ctrl-C or any other error: start_new_session keeps the signal from reaching claude,
+            # so it would run on (for a Chrome run, still filling the cart). Same as subprocess.run.
+            _terminate(process)  # first: nothing may run between the error and the kill
+            with suppress(KeyboardInterrupt):  # best effort; the original exception still wins
+                logger.warning("claude run interrupted by %s; killed it", type(exc).__name__)
+            raise
     return process.returncode, stdout, stderr
+
+
+def _terminate(process: subprocess.Popen[str]) -> None:
+    """Kill and reap claude and close its pipes, even if another Ctrl-C lands meanwhile.
+
+    CPython's Popen.wait() (bpo-25942) answers a Ctrl-C with a short grace wait, assuming the
+    child got the same ^C. claude runs in its own session, so it didn't: instead a repeated ^C
+    retries the kill (SIGKILL is idempotent), a bounded number of times. The caller then
+    re-raises its original exception; a ^C absorbed here isn't re-raised.
+    """
+    for _ in range(_CLEANUP_ATTEMPTS):
+        try:
+            _kill_tree(process)
+            process.wait()
+            break
+        except KeyboardInterrupt:
+            continue
+    _close_pipes(process)
 
 
 def _kill_tree(process: subprocess.Popen[str]) -> None:
@@ -209,11 +248,15 @@ def _drain(process: subprocess.Popen[str]) -> tuple[str, str]:
     try:
         return process.communicate(timeout=_KILL_DRAIN_S)
     except subprocess.TimeoutExpired as exc:
-        for pipe in (process.stdout, process.stderr):
-            if pipe is not None:
-                pipe.close()
+        _close_pipes(process)
         process.wait()
         return _text(exc.output), _text(exc.stderr)
+
+
+def _close_pipes(process: subprocess.Popen[str]) -> None:
+    for pipe in (process.stdin, process.stdout, process.stderr):
+        if pipe is not None:
+            pipe.close()
 
 
 def _text(data: str | bytes | None) -> str:
@@ -239,9 +282,9 @@ def _parse(returncode: int, stdout: str, stderr: str, schema: type[BaseModel] | 
         if "structured_output" not in envelope:
             raise ClaudeRunnerError("claude returned no structured_output", raw)
         try:
-            return schema.model_validate(envelope["structured_output"])
+            return validate_claude_output(schema, envelope["structured_output"])
         except ValidationError as exc:
-            raise ClaudeRunnerError(f"output failed {schema.__name__} validation", raw) from exc
+            raise ClaudeRunnerError(describe_rejection(schema, exc), raw) from exc
     result = envelope.get("result")
     if not isinstance(result, str):
         raise ClaudeRunnerError("claude returned no result text", raw)

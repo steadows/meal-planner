@@ -475,3 +475,11 @@ databases; I did not cross-check GHSA IDs directly, only CVE IDs)
   paging `GET /api/organizers/tags` (items `{id, name, slug, recipeCount}`) instead.
 - Re-importing a URL creates a copy named "Name (1)", "Name (2)"… (`RepositoryRecipes.create`),
   and after 10 collisions it returns 400.
+- **Check the tagged release, not the demo or nightly spec.** `demo.mealie.io/openapi.json` reports
+  `version: nightly`. It lists `prepTimeSeconds` / `totalTimeSeconds` / `performTimeSeconds`, which
+  exist only on unreleased mealie-next. v3.28.0 has free-text `prepTime` only ("1 hour 30
+  minutes", from its scraper's `clean_time`). Grep `?ref=v3.28.0` sources before trusting a field.
+- **Scraped ingredients:** v3.28.0 stores a scraped line as `RecipeIngredient(note=<text>)`
+  (quantity 0, food null), and `display` is rebuilt from the current quantity/unit/food/note.
+  `originalText` is what was first imported, so prefer display → note → originalText. An
+  ingredient can instead link another recipe (`referencedRecipe`), and its name is NOT in `display`.

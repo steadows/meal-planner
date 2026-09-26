@@ -29,3 +29,6 @@ Two gates, in order. (1) The week-one spike with Steve present: Steve's Chrome, 
 
 ## Security gap for the spike (Lane 0 /steadows-verify, via [[pm]], 2026-09-26)
 Today the Meijer boundary is `--tools ""` (no web tools) plus a validated `meijer_url` on the report. **Nothing stops in-session navigation off meijer.com at runtime**: the Chrome tools can still follow a link a product page serves. The spike and the cart-path ADR must decide the runtime control (e.g. a URL allowlist the prompt enforces and the report verifies, or aborting on any non-meijer.com navigation).
+
+## Cart-path gate input from ADR-0001 (via [[pm]], 2026-09-26)
+Decide in the cart-path gate whether `cart.fill` **sets quantities to target**, which would make "retry cart" safe over a partly filled Meijer cart. Until then, retry requires emptying the cart first (ADR-0001 accepted risk #16). The runner API you build against is `fill(cart_list, hold_fds=())`; the locks are held by the Chrome child, so a crash can't double the cart.

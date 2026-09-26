@@ -4,6 +4,7 @@ Lanes: append your fixtures in your own headed block at the bottom. Don't edit e
 ask the contracts lane instead.
 """
 
+import json
 import sqlite3
 from collections.abc import Iterator
 from datetime import date, timedelta
@@ -157,3 +158,30 @@ def patched_claude(
     """`claude_runner.run` replaced by the fake, as claude_runner's docstring prescribes."""
     monkeypatch.setattr(claude_runner, "run", fake_claude.run)
     return fake_claude
+
+
+# ── pantry ───────────────────────────────────────────────────────────────────
+
+
+class ItemInserter:
+    """Writes a `pantry_item` row straight to the table, so test setup doesn't go through the
+    code under test (meals.pantry). Aliases are stored as a JSON array, as the schema expects."""
+
+    def __init__(self, db: sqlite3.Connection) -> None:
+        self._db = db
+
+    def __call__(self, item: PantryItem) -> None:
+        row = item.model_dump(
+            mode="json"
+        )  # dates as ISO text: sqlite3's date adapter is deprecated
+        row["aliases"] = json.dumps(list(item.aliases))
+        self._db.execute(
+            f"INSERT INTO pantry_item ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})",
+            tuple(row.values()),
+        )
+        self._db.commit()
+
+
+@pytest.fixture
+def insert_item(db: sqlite3.Connection) -> ItemInserter:
+    return ItemInserter(db)

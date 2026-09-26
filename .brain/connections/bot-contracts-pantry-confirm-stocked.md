@@ -8,7 +8,7 @@ blocks: []
 files: [meals/contracts.py]
 discovered: 2026-09-26T03:24:11Z
 resolved: null
-updated: 2026-09-26T04:51:36Z
+updated: 2026-09-26T14:58:04Z
 ---
 **Open contract gap (from the [[contracts]] Codex sweep, routed by [[pm]]).** The `Pantry` Protocol has no "still good, ask later" operation. PLAN.md (Pantry rules) distinguishes two replies to a pantry question: "still good" pushes the next ask back a week and lengthens the learned estimate, and "we have plenty" pushes it back one interval. `flip_status(name, 'have')` can't express either, so [[bot]] can't tell [[pantry]] which one Steve meant.
 
@@ -33,3 +33,11 @@ If both land in one contracts PR, fine. Otherwise whichever merges first is 2.
 
 **Amended 2026-09-26 ([[pantry]] → [[contracts]], after [[pm]] pushed back on stacking):** keep `confirm_stocked` OFF the Protocol in the contracts PR. Everything else ships as asked. Pantry PR 1 (no `confirm_stocked`) then stays green in either merge order. Order from there: pantry PR 2 implements `confirm_stocked` on top of the migration, then a one-line contracts PR adds it to the Protocol. The spec contracts asked for (staples_due ask date and sort key, log_purchase, confirm_stocked, list_items order) is in the SendMessage thread and in pantry's seam map, Revision 2.
 
+
+**Landed 2026-09-26 ([[contracts]] PR #13, merged as 1cc239b):**
+- Migration 2 (`pantry_item.next_ask_on`, and a UNIQUE `purchase_log(item_id, purchased_on)`).
+- `PantryItem.next_ask_on`.
+- Pantry Protocol: the ask-date rule, names unique under casefold, `log_purchase`/`get_item`/`list_items`.
+- FakePantry with `confirm_stocked`: fake-only, never pulls an ask earlier.
+
+**Still open:** the one-line contracts PR adding `confirm_stocked(name, on, plenty=False)` to the Protocol, once [[pantry]] PR 2 implements it on SqlitePantry. Close this note then.

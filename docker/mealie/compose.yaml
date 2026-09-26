@@ -1,0 +1,31 @@
+# Mealie for the meal planner (PLAN.md, Phase 1). Setup and tag conventions: README.md here.
+#
+# Keep the tag at v3.26.0 or later: from that release Mealie's scraper pins every fetch to the
+# address it validated (mealie-recipes/mealie#7914), closing the DNS-rebinding gap in its SSRF
+# guard. The meal planner relies on that guard for recipe URLs that come from web search.
+#
+# Listens on 127.0.0.1 by default, so the LAN never sees it (or its default admin password).
+# The phone reaches it through `tailscale serve --bg 9925` after Phase 2 (README.md), or set
+# MEALIE_BIND to this machine's Tailscale IP.
+services:
+  mealie:
+    image: ghcr.io/mealie-recipes/mealie:v3.28.0
+    container_name: mealie
+    restart: always
+    ports:
+      - "${MEALIE_BIND:-127.0.0.1}:9925:9000" # host address:host port:container port
+    deploy:
+      resources:
+        limits:
+          memory: 1000M
+    volumes:
+      - mealie-data:/app/data/
+    environment:
+      ALLOW_SIGNUP: "false"
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: America/Detroit # meal-plan dates are wrong without it
+      BASE_URL: ${MEALIE_BASE_URL:-http://localhost:9925} # the Tailscale hostname after Phase 2
+
+volumes:
+  mealie-data:

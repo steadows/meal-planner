@@ -6,9 +6,20 @@ Only the contracts lane edits this file. Other lanes request changes with a smal
 import re
 from collections.abc import Sequence
 from datetime import date
-from typing import Annotated, Literal, Protocol, runtime_checkable
+from typing import Annotated, Any, Literal, Protocol, TypeVar, runtime_checkable
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    TypeAdapter,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+)
+from pydantic.json_schema import SkipJsonSchema
 
 PlanMode = Literal["mix", "recipes", "components"]
 Custody = Literal["wed+fri_sat", "wed+sat_sun"]
@@ -19,6 +30,15 @@ PantryCategory = Literal["staple", "perishable", "fallback"]
 PantryStatus = Literal["have", "buy_next_time"]
 
 MAX_PANTRY_QUESTIONS = 3
+
+# Validation-context key for trusted code: the Mealie client and loaders of stored data pass
+# `context={TRUSTED: True}`. Fields only trusted code may set refuse a value without it
+# (default-deny), so Claude's output can never set them. Never pass it on anything Claude produced.
+TRUSTED = "trusted"
+
+M = TypeVar("M", bound=BaseModel)
+
+_JSON_DATA: TypeAdapter[Any] = TypeAdapter(Any)  # dumps any payload, models included, to JSON data
 
 
 # Matched against the raw string, not a parsed URL: Python's urlsplit and a browser disagree on
@@ -39,6 +59,26 @@ def _require_meijer_url(url: str) -> str:
 
 
 MeijerUrl = Annotated[str, AfterValidator(_require_meijer_url)]
+
+# Spelled out rather than strftime("%A"), which follows the process locale.
+_WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+
+def _require_sunday(day: date) -> date:
+    """Sunday is the only cook (PLAN.md, Constraints), so a week is named by its Sunday."""
+    if day.weekday() != 6:
+        raise ValueError(
+            f"{day.isoformat()} is a {_WEEKDAYS[day.weekday()]}; "
+            "week_start must be the Sunday of the cook"
+        )
+    return day
+
+
+SundayDate = Annotated[date, AfterValidator(_require_sunday)]
+
+# The same allowlist the Mealie client enforces before a slug reaches a URL path. Pydantic's
+# regex engine anchors `$` at the very end, so "slug\n" doesn't match.
+MealieSlug = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]+$")]
 
 
 class Contract(BaseModel):
@@ -64,6 +104,21 @@ class RecipeOption(Contract):
     fit_note: str = Field(description="One line on fit against Steve's preferences profile")
     ingredients: tuple[Ingredient, ...]
     steps: tuple[str, ...]
+    # Hidden from Claude's schema and accepted only under TRUSTED: the Mealie client sets it
+    # (get_recipe), so a pick can go on the meal plan without re-importing, which would duplicate
+    # the recipe in Mealie.
+    mealie_slug: SkipJsonSchema[MealieSlug | None] = None
+
+    @field_validator("mealie_slug")
+    @classmethod
+    def _trusted_mealie_slug(cls, slug: str | None, info: ValidationInfo) -> str | None:
+        if slug is not None and not (info.context or {}).get(TRUSTED):
+            # An injected page could otherwise point a web find at an existing Mealie recipe.
+            raise ValueError(
+                "mealie_slug is set only by trusted code (the Mealie client, stored data), "
+                "never by Claude"
+            )
+        return slug
 
 
 class Components(Contract):
@@ -77,7 +132,7 @@ class Components(Contract):
 
 
 class WeekProposal(Contract):
-    week_start: date = Field(description="The Sunday of the cook")
+    week_start: SundayDate = Field(description="The Sunday of the cook")
     custody: Custody
     mode: PlanMode = "mix"
     recipe_options: tuple[RecipeOption, ...]
@@ -107,7 +162,7 @@ class CartItem(Contract):
 
 
 class CartList(Contract):
-    week_start: date
+    week_start: SundayDate
     items: tuple[CartItem, ...]
 
 
@@ -137,6 +192,7 @@ class PantryItem(Contract):
     status: PantryStatus = "have"
     typical_interval_days: int | None = Field(default=None, gt=0)
     last_purchased: date | None = None
+    next_ask_on: date | None = None
     default_qty: float | None = None
     default_unit: str | None = None
     meijer_product_id: str | None = None
@@ -156,6 +212,25 @@ class ClaudeRunnerError(Exception):
         self.raw_output = raw_output
 
 
+def validate_claude_output(schema: type[M], payload: object) -> M:
+    """Validate Claude's structured output. Both runners use it, and so must any caller that
+    validates a schemaless `run()` result itself. It passes no TRUSTED context, and it turns the
+    payload into plain JSON data first, so a model instance inside it (which pydantic would
+    otherwise accept as is) is checked field by field too."""
+    return schema.model_validate(_JSON_DATA.dump_python(payload, mode="json"))
+
+
+def describe_rejection(schema: type[BaseModel], exc: ValidationError) -> str:
+    """A ClaudeRunnerError reason naming the first rejected field and why, so a refused field (a
+    possible injection) doesn't read like an ordinary type mismatch in the logs."""
+    first = exc.errors()[0]
+    where = ".".join(str(part) for part in first["loc"]) or "(root)"
+    return (
+        f"output failed {schema.__name__} validation ({exc.error_count()} error(s); "
+        f"first at {where}: {first['msg']})"
+    )
+
+
 @runtime_checkable
 class MealieClient(Protocol):
     def import_url(self, url: str) -> str:
@@ -163,7 +238,7 @@ class MealieClient(Protocol):
         ...
 
     def get_recipe(self, slug: str) -> RecipeOption:
-        """Raises KeyError for an unknown slug."""
+        """The recipe, with `mealie_slug` set to `slug`. Raises KeyError for an unknown slug."""
         ...
 
     def list_by_tag(self, tag: str) -> tuple[str, ...]:
@@ -177,12 +252,43 @@ class MealieClient(Protocol):
 
 @runtime_checkable
 class Pantry(Protocol):
+    """The pantry rules (PLAN.md, Pantry rules).
+
+    An item's *ask date* is `next_ask_on` when set; otherwise `last_purchased` plus
+    ceil(9 * interval / 10) days (PLAN: ask at 90%) when both are known; otherwise it has none.
+
+    Item names are unique under casefold, which is stricter than the schema's ASCII-only
+    `COLLATE NOCASE`, so implementations reject a duplicate on insert. Every method taking a
+    `name` matches it against item names and aliases after `strip().casefold()`, and an exact
+    name beats another item's alias. An unknown name returns None and writes nothing.
+    """
+
     def staples_due(self, on: date) -> tuple[PantryItem, ...]:
-        """Staples due on `on`, most overdue first: flagged `buy_next_time`, or at least 90% of
-        their interval since last purchase (PLAN.md). Capping how many to ask is the caller's job."""
+        """Staples flagged `buy_next_time`, or whose ask date is on or before `on`. Flagged first
+        (those with no ask date last among them), then most days past the ask date, then name.
+        Capping how many to ask is the caller's job."""
         ...
 
     def flip_status(self, name: str, status: PantryStatus) -> PantryItem | None:
-        """Flip an item by name or alias, case-insensitively. Returns the updated item, or None
-        if the item is unknown."""
+        """Set the item's status. Returns the updated item."""
+        ...
+
+    def log_purchase(
+        self, name: str, on: date, qty: float | None = None, price_cents: int | None = None
+    ) -> PantryItem | None:
+        """Record a purchase. One purchase per item per day: a repeat for the same day is a replay
+        and writes nothing. A purchase on or after `last_purchased` makes `on` the last purchase,
+        sets status `have` and clears `next_ask_on`; an earlier one only adds history. The
+        implementation may re-learn the interval. Returns the updated item.
+
+        Raises ValueError, before looking the name up, if `qty` is given and isn't a finite
+        number above 0, or `price_cents` is negative."""
+        ...
+
+    def get_item(self, name: str) -> PantryItem | None:
+        """The item with this name or alias."""
+        ...
+
+    def list_items(self) -> tuple[PantryItem, ...]:
+        """Every item, in `id` order."""
         ...

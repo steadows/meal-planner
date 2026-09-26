@@ -1,0 +1,55 @@
+# Mealie
+
+The recipe library and the week's plan on the phone (PLAN.md, Phase 1). The meal planner talks to
+it through `meals/mealie_client.py`.
+
+## First run
+
+1. From the repo root: `docker compose -f docker/mealie/compose.yaml up -d`. Set `PUID`/`PGID` to
+   your user and group ids first (`id -u`, `id -g`) if the default 1000 doesn't match.
+2. Open http://localhost:9925 and log in as `changeme@example.com` / `MyPassword`. Change the
+   password right away.
+3. Create a long-lived API token at `/user/profile/api-tokens`. Put it in the repo's `.env` as
+   `MEALIE_TOKEN`, and set `MEALIE_URL=http://localhost:9925`.
+4. After Tailscale (Phase 2), give the phone a path in. Mealie listens on 127.0.0.1 only, so
+   nothing on the LAN can reach it (or its default admin password). The recommended path is
+   [Tailscale Serve](https://tailscale.com/kb/1312/serve), which relays tailnet traffic to a
+   local-only service: run `tailscale serve --bg 9925` on this machine, then restart Mealie with
+   `MEALIE_BASE_URL=https://<machine>.<tailnet>.ts.net` so its links match. The phone opens
+   that URL on cellular. The alternative is to publish on the Tailscale interface directly with
+   `MEALIE_BIND=<tailscale-ip>` (and `MEALIE_BASE_URL=http://<tailscale-hostname>:9925`), but
+   Docker then can't start Mealie until Tailscale is up at boot.
+
+Check the client against it:
+`uv run pytest -m integration tests/test_mealie_client_integration.py`. Those tests skip when
+`MEALIE_TOKEN` is unset.
+
+## Tag conventions
+
+The planner reads recipes by tag, so the tag slugs are part of the contract between lanes.
+Rename one only together with the lanes that read it.
+
+| Tag | Meaning | Read by |
+| --- | --- | --- |
+| `protein`, `grain`, `veg-tray`, `sauce` | The Sunday-cook component slots | planner |
+| `kid-cook` | A cook-with-Miles recipe (Wednesday) | planner |
+| `lunch-build` | One of Steve's lunch builds | planner |
+| `rotation` | A favorite the Saturday planner may offer again | planner (`list_by_tag("rotation")`) |
+| `batch-ok` | Batches and reheats well. Sets `RecipeOption.batch_ok`; untagged reads as "not marked" | `get_recipe` |
+
+Imports never bring in the source site's own tags (`includeTags: false`), so these stay the only
+tags in play.
+
+## How the client uses Mealie
+
+- **Import:** `POST /api/recipes/create/url`. Mealie fetches the page server-side through its own
+  SSRF guard, which resolves the host and blocks private addresses. Before sending, the client
+  also refuses non-http(s) URLs, private or reserved IP literals, single-label hosts and the
+  local-use names (`.localhost`, `.local`, `.internal`, `.home.arpa`). It does no DNS lookup, so
+  a public-looking name that resolves to a private address is left to Mealie's guard.
+- **Recipes:** ingredients a URL import leaves as plain text are split into quantity, unit and food
+  by Mealie's parser (`/api/parser/ingredients`) when read. Nothing is written back to the recipe.
+- **Meal plan:** each planned recipe is a dinner entry on the cook day (the Sunday), marked
+  "Planned by meal-planner". Re-planning replaces only those entries. Anything added by hand stays.
+  To clear a week's planned entries, call `set_meal_plan(week_start, [])`. Imported recipes are
+  ordinary Mealie recipes: delete unwanted ones in Mealie itself.
