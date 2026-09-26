@@ -3,15 +3,15 @@ type: presence
 agent: wiring
 feature: "Scheduled jobs and end-to-end: sat_propose, sat_nudge, sun_autoapprove, cart_fill, entry point"
 status: active
-phase: ADR-0001 ACCEPTED by Steve (PR #9, awaiting merge go). Next: P1 /steadows-seams for meals/background.py; P0 contracts gated PR (job_run, hold_fds, layers) after #13
+phase: ADR-0001 runtime model ACCEPTED + merged (PR #9). Next: P1 /steadows-seams → meals/background.py (unblocks bot). P0 contracts gated PR (job_run, hold_fds, layers) queued after #13.
 owns_branches: ["wiring"]
 plan: docs/PLAN.md (Implementation plan, Concurrency lanes)
 tracker_epic: none
 current_worktree: /Users/stevemeadows/meal-planner-wiring
 current_branch: feat/wiring
 current_ticket: none
-touches: [meals/jobs.py, meals/__main__.py, deploy/, tests/test_jobs.py, tests/test_e2e.py]
-updated: 2026-09-26T14:12:30Z
+touches: [meals/background.py, meals/plan_state.py, meals/jobs.py, meals/__main__.py, deploy/, docs/adr/ADR-0001-runtime-model.md, architecture-plan.html, tests/test_background.py, tests/test_plan_state.py, tests/test_jobs.py, tests/test_e2e.py]
+updated: 2026-09-26T14:21:06Z
 ---
 Lane G — last. Jobs keyed on weekly_plan.status so every job is safe to rerun; one Chrome session at a time via a lock; bot never blocks (background subprocesses); max two concurrent claude processes. Done when a full Saturday dry run works end to end (M4). Waits on [[pantry-wiring-waiting-on]], [[mealie-wiring-waiting-on]], [[search-wiring-waiting-on]] and [[bot-wiring-waiting-on]].
 
