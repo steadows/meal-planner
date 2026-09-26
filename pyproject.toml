@@ -88,13 +88,15 @@ allowed_importers = []
 
 # Higher layers may import lower ones, never the reverse. "|" = siblings may not import each other.
 # (name) = optional, so the contract holds before that lane's module exists.
+# Tiers per ADR-0001: __main__ is the composition root over the entry points.
 [[tool.importlinter.contracts]]
 name = "Module layering (PLAN.md, Definition of done)"
 type = "layers"
 containers = ["meals"]
 layers = [
-    "(bot) | (jobs) | (mcp_tools) | (__main__) | (seed_loader)",
-    "(pantry) | (mealie_client) | (search) | (planner) | (cart)",
+    "(__main__)",
+    "(bot) | (jobs) | (mcp_tools) | (seed_loader)",
+    "(pantry) | (mealie_client) | (search) | (planner) | (cart) | (background) | (plan_state)",
     "(db) | (claude_runner) | (rollup)",
     "contracts | (config)",
 ]
