@@ -125,6 +125,7 @@ class Filler:
         self.calls: list[tuple[WeekProposal, tuple[int, ...]]] = []
         self.during: Callable[[tuple[int, ...]], object] | None = None
         self.error: Exception | None = None
+        self.report = REPORT
 
     def __call__(self, plan: WeekProposal, hold_fds: tuple[int, ...]) -> CartReport:
         self.calls.append((plan, tuple(hold_fds)))
@@ -132,7 +133,7 @@ class Filler:
             self.during(tuple(hold_fds))
         if self.error is not None:
             raise self.error
-        return REPORT
+        return self.report
 
 
 def _no_propose(week_start: date, custody: Custody, recent: Sequence[WeekProposal]) -> WeekProposal:
@@ -1166,3 +1167,78 @@ def test_reconcile_restarts_fills_even_when_mealie_cant_be_used(
     assert job.spawner.calls == [WEEK_ARGS]
     assert _week(job)["mealie_plan_ref"] is None
     assert "MEALIE_TOKEN" in caplog.text
+
+
+# ── ultrareview repairs (seam map D23, D26, D27) ─────────────────────────────
+
+
+def test_a_sigterm_during_the_report_redelivery_leaves_the_filled_cart_alone(
+    job: Job, signal_guard: SignalGuard
+) -> None:
+    # D23 (U1): the catch-all looks at the target week's claim whatever the ownership. An unfinished
+    # claim whose effect is recorded only gets a log line: no "empty the cart" for a filled cart,
+    # and the committed report stays for the next tick.
+    _seed_week(job, "cart_filled", ref="plan-27")
+    _seed_claim(job, detail=REPORT.model_dump_json())
+    committed = _claim(job)["detail"]
+    job.telegram.on_send = _sigterm_on_first_send()
+
+    _run(job, "cart_fill", SUN_10_16, W)
+
+    assert signal_guard.hits == []
+    assert job.telegram.delivered == [], "the catch-all only logs over a committed result"
+    assert (_claim(job)["outcome"], _claim(job)["detail"]) == (None, committed)
+    job.telegram.on_send = None
+
+    _run(job, "cart_fill", _local(2026, 9, 27, 11, 16), W)
+
+    assert job.filler.calls == []
+    assert "tahini" in _one_message(job)
+    assert (_claim(job)["outcome"], _claim(job)["detail"]) == ("done", committed)
+
+
+def test_a_retry_logs_the_prior_claim_before_resetting_it(
+    job: Job, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # D26 (U4): ADR :179, "write the prior row to data/logs/jobs.log", then reset. Logged after the
+    # reset, a signal between the two would lose the prior diagnostics.
+    caplog.set_level(logging.INFO)
+    real_reset = plan_state.reset_for_retry
+    log_at_reset: list[str] = []
+
+    def reset_spy(conn: sqlite3.Connection, name: str, week_start: date) -> plan_state.JobRun:
+        log_at_reset.append(caplog.text)
+        return real_reset(conn, name, week_start)
+
+    for module in (plan_state, jobs):
+        for attribute, value in list(vars(module).items()):
+            if value is real_reset:
+                monkeypatch.setattr(module, attribute, reset_spy)
+    _seed_week(job, "approved")
+    _seed_claim(job, outcome="interrupted", detail="Meijer asked for a login")
+
+    _run(job, "cart_fill", SUN_10, W, retry=True)
+
+    assert len(log_at_reset) == 1
+    assert "Meijer asked for a login" in log_at_reset[0], "the prior claim is logged before reset"
+    assert len(job.filler.calls) == 1
+
+
+@pytest.mark.parametrize("path", ["fill", "redelivery"])
+@pytest.mark.parametrize(("subtotal_cents", "warns"), [(3499, True), (3500, False)])
+def test_a_cart_under_35_dollars_warns_about_the_pickup_fee(
+    job: Job, path: str, subtotal_cents: int, warns: bool
+) -> None:
+    # D27 (U5): PLAN :26 ("warns if the order is under $35"), :668, :688 ($4.95 pickup under $35),
+    # on the first report and on its redelivery.
+    report = REPORT.model_copy(update={"subtotal_cents": subtotal_cents})
+    if path == "fill":
+        _seed_week(job, "approved")
+        job.filler.report = report
+    else:
+        _seed_week(job, "cart_filled", ref="plan-27")
+        _seed_claim(job, detail=report.model_dump_json())
+
+    _run(job, "cart_fill", SUN_10, W)
+
+    assert ("under $35" in _one_message(job)) is warns

@@ -879,3 +879,37 @@ def test_a_proposal_planned_past_20_00_is_stored_but_never_sent(job: Job) -> Non
     claim = _claim(job, "sat_propose")
     assert claim["outcome"] == "failed"
     assert "not delivered" in (claim["detail"] or "")
+
+
+# ── ultrareview repair (seam map D24) ────────────────────────────────────────
+
+
+def test_an_undelivered_sunday_approval_message_is_redelivered_after_sunday(job: Job) -> None:
+    # D24 (U2): after Sunday, a default run targets next week, so reconcile spawns
+    # `sun_autoapprove --week W` for a scanned week whose sun_autoapprove claim is unfinished, and
+    # that run's Inspect re-sends the message. No other weekend job is respawned.
+    _seed_week(job, "cart_filled", PRIOR, plan=_proposal(PRIOR, LAST_PICK), ref="plan-20")
+    _seed_week(job, "proposed")
+    _seed_claim(job, "sat_propose", outcome="done")
+    _seed_claim(job, "sat_nudge")  # also unfinished, and not reconcile's to respawn
+    job.telegram.down = True
+
+    _run(job, "sun_autoapprove", SUN_8)
+
+    assert (_week(job)["status"], _claim(job, "sun_autoapprove")["outcome"]) == ("approved", None)
+    job.telegram.down = False
+    sunday_spawns = len(job.spawner.calls)
+
+    _run(job, "reconcile", _local(2026, 9, 28, 0, 15))
+
+    reconciled = job.spawner.calls[sunday_spawns:]
+    assert ("sun_autoapprove", "--week", "2026-09-27") in reconciled
+    assert {call[0] for call in reconciled} <= {"cart_fill", "sun_autoapprove"}
+    week_before, spawned = tuple(_week(job)), len(job.spawner.calls)
+
+    jobs.run_job("sun_autoapprove", job.deps, now=_local(2026, 9, 28, 0, 16), week=W)
+
+    assert LAST_PICK in _one_message(job)
+    assert _claim(job, "sun_autoapprove")["outcome"] == "done"
+    assert tuple(_week(job)) == week_before, "the week isn't approved again"
+    assert len(job.spawner.calls) == spawned, "no second cart fill"

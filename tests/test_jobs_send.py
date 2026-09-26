@@ -12,6 +12,7 @@ the attribute and any alias of it in meals.background. `sleep` is injected, so n
 """
 
 import asyncio
+import time
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -56,6 +57,7 @@ class FakeTelegramApi:
         self.clock = 0.0  # fake monotonic seconds: each send costs `send_cost_s`
         self.send_cost_s = 0.0
         self.send_started: list[float] = []
+        self.delay_s = 0.0  # real seconds each send_message takes
 
     def record(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
         chat_id = kwargs.get("chat_id", args[0] if args else None)
@@ -93,7 +95,7 @@ def api(monkeypatch: pytest.MonkeyPatch) -> FakeTelegramApi:
             return None
 
         async def send_message(self, *args: Any, **kwargs: Any) -> None:
-            await asyncio.sleep(0)
+            await asyncio.sleep(api.delay_s)
             api.record(args, kwargs)
 
     real = telegram.Bot
@@ -296,3 +298,21 @@ def test_the_two_minute_budget_covers_the_sends_themselves_not_just_the_waits(
         api.send_started
     )
     assert all(start <= BUDGET_S for start, _ in waits), waits
+
+
+# ── ultrareview repair (seam map D25) ────────────────────────────────────────
+
+
+def test_a_send_that_hangs_is_cut_off_when_the_budget_runs_out(
+    api: FakeTelegramApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # D25 (U3): each attempt is bounded by the budget left (asyncio.wait_for), and running out is
+    # DeliveryFailed, so a send that never answers can't hold the job past its two minutes.
+    monkeypatch.setattr(background, "SEND_BUDGET_S", 0.2)
+    api.delay_s = 2.0
+    started = time.monotonic()
+
+    with pytest.raises(background.DeliveryFailed):
+        _sender([])("Cart ready")
+
+    assert time.monotonic() - started < 1.0, "the send wasn't cut off at the budget"
