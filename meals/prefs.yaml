@@ -1,0 +1,52 @@
+# Steve's preferences profile (PLAN.md → Preferences profile).
+# Every recipe search and the Saturday planner read this file fresh each time, so an edit here
+# applies to the next search. It goes to Claude as text: keep it short and plain.
+
+likes:
+  - chicken
+  - ground turkey
+  - eggs
+  - rice
+  - Siete taco shells
+  - refried beans
+  - roasted veg
+  - cheese and dairy
+
+dislikes:
+  - beans and chickpeas (refried beans are fine)
+  - quinoa
+
+grains:
+  any_time: [rice, sweet potato, corn tortillas, Siete shells]
+  sometimes: [couscous, Ezekiel bread]
+  never: [white bread, flour pasta]
+
+# Easy-to-miss wheat. Couscous and Ezekiel bread are wheat too (allowed sometimes, above).
+# Miles's fallback meals are exempt: the wheat rule is about Steve's own eating.
+wheat_traps:
+  - farro
+  - bulgur
+  - spelt
+  - seitan
+  - most whole-grain pasta
+  - flour tortillas
+  - panko
+  - soy sauce (use tamari instead)
+  - many boxed mac and cheese brands
+
+goals:
+  - lots of veg
+  - high protein
+  - minimal wheat
+
+effort:
+  hands_on_max_min: 45
+  must_batch_and_reheat: true
+
+miles:
+  - toddler; mild flavors, soft textures, sauce on the side
+  - low salt; choking hazards cut (quarter grapes and cherry tomatoes, no whole nuts)
+  - favorites: nuggets, ravioli, mac and cheese
+
+sources:
+  - prefer sites that publish structured recipe data (schema.org Recipe), so Mealie imports them cleanly
