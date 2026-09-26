@@ -594,17 +594,26 @@ Lane G wires up the scheduled jobs, which is what turns M1 and M2 into M3. The B
 | Seed run | Steve with Claude | Manual first week, two seed CSVs | Nothing | Order placed, CSVs saved | 1 hr + cook |
 | B Pantry | Agent | `pantry`, `rollup`, seed loader, `mcp_tools` | Lane 0; seed CSV (a fixture is fine to start) | Unit math tests pass; `staples_due()` right on seed data | 3 hr |
 | C Mealie | Agent | `mealie_client`, tag conventions | Lane 0; Lane A's Mealie for integration tests | Imports a real URL and writes a meal plan | 2 hr |
-| D Bot | Agent, once the existing-bot questions are answered | `bot/`, voice | Lane 0; bot token; answers about the current bot | "Out of eggs" by text and voice updates the pantry | 3–4 hr |
+| D Bot | Agent | `bot/`, voice | Lane 0; bot token; the runtime-model design (see Architecture gates) | "Out of eggs" by text and voice updates the pantry | 3–4 hr |
 | E Search and planner | Agent | `search`, `planner`, `prefs.yaml`, prompts | Lane 0; Mealie fake | `/find` returns 3–5 valid options; planner produces a valid proposal from fixtures | 4 hr |
-| F Cart | Steve with an agent (needs his Chrome) | `cart`, Chrome prompt, report parsing | Lane 0; Lane A Chrome; seed product map | A 10-item list lands in the real Meijer cart with an accurate report | 4 hr, mostly testing |
-| G Wiring | One agent, last | `jobs`, schedule, end-to-end test | M1 and M2 | A full Saturday dry run works | 2 hr |
+| F Cart | Steve with an agent (needs his Chrome) | `cart`, Chrome prompt, report parsing | Lane 0; Lane A Chrome; seed product map; the cart spike and the cart-path design (see Architecture gates) | A 10-item list lands in the real Meijer cart with an accurate report | 4 hr, mostly testing |
+| G Wiring | One agent: designs early, builds last | The runtime-model design (see Architecture gates), then `jobs`, schedule, end-to-end test | Nothing for the design; M1 and M2 for the build | A full Saturday dry run works | 2 hr |
 
 ### Suggested order
 
-1. **This weekend:** Steve does Lane A and the seed run. One agent builds Lane 0.
-2. **Early week one:** Run a cart spike, asking `claude --chrome -p` to add five items to the Meijer cart. If Meijer's site fights it, switch Lane F to the Instacart path before building more.
-3. **Week one:** Lanes B, C and E run in parallel, each in its own git worktree. Lane D starts once the bot questions are answered.
+1. **This weekend:** Steve does Lane A and the seed run. One agent builds Lane 0. Lane G runs the runtime-model architecture gate, which is design only and needs no code.
+2. **Early week one:** Run a cart spike, asking `claude --chrome -p` to add five items to the Meijer cart. If Meijer's site fights it, switch Lane F to the Instacart path. Either way, Lane F runs the cart-path architecture gate with the spike's results before building.
+3. **Week one:** Lanes B, C and E run in parallel, each in its own git worktree. Lane D starts once the runtime-model design is confirmed.
 4. **Week two:** Hit M1 and M2, then Lane G wires the jobs. Do a real Saturday dry run for M4.
+
+### Architecture gates
+
+Two decisions are expensive to undo, so each gets a `/steadows-architect` run before any code. That run produces design options, a Codex critique, an ADR and a phase plan, and Steve confirms the result. Everything else uses the seams pass.
+
+| Gate | Run by | When | Blocks | Inputs |
+| --- | --- | --- | --- | --- |
+| **Runtime model:** the bot process, background runs that reply when done, the Saturday schedule, the one-Chrome-at-a-time queue, and safe reruns after a restart | Lane G | Now. Design needs no code | Lane D's start and Lane G's build | Runtime concurrency and Where the weekly planning job runs (above). `claude_runner`'s process limit is a given, not something to redesign |
+| **Cart path:** Meijer in Chrome or Instacart, the meijer.com-only boundary, parsing the cart report | Lane F | After the week-one cart spike | Lane F's build | The spike's results |
 
 ### Rules so parallel agents don't collide
 
@@ -624,8 +633,8 @@ The repo runs the agent-brain vault (`.brain/`), which tracks each lane, the bra
 | pantry | `feat/pantry` | contracts |
 | mealie | `feat/mealie` | contracts |
 | search | `feat/search` | contracts |
-| bot | `feat/bot` | contracts, plus answers about the existing bot |
-| cart | `feat/cart` | contracts, pantry |
+| bot | `feat/bot` | contracts, plus the runtime-model design |
+| cart | `feat/cart` | contracts, pantry, plus the cart spike and cart-path design |
 | wiring | `feat/wiring` | pantry, mealie, search, bot |
 
 Every lane branches from main after contracts merges. Each "waits on" is a waiting-on note in `.brain/connections/`. The brain resolves it automatically when the blocking lane sets its presence status to `done`. A shared-rule note records that only the contracts lane edits `meals/contracts.py`. Setup and the seed run are Steve's hands-on lanes, so they have no branches.

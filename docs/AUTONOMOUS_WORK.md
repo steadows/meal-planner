@@ -50,6 +50,8 @@ The `pm` lane sweeps the brain and relays to Steve.
 2. **Seams pass** (`/steadows-seams`) for any multi-file or new-dependency task. It writes
    `.context/seams/<id>.md` and the task's TDD tier to `.context/tdd-tier`. Skip it only for
    genuinely single-file edits with no new dependency.
+   **Where PLAN.md → Architecture gates names one, `/steadows-architect` runs first.** Its confirmed
+   ADR is the input to the seams pass.
 3. **TDD, by tier.** High-risk surfaces (concurrency and locking, money, auth and secrets,
    migrations and schema, security) get RED from `test-writer` plus one `spec-watchdog` pass.
    Everywhere else the lane writes RED itself, watches it fail, then implements. RED always comes
