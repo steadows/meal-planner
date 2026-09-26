@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Runtime Model Plan</title>
+<style>
+:root {
+  --bg: #111315; --panel: #1a1d20; --panel-2: #212529; --line: #2e3338;
+  --text: #e6e8ea; --muted: #9aa3ab; --accent: #6fb38a; --accent-soft: #1f3a2b;
+  --warn: #d9a441; --bad: #d46a6a; --info: #7fa7d9; --radius: 10px;
+  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+:root[data-theme="light"] {
+  --bg: #f6f7f8; --panel: #fff; --panel-2: #f0f2f4; --line: #d9dde1;
+  --text: #1b1f23; --muted: #5b646c; --accent: #2f7a50; --accent-soft: #e2f1e8;
+  --warn: #9a6a10; --bad: #a83a3a; --info: #2f5f9a;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif; }
+main { max-width: 1100px; margin: 0 auto; padding: 28px 16px 120px; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+h2 { font-size: 13px; margin: 34px 0 10px; color: var(--muted); font-weight: 700;
+  text-transform: uppercase; letter-spacing: .07em; }
+.lede { color: var(--muted); margin: 0 0 8px; max-width: 780px; }
+.top { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; align-items: start; }
+button { font: inherit; cursor: pointer; }
+.ghost { background: transparent; border: 1px solid var(--line); color: var(--muted); border-radius: 8px; padding: 6px 10px; }
+.status-pill { display: inline-block; font-size: 12px; font-weight: 700; padding: 2px 9px; border-radius: 99px;
+  background: var(--panel-2); color: var(--warn); border: 1px solid var(--line); }
+.overall { display: flex; align-items: center; gap: 12px; margin: 14px 0 0; }
+.bar { height: 8px; background: var(--panel-2); border-radius: 99px; overflow: hidden; flex: 1; }
+.bar > i { display: block; height: 100%; background: var(--accent); width: 0; transition: width .25s; }
+.graph { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px; overflow-x: auto; }
+.graph svg { display: block; min-width: 760px; width: 100%; height: auto; }
+.phase { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); margin: 10px 0; }
+.phase > summary { list-style: none; cursor: pointer; padding: 14px 16px; display: grid;
+  grid-template-columns: 1fr 180px; gap: 12px; align-items: center; }
+.phase > summary::-webkit-details-marker { display: none; }
+.phase h3 { margin: 0; font-size: 16px; }
+.phase .meta { color: var(--muted); font-size: 13px; margin-top: 2px; }
+.phase .owner { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
+  color: var(--info); margin-right: 6px; }
+.phase .body { padding: 0 16px 14px; }
+.task { display: flex; gap: 10px; align-items: start; padding: 7px 0; border-top: 1px solid var(--line); }
+.task button.st { flex: none; width: 104px; border-radius: 6px; border: 1px solid var(--line);
+  background: var(--panel-2); color: var(--muted); font-size: 12px; font-weight: 700; padding: 3px 0; }
+.task button.st[data-s="in_progress"] { color: var(--warn); border-color: var(--warn); }
+.task button.st[data-s="done"] { color: var(--accent); border-color: var(--accent); }
+.task button.st[data-s="blocked"] { color: var(--bad); border-color: var(--bad); }
+.task .t { font-size: 14px; }
+.task .t.gate { font-weight: 600; }
+.task .t.gate::before { content: "GATE "; color: var(--info); font-size: 11px; font-weight: 800; letter-spacing: .05em; }
+code { font-family: var(--mono); font-size: 12.5px; background: var(--panel-2); padding: 1px 5px; border-radius: 4px; }
+.lanes { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+.lane { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px; font-size: 14px; }
+.lane b { display: block; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 4px; }
+.tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); }
+table { width: 100%; border-collapse: collapse; font-size: 14px; min-width: 760px; }
+th, td { padding: 9px 11px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+th { background: var(--panel-2); cursor: pointer; user-select: none; white-space: nowrap; }
+tr:last-child td { border-bottom: 0; }
+.sev { font-size: 11px; font-weight: 800; padding: 2px 7px; border-radius: 5px; white-space: nowrap; }
+.sev.CRITICAL { background: color-mix(in srgb, var(--bad) 25%, transparent); color: var(--bad); }
+.sev.HIGH { background: color-mix(in srgb, var(--warn) 22%, transparent); color: var(--warn); }
+.sev.MED { background: color-mix(in srgb, var(--info) 18%, transparent); color: var(--info); }
+.sev.ACCEPT { background: var(--panel-2); color: var(--text); border: 1px dashed var(--muted); }
+.req { color: var(--bad); font-weight: 700; font-size: 12px; }
+.gatebox { position: sticky; bottom: 0; margin-top: 26px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 14px; box-shadow: 0 -8px 24px rgba(0,0,0,.25); }
+.gatebox .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.gatebox .hint { color: var(--muted); font-size: 13px; margin: 0 0 10px; }
+.btn { border-radius: 8px; padding: 8px 14px; font-weight: 700; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); }
+.btn.primary { background: var(--accent); color: #0d1410; border-color: var(--accent); }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+.tok { font-family: var(--mono); background: var(--panel-2); padding: 7px 10px; border-radius: 6px; flex: 1; min-width: 220px; }
+.debate { background: var(--panel); border: 1px dashed var(--line); border-radius: var(--radius); padding: 12px 14px; color: var(--muted); font-size: 14px; }
+</style>
+</head>
+<body>
+<main>
+  <div class="top">
+    <div>
+      <h1>Runtime model — build plan</h1>
+      <p class="lede">Option B: the bot handles chat; macOS launchd runs Saturday/Sunday; every scheduled or long job is
+      its own short-lived, rerun-safe command. Decision record: <code>docs/adr/ADR-0001-runtime-model.md</code>.</p>
+      <span class="status-pill" id="planStatus">PROPOSED — debate done, awaiting your confirmation</span>
+    </div>
+    <button class="ghost" id="theme" type="button">Light / dark</button>
+  </div>
+  <div class="overall"><span class="muted" id="overallTxt">0%</span><div class="bar"><i id="overallBar"></i></div></div>
+
+  <h2>Dependency graph</h2>
+  <div class="graph" id="graph"></div>
+
+  <h2>What can run at the same time</h2>
+  <div class="lanes">
+    <div class="lane"><b>Right after contracts PR #6 merges</b>Phase 0 (contracts follow-up) and Phase 1 (<code>background.py</code>) in parallel. Phase 1 unblocks the bot lane.</div>
+    <div class="lane"><b>After Phase 0</b>Phase 2 (plan state + the five jobs) and the template half of Phase 3 (plists) in parallel. Nothing is installed on the Mac until P4.8.</div>
+    <div class="lane"><b>Last</b>Phase 4 waits on pantry, mealie, search (apply_reply, mealie_slug), bot and cart (fill with hold_fds) plus the cart spike.</div>
+  </div>
+
+  <h2>Phases</h2>
+  <div id="phases"></div>
+
+  <h2>Risk matrix</h2>
+  <p class="lede">Accepted risks have no clean fix and need your tick before the confirm button unlocks. Click a column to sort.</p>
+  <div class="tablewrap"><table id="risks">
+    <thead><tr><th data-k="n">#</th><th data-k="risk">Risk</th><th data-k="sev">Severity</th><th data-k="mit">Mitigation</th><th>Accept</th></tr></thead>
+    <tbody></tbody>
+  </table></div>
+
+  <h2>Debate</h2>
+  <div class="debate" id="debate"><b>4 rounds, GPT-6 Astra (xhigh) vs Claude defender; nothing left open.</b> Findings by round: 11 → 4 → 1 → 1. All resolved: 10 accepted with fixes, 5 rebuttals accepted by the critic. The round-4 finding (a process-only uninstall check misses an orphaned Chrome child) was fixed by taking every lock in data/locks; a targeted Astra check verified it: <b>closed, no findings</b>. Full log: ADR-0001 → Debate Log.</div>
+
+  <div class="gatebox">
+    <p class="hint" id="gateHint">Tick the accepted risks above to unlock Confirm.</p>
+    <div class="row">
+      <button class="btn primary" id="bConfirm" type="button" disabled>Confirm plan</button>
+      <button class="btn" id="bModify" type="button">Modify</button>
+      <button class="btn" id="bDiff" type="button">Different approach</button>
+      <span class="tok" id="tok">—</span>
+      <button class="btn" id="bCopy" type="button">Copy token</button>
+      <button class="btn" id="bExport" type="button">Copy as markdown</button>
+    </div>
+  </div>
+</main>
+
+<script type="application/json" id="gsd-state">
+{
+"feature": "runtime-model",
+"version": "v3",
+"status": "proposed",
+"phases": [
+{
+"id": "P0",
+"name": "Contracts follow-up PR",
+"owner": "contracts",
+"dependsOn": [],
+"note": "after contracts PR #6 merges (Steve)",
+"tasks": [
+{
+"id": "0.1",
+"text": "Wiring sends the final `job_run` DDL after Steve confirms ADR-0001",
+"status": "todo"
+},
+{
+"id": "0.2",
+"text": "`meals/db.py`: migration 2: `job_run` table (PK job, week_start)",
+"status": "todo"
+},
+{
+"id": "0.3",
+"text": "`claude_runner.run(..., hold_fds=())` + kill the child's group on any exception in `_run_once`",
+"status": "todo"
+},
+{
+"id": "0.4",
+"text": "layers: `(__main__)` its own top layer; `(background)`, `(plan_state)` in the feature layer",
+"status": "todo"
+},
+{
+"id": "0.5",
+"text": "RED via `test-writer` + ONE `spec-watchdog` (schema + concurrency = high tier)",
+"status": "todo",
+"gate": true
+},
+{
+"id": "0.6",
+"text": "`/steadows-code-review` → PR → Steve merges",
+"status": "todo",
+"gate": true
+},
+{
+"id": "0.7",
+"text": "`/steadows-verify`: phase gate",
+"status": "todo",
+"gate": true
+}
+]
+},
+{
+"id": "P1",
+"name": "background.py (early, unblocks bot)",
+"owner": "wiring",
+"dependsOn": [],
+"note": "can run with P0",
+"tasks": [
+{
+"id": "1.1",
+"text": "`/steadows-seams`: design pass + TDD-tier declaration (writes `.context/tdd-tier`)",
+"status": "todo",
+"gate": true
+},
+{
+"id": "1.2",
+"text": "RED: ack → task → render; exception → one line; 15-min deadline; second update acked while a first `work` blocks; a 3rd in flight gets 'busy' and never starts; `spawn_job` detached + OSError → message (fake PTB Update/Context)",
+"status": "todo",
+"gate": true
+},
+{
+"id": "1.3",
+"text": "`meals/background.py`: `start(update, context, work, render, ack)` with in-flight cap 2, and `spawn_job(name, *args)`",
+"status": "todo"
+},
+{
+"id": "1.4",
+"text": "`/simplify` → `/steadows-code-review` → PR (`brain announce`) → `/steadows-ultrareview`",
+"status": "todo",
+"gate": true
+},
+{
+"id": "1.5",
+"text": "pm: PLAN.md Concurrency lanes gains the bot → wiring `background.py` edge; brain connection note",
+"status": "todo"
+},
+{
+"id": "1.6",
+"text": "`/steadows-verify`: phase gate",
+"status": "todo",
+"gate": true
+}
+]
+},
+{
+"id": "P2",
+"name": "Plan state + jobs + CLI",
+"owner": "wiring",
+"dependsOn": [
+"P0"
+],
+"note": "planner/cart/Mealie/Telegram via fakes until their lanes merge",
+"tasks": [
+{
+"id": "2.1",
+"text": "`/steadows-seams`: expect HIGH tier (flock, claim, CAS, redelivery)",
+"status": "todo",
+"gate": true
+},
+{
+"id": "2.2",
+"text": "RED via `test-writer` + ONE `spec-watchdog`: the ADR's Integration Test Points for plan_state and jobs (window edges incl. DST, inspect-before-decide, no finish before delivery, result preservation under Telegram exhaustion and SIGTERM, reconcile midnight + expiry, Mealie retry, first week, busy-lock messages)",
+"status": "todo",
+"gate": true
+},
+{
+"id": "2.3",
+"text": "`meals/plan_state.py`: `transition() -> bool`, `claim() -> Claim`, frozen `JobRun`, rowcount asserted on every write",
+"status": "todo"
+},
+{
+"id": "2.4",
+"text": "`meals/jobs.py`: lock → inspect → decide → claim → act → finish → always-report for the five jobs; catch-all; per-job `signal.alarm`; SIGTERM → exception",
+"status": "todo"
+},
+{
+"id": "2.5",
+"text": "`meals/__main__.py`: `bot`, `job <name> [--now] [--week] [--retry]`",
+"status": "todo"
+},
+{
+"id": "2.6",
+"text": "`/simplify` → `/steadows-code-review` → PR → `/steadows-ultrareview`",
+"status": "todo",
+"gate": true
+},
+{
+"id": "2.7",
+"text": "`/steadows-verify`: phase gate",
+"status": "todo",
+"gate": true
+}
+]
+},
+{
+"id": "P3",
+"name": "launchd deploy",
+"owner": "wiring",
+"dependsOn": [
+"P2"
+],
+"note": "templates can start alongside P2; nothing is installed before P4.8",
+"tasks": [
+{
+"id": "3.1",
+"text": "`/steadows-seams` + tier (expect ordinary)",
+"status": "todo",
+"gate": true
+},
+{
+"id": "3.2",
+"text": "RED: rendered plists pass `plutil -lint`; `install.sh --dry-run` output; tz assert; uninstall waits for `meals bot|job` processes incl. a spawned job that hasn't taken its lock",
+"status": "todo",
+"gate": true
+},
+{
+"id": "3.3",
+"text": "`deploy/*.plist.template`: bot (`caffeinate -i`, KeepAlive, ThrottleInterval 30, PYTHONUNBUFFERED), sat_propose (Sat 08–20 hourly), sat_nudge (Sat 16–21 hourly), sun_autoapprove (Sun 08–20 hourly), reconcile (`{Minute: 15}`), all RunAtLoad",
+"status": "todo"
+},
+{
+"id": "3.4",
+"text": "`deploy/install.sh` (idempotent; bakes uv/claude PATH; asserts America/Detroit; `launchctl bootstrap gui/$UID`; `--dry-run` is the only mode used before P4.8) + `uninstall.sh` (boot out all five → wait for `meals bot|job` processes → take every lock in `data/locks` at once, non-blocking poll, naming holders → 'safe to switch code') + `deploy/README.md` Stuck-run section",
+"status": "todo"
+},
+{
+"id": "3.5",
+"text": "`/simplify` → `/steadows-code-review` → PR",
+"status": "todo",
+"gate": true
+},
+{
+"id": "3.6",
+"text": "`/steadows-verify`: phase gate",
+"status": "todo",
+"gate": true
+}
+]
+},
+{
+"id": "P4",
+"name": "Integration, acceptance & activation (M4)",
+"owner": "wiring",
+"dependsOn": [
+"P1",
+"P2",
+"P3"
+],
+"note": "also needs pantry, mealie, search (apply_reply, mealie_slug), bot, cart (fill(hold_fds)) merged + the cart spike",
+"tasks": [
+{
+"id": "4.1",
+"text": "Wire real planner, cart, Mealie, pantry into `jobs.py` (entry points import real modules)",
+"status": "todo"
+},
+{
+"id": "4.2",
+"text": "`/steadows-seams` integration pass + tier",
+"status": "todo",
+"gate": true
+},
+{
+"id": "4.3",
+"text": "Full integration RED (pair if high per seams)",
+"status": "todo",
+"gate": true
+},
+{
+"id": "4.4",
+"text": "Lifecycle acceptance (real subprocesses, stub `claude_bin`, no launchd): kill -9 a running cart_fill → locks held until the stub exits, `--retry` says 'still running', next run reports interrupted; spawn_job child survives killpg of its spawner; SIGTERM mid-run → child killed + failure reported; uninstall with a job running waits then reports safe; kill -9 cart_fill while its stub child holds job/Chrome/slot locks → uninstall waits until the stub exits",
+"status": "todo",
+"gate": true
+},
+{
+"id": "4.5",
+"text": "M4 by hand via the CLI, no agents installed: `job sat_propose --now <Sat 08:00>` → reply → cart fills → report (real services)",
+"status": "todo"
+},
+{
+"id": "4.6",
+"text": "`/steadows-verify`: final gate (full pipeline)",
+"status": "todo",
+"gate": true
+},
+{
+"id": "4.7",
+"text": "`/steadows-security-review` before merge",
+"status": "todo",
+"gate": true
+},
+{
+"id": "4.8",
+"text": "Activate: `install.sh` after reviewing `--dry-run`; during the first real fill, `launchctl kickstart -k` the bot and confirm the fill completes",
+"status": "todo"
+},
+{
+"id": "4.9",
+"text": "Retire the hand-run keep-awake script after the first unattended weekend completes",
+"status": "todo"
+}
+]
+}
+],
+"risks": [
+{
+"n": 1,
+"risk": "Time-gated job spends its one claim on a too-early check",
+"sev": "CRITICAL",
+"mit": "Fixed: decide before claiming; not acting writes nothing",
+"accept": false
+},
+{
+"n": 2,
+"risk": "Late wake proposes just before Sunday auto-approve",
+"sev": "CRITICAL",
+"mit": "Fixed: sat_propose window closes Sat 20:00",
+"accept": false
+},
+{
+"n": 3,
+"risk": "A job crashes without telling Steve",
+"sev": "CRITICAL",
+"mit": "Fixed: catch-all + alarm + SIGTERM path; no finish before delivery",
+"accept": false
+},
+{
+"n": 4,
+"risk": "Orphaned claude holds a slot or lock (residual after SIGKILL/power loss)",
+"sev": "ACCEPT",
+"mit": "Runner kills its child on any exception; residual surfaced by stale-lock alert + Stuck-run procedure",
+"accept": false,
+"required": true
+},
+{
+"n": 5,
+"risk": "Orphaned Chrome child + retry doubles the cart",
+"sev": "HIGH",
+"mit": "hold_fds + cart.fill(hold_fds) + P4.4 test; cart_fill gated on all three",
+"accept": false
+},
+{
+"n": 6,
+"risk": "Benign races raise false alerts",
+"sev": "HIGH",
+"mit": "Fixed: CAS false → re-read → quiet no-op",
+"accept": false
+},
+{
+"n": 7,
+"risk": "Two jobs insert the same week",
+"sev": "HIGH",
+"mit": "Fixed: ON CONFLICT DO NOTHING + re-read",
+"accept": false
+},
+{
+"n": 8,
+"risk": "First week: nothing to reuse (and hourly repeats)",
+"sev": "HIGH",
+"mit": "Fixed: claim, one message, finish failed",
+"accept": false
+},
+{
+"n": 9,
+"risk": "Layering blocks __main__ / new modules",
+"sev": "MED",
+"mit": "Fixed: __main__ its own top layer; new modules in feature layer",
+"accept": false
+},
+{
+"n": 10,
+"risk": "nvm/uv path drift breaks launchd runs",
+"sev": "MED",
+"mit": "Loud catch-all message; rerun install.sh",
+"accept": false
+},
+{
+"n": 11,
+"risk": "Mac time zone ≠ America/Detroit",
+"sev": "MED",
+"mit": "install.sh asserts it (today: America/Detroit)",
+"accept": false
+},
+{
+"n": 12,
+"risk": "spawn_job fails after approval",
+"sev": "MED",
+"mit": "Fixed: catch OSError, message Steve; reconcile retries",
+"accept": false
+},
+{
+"n": 13,
+"risk": "retry cart check-then-act race",
+"sev": "MED",
+"mit": "Fixed: retry resets under the job's own lock",
+"accept": false
+},
+{
+"n": 14,
+"risk": "Unallowlisted chat triggers approve / cart fill",
+"sev": "MED",
+"mit": "Central chat-ID gate in the bot (bot lane)",
+"accept": false
+},
+{
+"n": 15,
+"risk": "Crash between approval and cart dispatch strands the week",
+"sev": "HIGH",
+"mit": "Fixed: reconcile scans persisted weeks hourly",
+"accept": false
+},
+{
+"n": 16,
+"risk": "Retry over a partly filled cart doubles items",
+"sev": "ACCEPT",
+"mit": "Retry requires an emptied cart (the notice says so) until the cart-path gate decides set-to-quantity",
+"accept": false,
+"required": true
+},
+{
+"n": 17,
+"risk": "Crash after the row is written, before the proposal is sent",
+"sev": "HIGH",
+"mit": "Fixed: inspect before decide; redeliver from components",
+"accept": false
+},
+{
+"n": 18,
+"risk": "Mealie stale or missing for the week",
+"sev": "HIGH",
+"mit": "Fixed: ref-NULL pending marker; reconcile publishes hourly",
+"accept": false
+},
+{
+"n": 19,
+"risk": "Rollback while a job or an orphaned claude child still runs",
+"sev": "HIGH",
+"mit": "Fixed: boot out all five → wait for meals processes → take every lock in data/locks (inherited by every claude child) → switch code",
+"accept": false
+},
+{
+"n": 20,
+"risk": "RunAtLoad acts on a pre-acceptance install",
+"sev": "HIGH",
+"mit": "Fixed: activation is the last P4 step",
+"accept": false
+},
+{
+"n": 21,
+"risk": "Bot work abandoned at the 15-min deadline may still run once",
+"sev": "ACCEPT",
+"mit": "Bounded by the in-flight cap of 2 and the runner timeout",
+"accept": false,
+"required": true
+},
+{
+"n": 22,
+"risk": "Cook-day-evening approval recovered after midnight",
+"sev": "MED",
+"mit": "Fixed: persisted-week scan + --week; expired → one message + manual retry",
+"accept": false
+},
+{
+"n": 23,
+"risk": "Telegram outage or SIGTERM after the result commits",
+"sev": "HIGH",
+"mit": "Fixed: claim stays unfinished; redelivery without re-acting; result preservation",
+"accept": false
+},
+{
+"n": 24,
+"risk": "Duplicate Mealie entries after an ambiguous publish timeout",
+"sev": "ACCEPT",
+"mit": "Mealie lane implements set_meal_plan as replace-the-week",
+"accept": false,
+"required": true
+},
+{
+"n": 25,
+"risk": "Mac powered off through a whole job window",
+"sev": "ACCEPT",
+"mit": "PLAN fallback: reuse last week / manual loop",
+"accept": false,
+"required": true
+},
+{
+"n": 26,
+"risk": "Reboot with no login (FileVault on) → nothing runs until Steve logs in",
+"sev": "ACCEPT",
+"mit": "Set macOS updates to manual install; log in after restarts",
+"accept": false,
+"required": true
+},
+{
+"n": 27,
+"risk": "Which Chrome profile an unattended run drives (extension in 2 profiles)",
+"sev": "ACCEPT",
+"mit": "Cart spike must prove it before cart_fill is trusted",
+"accept": false,
+"required": true
+},
+{
+"n": 28,
+"risk": "In-bot /find lost if the bot restarts mid-run",
+"sev": "ACCEPT",
+"mit": "Steve resends; update already acknowledged",
+"accept": false,
+"required": true
+},
+{
+"n": 29,
+"risk": "Claude Desktop rotates the shared login (#94464) → runs fail with auth errors",
+"sev": "ACCEPT",
+"mit": "Catch-all message tells Steve; run /login (not happening today)",
+"accept": false,
+"required": true
+},
+{
+"n": 30,
+"risk": "No proposal after Sat 20:00 (e.g. Mac off all Saturday)",
+"sev": "ACCEPT",
+"mit": "Sunday message says so; last week's plan reused",
+"accept": false,
+"required": true
+}
+]
+}
+</script>
+
+<script>
+(() => {
+  const root = document.documentElement;
+  try { const t = localStorage.getItem('rt-plan-theme'); if (t) root.dataset.theme = t; } catch (e) {}
+  document.getElementById('theme').onclick = () => {
+    root.dataset.theme = root.dataset.theme === 'light' ? 'dark' : 'light';
+    try { localStorage.setItem('rt-plan-theme', root.dataset.theme); } catch (e) {}
+  };
+  const state = JSON.parse(document.getElementById('gsd-state').textContent);
+  const ORDER = ['todo', 'in_progress', 'done', 'blocked'];
+  const LABEL = { todo: 'TODO', in_progress: 'IN PROGRESS', done: 'DONE', blocked: 'BLOCKED' };
+  const MARK = { todo: '[ ]', in_progress: '[~]', done: '[x]', blocked: '[!]' };
+  const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const md = s => esc(s).replace(/`([^`]+)`/g, '<code>$1</code>');
+  const pct = tasks => tasks.length ? Math.round(100 * tasks.filter(t => t.status === 'done').length / tasks.length) : 0;
+
+  function renderGraph() {
+    const pos = { P0: [60, 40], P1: [60, 150], P2: [330, 40], P3: [590, 40], P4: [590, 150] };
+    const ext = [['EXT', 'Other lanes + cart spike', 330, 150]];
+    const done = id => pct(state.phases.find(p => p.id === id).tasks) === 100;
+    let s = '<svg viewBox="0 0 860 220" role="img" aria-label="Phase dependency graph"><defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="var(--muted)"/></marker></defs>';
+    const edge = (a, b) => `<line x1="${a[0] + 200}" y1="${a[1] + 24}" x2="${b[0] - 4}" y2="${b[1] + 24}" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ah)"/>`;
+    state.phases.forEach(p => p.dependsOn.forEach(d => { s += edge(pos[d], pos[p.id]); }));
+    s += edge([ext[0][2], ext[0][3]], pos.P4);
+    const box = (x, y, title, sub, blocked, pc) => `<g opacity="${blocked ? 0.55 : 1}"><rect x="${x}" y="${y}" width="200" height="48" rx="8" fill="var(--panel-2)" stroke="${pc === 100 ? 'var(--accent)' : 'var(--line)'}"/><text x="${x + 10}" y="${y + 20}" fill="var(--text)" font-size="13" font-weight="700">${esc(title)}</text><text x="${x + 10}" y="${y + 37}" fill="var(--muted)" font-size="11">${esc(sub)}</text></g>`;
+    state.phases.forEach(p => {
+      const blocked = p.dependsOn.some(d => !done(d));
+      const pc = pct(p.tasks);
+      s += box(pos[p.id][0], pos[p.id][1], `${p.id} · ${p.name.split(' —')[0]}`, `${p.owner} · ${pc}%`, blocked, pc);
+    });
+    s += box(ext[0][2], ext[0][3], ext[0][1], 'M1, M2, hold_fds', true, 0);
+    document.getElementById('graph').innerHTML = s + '</svg>';
+  }
+
+  function renderPhases() {
+    const host = document.getElementById('phases');
+    const open = new Set([...host.querySelectorAll('details[open]')].map(d => d.dataset.id));
+    host.innerHTML = state.phases.map(p => {
+      const pc = pct(p.tasks);
+      return `<details class="phase" data-id="${p.id}" ${open.has(p.id) ? 'open' : ''}><summary><div><h3><span class="owner">${esc(p.owner)}</span>${esc(p.id)} · ${esc(p.name)}</h3><div class="meta">Depends on: ${p.dependsOn.length ? p.dependsOn.join(', ') : 'none'} · ${esc(p.note)}</div></div><div><div class="bar"><i style="width:${pc}%"></i></div><div class="meta">${pc}%</div></div></summary><div class="body">${p.tasks.map(t => `<div class="task"><button class="st" type="button" data-p="${p.id}" data-t="${t.id}" data-s="${t.status}">${LABEL[t.status]}</button><div class="t ${t.gate ? 'gate' : ''}">${esc(t.id)} ${md(t.text)}</div></div>`).join('')}</div></details>`;
+    }).join('');
+    host.querySelectorAll('button.st').forEach(b => b.onclick = () => {
+      const t = state.phases.find(p => p.id === b.dataset.p).tasks.find(x => x.id === b.dataset.t);
+      t.status = ORDER[(ORDER.indexOf(t.status) + 1) % ORDER.length];
+      renderAll();
+    });
+  }
+
+  let sortKey = 'n', sortDir = 1;
+  const SEVRANK = { CRITICAL: 0, HIGH: 1, MED: 2, ACCEPT: 3 };
+  function renderRisks() {
+    const rows = [...state.risks].sort((a, b) => {
+      const va = sortKey === 'sev' ? SEVRANK[a.sev] : a[sortKey], vb = sortKey === 'sev' ? SEVRANK[b.sev] : b[sortKey];
+      return (va > vb ? 1 : va < vb ? -1 : 0) * sortDir;
+    });
+    document.querySelector('#risks tbody').innerHTML = rows.map(r => `<tr><td>${r.n}</td><td>${esc(r.risk)}</td><td><span class="sev ${r.sev}">${r.sev === 'ACCEPT' ? 'ACCEPT' : r.sev}</span></td><td>${esc(r.mit)}</td><td><label><input type="checkbox" data-n="${r.n}" ${r.accept ? 'checked' : ''}> ${r.required ? '<span class="req">required</span>' : ''}</label></td></tr>`).join('');
+    document.querySelectorAll('#risks input').forEach(c => c.onchange = () => {
+      state.risks.find(r => r.n === +c.dataset.n).accept = c.checked; renderGate();
+    });
+  }
+  document.querySelectorAll('#risks th[data-k]').forEach(th => th.onclick = () => {
+    sortDir = sortKey === th.dataset.k ? -sortDir : 1; sortKey = th.dataset.k; renderRisks();
+  });
+
+  const tok = document.getElementById('tok');
+  function renderGate() {
+    const missing = state.risks.filter(r => r.required && !r.accept);
+    document.getElementById('bConfirm').disabled = missing.length > 0;
+    document.getElementById('gateHint').textContent = missing.length
+      ? `Tick ${missing.length} accepted risk${missing.length > 1 ? 's' : ''} (#${missing.map(r => r.n).join(', #')}) to unlock Confirm.`
+      : 'Ready. Confirm, or ask for changes.';
+  }
+  const accepted = () => state.risks.filter(r => r.accept).map(r => r.n);
+  document.getElementById('bConfirm').onclick = () => { tok.textContent = `CONFIRM runtime-model ${state.version} accepted-risks:${accepted().join(',')}`; };
+  document.getElementById('bModify').onclick = () => { tok.textContent = `MODIFY runtime-model ${state.version} — <say what to change>`; };
+  document.getElementById('bDiff').onclick = () => { tok.textContent = `DIFFERENT-APPROACH runtime-model — <which option / why>`; };
+  const copy = async (text, btn) => {
+    const old = btn.textContent;
+    try { await navigator.clipboard.writeText(text); btn.textContent = 'Copied'; } catch (e) { btn.textContent = 'Copy failed'; }
+    setTimeout(() => { btn.textContent = old; }, 1400);
+  };
+  document.getElementById('bCopy').onclick = e => copy(tok.textContent, e.target);
+  document.getElementById('bExport').onclick = e => {
+    let out = `## Architecture: Runtime model (${state.version})\n`;
+    state.phases.forEach(p => {
+      out += `\n### ${p.id}: ${p.name} — ${p.owner}\n**Depends on:** ${p.dependsOn.join(', ') || 'none'} (${p.note})\n\n`;
+      p.tasks.forEach(t => { out += `- ${MARK[t.status]} ${t.text}\n`; });
+    });
+    out += `\n### Accepted risks\n` + (accepted().length ? accepted().map(n => `- #${n} ${state.risks.find(r => r.n === n).risk}`).join('\n') : '- none') + '\n';
+    copy(out, e.target);
+  };
+
+  function renderAll() {
+    const all = state.phases.flatMap(p => p.tasks);
+    const pc = pct(all);
+    document.getElementById('overallBar').style.width = pc + '%';
+    document.getElementById('overallTxt').textContent = `${pc}% · ${all.filter(t => t.status === 'done').length}/${all.length} tasks`;
+    renderGraph(); renderPhases(); renderGate();
+  }
+  renderRisks(); renderAll();
+})();
+</script>
+</body>
+</html>
