@@ -10,6 +10,11 @@ The arguments come from Claude reading Steve's free text, so this is a trust bou
 - no tool can write the product map, because the cart opens those URLs in Steve's logged-in
   Chrome session.
 
+The server can't tell who is calling, so the rule on who may call lives where it is mounted: a
+Claude run that has these tools must not also have web, Chrome or file tools (no untrusted input
+next to pantry writes). `claude_runner`'s default tools are WebSearch and WebFetch, so the bot's
+free-text run can't mount these on the defaults.
+
 Stdout is the protocol, so nothing here prints. The pantry logs its writes and the SDK logs failed
 calls, both on stderr.
 """
