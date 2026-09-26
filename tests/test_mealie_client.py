@@ -64,6 +64,7 @@ class MealieStub:
         self.entries: dict[int, Json] = {}
         self.parses: dict[str, Json] = {}  # ingredient text -> parsed RecipeIngredient
         self.import_status = 201
+        self.import_raises: Exception | None = None  # raised in place of answering the import
         self.create_entry_status = 201
         self.requests: list[httpx.Request] = []
 
@@ -89,21 +90,17 @@ class MealieStub:
         body: Any = json.loads(request.content) if request.content else None
 
         if (method, path) == ("POST", "/api/recipes/create/url"):
+            if self.import_raises is not None:
+                raise self.import_raises
             if self.import_status != 201:
                 return httpx.Response(self.import_status, json={"detail": "scrape failed"})
             return httpx.Response(201, json="imported-recipe")
-        if method == "GET" and path.startswith("/api/organizers/tags/slug/"):
-            tag = path.rsplit("/", 1)[1]
-            if tag not in self.tags:
-                return httpx.Response(404, json={"detail": "not found"})
-            return httpx.Response(200, json={"id": self.tags[tag], "name": tag, "slug": tag})
+        if (method, path) == ("GET", "/api/organizers/tags"):
+            tags = [{"id": tag_id, "name": tag, "slug": tag} for tag, tag_id in self.tags.items()]
+            return httpx.Response(200, json=self._slice(tags, params))
         if (method, path) == ("GET", "/api/recipes"):
             slugs = sorted(self.tagged.get(params["tags"][0], []))
-            per_page, page = int(params["perPage"][0]), int(params["page"][0])
-            chunk = slugs[(page - 1) * per_page : page * per_page]
-            return httpx.Response(
-                200, json=self._page([{"slug": s} for s in chunk], page, per_page, len(slugs))
-            )
+            return httpx.Response(200, json=self._slice([{"slug": s} for s in slugs], params))
         if method == "GET" and path.startswith("/api/recipes/"):
             slug = path.rsplit("/", 1)[1]
             if slug not in self.recipes:
@@ -128,6 +125,12 @@ class MealieStub:
         if method == "DELETE" and path.startswith("/api/households/mealplans/"):
             return httpx.Response(200, json=self.entries.pop(int(path.rsplit("/", 1)[1])))
         raise AssertionError(f"MealieStub: unexpected {method} {request.url}")
+
+    @classmethod
+    def _slice(cls, items: list[Json], params: dict[str, list[str]]) -> Json:
+        per_page, page = int(params["perPage"][0]), int(params["page"][0])
+        chunk = items[(page - 1) * per_page : page * per_page]
+        return cls._page(chunk, page, per_page, len(items))
 
     @staticmethod
     def _page(items: list[Json], page: int, per_page: int, total: int) -> Json:
@@ -170,7 +173,7 @@ def test_import_url_returns_the_new_slug_without_importing_site_tags(
     assert sent["includeTags"] is False
 
 
-@pytest.mark.parametrize("status", [400, 408, 422, 500])
+@pytest.mark.parametrize("status", [400, 408, 500])
 def test_import_url_raises_value_error_when_mealie_cannot_scrape(
     client: HttpMealieClient, stub: MealieStub, status: int
 ) -> None:
@@ -179,11 +182,32 @@ def test_import_url_raises_value_error_when_mealie_cannot_scrape(
         client.import_url("https://www.budgetbytes.com/fajitas/")
 
 
-def test_import_url_lets_an_auth_failure_through_as_an_http_error(
+# 401: a bad token. 422: a request body this client got wrong. Both are bugs to surface, not
+# recipes that couldn't be saved.
+@pytest.mark.parametrize("status", [401, 422])
+def test_import_url_lets_an_auth_or_request_error_through_as_an_http_error(
+    client: HttpMealieClient, stub: MealieStub, status: int
+) -> None:
+    stub.import_status = status
+    with pytest.raises(httpx.HTTPStatusError):
+        client.import_url("https://www.budgetbytes.com/fajitas/")
+
+
+def test_import_url_raises_value_error_when_mealie_times_out(
     client: HttpMealieClient, stub: MealieStub
 ) -> None:
-    stub.import_status = 401
-    with pytest.raises(httpx.HTTPStatusError):
+    stub.import_raises = httpx.ReadTimeout("timed out")
+    with pytest.raises(ValueError):
+        client.import_url("https://www.budgetbytes.com/fajitas/")
+
+
+# Mealie is down or unreachable: a fault to surface. Only a read timeout means it's still scraping.
+@pytest.mark.parametrize("error", [httpx.ConnectError, httpx.ConnectTimeout])
+def test_import_url_lets_a_connection_failure_through(
+    client: HttpMealieClient, stub: MealieStub, error: type[httpx.TransportError]
+) -> None:
+    stub.import_raises = error("Mealie is unreachable")
+    with pytest.raises(error):
         client.import_url("https://www.budgetbytes.com/fajitas/")
 
 
@@ -225,9 +249,29 @@ def test_get_recipe_fills_gaps_for_a_hand_entered_recipe(
     recipe = client.get_recipe("mac")
 
     assert (recipe.url, recipe.source) == ("", "mealie")
-    assert recipe.servings == 6
+    assert recipe.servings is None  # a yield counts cookies or loaves, not people
     assert recipe.hands_on_min is None
     assert recipe.batch_ok is False
+
+
+def test_get_recipe_reads_a_malformed_org_url_as_an_unknown_source(
+    client: HttpMealieClient, stub: MealieStub
+) -> None:
+    stub.recipes["odd"] = recipe_json("odd", orgURL="http://[bad/")
+
+    recipe = client.get_recipe("odd")
+
+    assert (recipe.url, recipe.source) == ("http://[bad/", "mealie")
+
+
+def test_get_recipe_reads_recipe_tags_by_slug_alone(
+    client: HttpMealieClient, stub: MealieStub
+) -> None:
+    stub.recipes["chili"] = recipe_json(
+        "chili", tags=[{"id": None, "name": BATCH_OK_TAG, "slug": BATCH_OK_TAG}]
+    )
+
+    assert client.get_recipe("chili").batch_ok is True
 
 
 def test_get_recipe_uses_structured_ingredients_as_is_without_parsing(
@@ -288,7 +332,8 @@ def test_list_by_tag_filters_by_the_resolved_tag_id_across_pages(
     client: HttpMealieClient, stub: MealieStub
 ) -> None:
     slugs = [f"recipe-{n:03d}" for n in range(150)]
-    stub.tags["rotation"] = "tag-rotation-id"
+    stub.tags.update({f"tag-{n:03d}": f"tag-{n:03d}-id" for n in range(150)})
+    stub.tags["rotation"] = "tag-rotation-id"  # on the second page of tags
     stub.tagged["tag-rotation-id"] = slugs
     stub.tagged["tag-other-id"] = ["not-this-one"]
 
@@ -301,7 +346,10 @@ def test_list_by_tag_filters_by_the_resolved_tag_id_across_pages(
 def test_list_by_tag_returns_empty_for_an_unknown_tag_without_listing_recipes(
     client: HttpMealieClient, stub: MealieStub
 ) -> None:
-    assert client.list_by_tag("no-such-tag") == ()
+    stub.tags["rotation-old"] = "tag-old-id"  # a near miss: the slug must match exactly
+    stub.tagged["tag-old-id"] = ["old-favourite"]
+
+    assert client.list_by_tag("rotation") == ()
     assert not any(r.url.path == "/api/recipes" for r in stub.requests)
 
 
@@ -366,6 +414,21 @@ def test_set_meal_plan_is_a_no_op_when_rerun_with_the_same_recipes(
 
 
 @pytest.mark.usefixtures("three_recipes")
+def test_set_meal_plan_collapses_duplicate_entries_of_its_own(
+    client: HttpMealieClient, stub: MealieStub
+) -> None:
+    stub.add_entry("fajitas", PLAN_ENTRY_MARKER)
+    stub.add_entry("fajitas", PLAN_ENTRY_MARKER)
+    steves = stub.add_entry("fajitas", "Steve added this by hand")
+
+    client.set_meal_plan(WEEK, ["fajitas"])
+
+    ours = [e for e in stub.entries.values() if e["text"] == PLAN_ENTRY_MARKER]
+    assert [e["recipeId"] for e in ours] == [stub.recipes["fajitas"]["id"]]
+    assert steves in stub.entries
+
+
+@pytest.mark.usefixtures("three_recipes")
 def test_set_meal_plan_raises_key_error_for_an_unknown_slug_before_writing(
     client: HttpMealieClient, stub: MealieStub
 ) -> None:
@@ -407,6 +470,10 @@ NON_PUBLIC_URLS = [
     pytest.param("http://LOCALHOST/", id="localhost-uppercase"),
     pytest.param("http://localhost./", id="localhost-trailing-dot"),
     pytest.param("http://app.localhost/", id="localhost-subdomain"),
+    pytest.param("http://nas.local/", id="mdns-local"),
+    pytest.param("http://host.docker.internal/", id="internal-tld"),
+    pytest.param("http://router.home.arpa/", id="home-arpa"),
+    pytest.param("http://NAS.Local./", id="local-mixed-case-trailing-dot"),
     pytest.param("http://mealie:9000/", id="docker-service-name"),
     pytest.param("http://mealie./", id="single-label-trailing-dot"),
     pytest.param("http://router/", id="lan-name"),
@@ -429,6 +496,10 @@ NON_PUBLIC_URLS = [
     pytest.param("http://[::ffff:127.0.0.1]/x", id="ipv4-mapped-loopback"),
     pytest.param("http://[::ffff:192.168.1.1]/x", id="ipv4-mapped-private"),
     pytest.param("http://[::ffff:100.100.100.100]/x", id="ipv4-mapped-cgnat"),
+    # Reserved IPv6 that Python still calls global: ::/8 embeddings and the NAT64 prefix.
+    pytest.param("http://[::7f00:1]/x", id="ipv4-compatible-loopback"),
+    pytest.param("http://[::ffff:0:7f00:1]/x", id="siit-loopback"),
+    pytest.param("http://[64:ff9b::a9fe:a9fe]/x", id="nat64-metadata"),
     pytest.param("http://0x7f.0.0.1/", id="inet-aton-hex"),
     pytest.param("http://0177.0.0.1/", id="inet-aton-octal"),
     pytest.param("http://127.1/", id="inet-aton-short"),
@@ -444,6 +515,7 @@ PUBLIC_URLS = [
     pytest.param("https://8.8.8.8/r", id="global-ipv4"),
     pytest.param("https://[2606:4700:4700::1111]/r", id="global-ipv6"),
     pytest.param("https://bücher.example/r", id="idn-host"),
+    pytest.param("https://www.localfoods.com/r", id="local-as-substring-not-suffix"),
     # .example never resolves (RFC 2606), so a guard that looks the host up would refuse it.
     pytest.param("https://recipes.example/r", id="unresolvable-no-dns-lookup"),
 ]

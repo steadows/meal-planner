@@ -7,6 +7,7 @@ a `MealieClient`.
 
 import ipaddress
 import itertools
+import logging
 import re
 import socket
 from collections.abc import Iterator, Mapping, Sequence
@@ -21,6 +22,8 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from meals.config import Settings, get_settings
 from meals.contracts import Ingredient, RecipeOption
 
+logger = logging.getLogger(__name__)
+
 BATCH_OK_TAG = "batch-ok"
 # Written into every meal-plan entry this client creates, so set_meal_plan replaces its own
 # entries and never touches the ones Steve added by hand.
@@ -33,8 +36,11 @@ MEALIE_IMPORT_TIMEOUT_S = 60.0
 # What Mealie's slugify produces. Slugs and tags go into URL paths, and some come from Claude's
 # output, so anything else is treated as unknown and never sent.
 _SLUG = re.compile(r"[A-Za-z0-9_-]+", re.ASCII)
-# How Mealie answers a URL it can't scrape: no recipe data, timeout, bad URL, scraper crash.
-_SCRAPE_FAILURES = frozenset({400, 408, 422, 500})
+# How Mealie answers a URL it can't scrape: no recipe data, scrape timeout, scraper crash. Mealie
+# also answers 500 for a server fault, which it can't be told apart from here, so it is logged.
+_SCRAPE_FAILURES = frozenset({400, 408, 500})
+# Hosts reserved for local networks (RFC 6761, 6762, 8375; ICANN .internal), besides single labels.
+_LOCAL_SUFFIXES = (".localhost", ".local", ".internal", ".home.arpa")
 
 
 class _Mealie(BaseModel):
@@ -73,20 +79,19 @@ class _Step(_Mealie):
     text: str
 
 
+class _Slugged(_Mealie):
+    slug: str
+
+
 class _Recipe(_Mealie):
     id: UUID
     name: str | None = None
     org_url: str | None = Field(default=None, alias="orgURL")
     recipe_servings: float | None = Field(default=None, alias="recipeServings")
-    recipe_yield_quantity: float | None = Field(default=None, alias="recipeYieldQuantity")
     prep_time_seconds: int | None = Field(default=None, alias="prepTimeSeconds")
-    tags: tuple[_Tag, ...] | None = None
+    tags: tuple[_Slugged, ...] | None = None
     recipe_ingredient: tuple[_IngredientLine, ...] = Field(default=(), alias="recipeIngredient")
     recipe_instructions: tuple[_Step, ...] | None = Field(default=None, alias="recipeInstructions")
-
-
-class _Slugged(_Mealie):
-    slug: str
 
 
 class _PlanEntry(_Mealie):
@@ -127,16 +132,29 @@ class HttpMealieClient:
         return cls(http)
 
     def import_url(self, url: str) -> str:
-        _require_public_url(url)
-        response = self._http.post(
-            "/api/recipes/create/url",
-            json={"url": url, "includeTags": False, "includeCategories": False},
-            timeout=MEALIE_IMPORT_TIMEOUT_S,
-        )
+        try:
+            _require_public_url(url)
+        except ValueError as exc:
+            logger.warning("refused to import %r: %s", url, exc)
+            raise
+        try:
+            response = self._http.post(
+                "/api/recipes/create/url",
+                json={"url": url, "includeTags": False, "includeCategories": False},
+                timeout=MEALIE_IMPORT_TIMEOUT_S,
+            )
+        except httpx.ReadTimeout as exc:
+            # Mealie accepted the request and is still scraping; it may finish, and the recipe then
+            # appears without a slug here. A connect timeout means Mealie is down, and propagates.
+            logger.warning("Mealie timed out importing %s", url)
+            raise ValueError(f"Mealie took too long importing {url}") from exc
         if response.status_code in _SCRAPE_FAILURES:
+            logger.warning("Mealie couldn't import %s: HTTP %d", url, response.status_code)
             raise ValueError(f"Mealie couldn't import {url} (HTTP {response.status_code})")
         response.raise_for_status()
-        return _SLUG_RESPONSE.validate_json(response.content)
+        slug = _SLUG_RESPONSE.validate_json(response.content)
+        logger.info("imported %s as %s", url, slug)
+        return slug
 
     def get_recipe(self, slug: str) -> RecipeOption:
         recipe = self._fetch_recipe(slug)
@@ -158,12 +176,12 @@ class HttpMealieClient:
     def list_by_tag(self, tag: str) -> tuple[str, ...]:
         if not _SLUG.fullmatch(tag):
             return ()
-        response = self._http.get(f"/api/organizers/tags/slug/{tag}")
-        if response.status_code == 404:
+        # Mealie's by-slug lookup answers 500 for an unknown slug, so find the tag in the list.
+        tags = map(_Tag.model_validate, self._paged("/api/organizers/tags", {}))
+        tag_id = next((t.id for t in tags if t.slug == tag), None)
+        if tag_id is None:
             return ()
-        response.raise_for_status()
         # Filter by the resolved id, so an unknown tag can never read as "no filter".
-        tag_id = _Tag.model_validate(response.json()).id
         items = self._paged(
             "/api/recipes", {"tags": tag_id, "orderBy": "slug", "orderDirection": "asc"}
         )
@@ -176,13 +194,22 @@ class HttpMealieClient:
         day = week_start.isoformat()
         entries = self._paged("/api/households/mealplans", {"start_date": day, "end_date": day})
         ours = [e for e in map(_PlanEntry.model_validate, entries) if e.text == PLAN_ENTRY_MARKER]
+        on_plan: set[UUID | None] = set()
         for entry in ours:
-            if entry.recipe_id not in wanted:
+            if entry.recipe_id in wanted and entry.recipe_id not in on_plan:
+                on_plan.add(entry.recipe_id)
+            else:  # no longer planned, or a duplicate of one kept above
                 self._http.delete(f"/api/households/mealplans/{entry.id}").raise_for_status()
-        on_plan = {entry.recipe_id for entry in ours}
-        for recipe_id in wanted:
-            if recipe_id not in on_plan:
-                self._create_entry(day, recipe_id)
+        added = [recipe_id for recipe_id in wanted if recipe_id not in on_plan]
+        for recipe_id in added:
+            self._create_entry(day, recipe_id)
+        logger.info(
+            "meal plan %s: %d kept, %d removed, %d added",
+            day,
+            len(on_plan),
+            len(ours) - len(on_plan),
+            len(added),
+        )
         return day
 
     def _fetch_recipe(self, slug: str) -> _Recipe:
@@ -248,9 +275,10 @@ def _require_public_url(url: str) -> None:
         raise ValueError(f"only public http(s) URLs can be imported: {url!r}")
     ip = _ip_literal(host)
     if ip is not None:
-        local = ip.is_multicast or not ip.is_global  # is_global is True for most multicast
+        # is_global is True for most multicast and for some reserved IPv6 (::7f00:1, NAT64).
+        local = ip.is_multicast or ip.is_reserved or not ip.is_global
     else:
-        local = "." not in host or host.endswith(".localhost")  # single-label covers "localhost"
+        local = "." not in host or host.endswith(_LOCAL_SUFFIXES)  # single-label covers "localhost"
     if local:
         raise ValueError(f"refusing a local or private address: {url!r}")
 
@@ -281,12 +309,16 @@ def _to_ingredient(line: _IngredientLine, fallback: str) -> Ingredient:
 
 
 def _source(org_url: str | None) -> str:
-    host = urlsplit(org_url).hostname if org_url else None
+    """The site a recipe came from. orgURL is free text in Mealie, so a malformed one reads as
+    unknown rather than failing the whole recipe."""
+    try:
+        host = urlsplit(org_url).hostname if org_url else None
+    except ValueError:
+        host = None
     return host.removeprefix("www.") if host else "mealie"
 
 
 def _servings(recipe: _Recipe) -> int | None:
-    for value in (recipe.recipe_servings, recipe.recipe_yield_quantity):
-        if value and value > 0:
-            return max(1, round(value))
-    return None
+    """recipeServings only: recipeYieldQuantity counts cookies or loaves, not people."""
+    value = recipe.recipe_servings
+    return max(1, round(value)) if value and value > 0 else None
