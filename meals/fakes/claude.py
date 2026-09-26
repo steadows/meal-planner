@@ -16,6 +16,7 @@ class ClaudeCall:
     schema: type[BaseModel] | None
     chrome: bool
     timeout: int
+    hold_fds: tuple[int, ...] = ()
 
 
 class FakeClaudeRunner:
@@ -34,8 +35,9 @@ class FakeClaudeRunner:
         schema: type[BaseModel] | None = None,
         chrome: bool = False,
         timeout: int = 600,
+        hold_fds: tuple[int, ...] = (),
     ) -> Any:
-        self.calls.append(ClaudeCall(prompt, schema, chrome, timeout))
+        self.calls.append(ClaudeCall(prompt, schema, chrome, timeout, hold_fds))
         if not self._responses:
             raise AssertionError(f"FakeClaudeRunner: no response queued for prompt {prompt[:80]!r}")
         response = self._responses.popleft()

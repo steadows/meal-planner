@@ -65,14 +65,27 @@ class _PromptTemplate(Template):
 
 
 @overload
-def run(prompt: str, schema: type[M], chrome: bool = False, timeout: int = 600) -> M: ...
+def run(
+    prompt: str,
+    schema: type[M],
+    chrome: bool = False,
+    timeout: int = 600,
+    hold_fds: tuple[int, ...] = (),
+) -> M: ...
 @overload
-def run(prompt: str, schema: None = None, chrome: bool = False, timeout: int = 600) -> Any: ...
+def run(
+    prompt: str,
+    schema: None = None,
+    chrome: bool = False,
+    timeout: int = 600,
+    hold_fds: tuple[int, ...] = (),
+) -> Any: ...
 def run(
     prompt: str,
     schema: type[BaseModel] | None = None,
     chrome: bool = False,
     timeout: int = 600,
+    hold_fds: tuple[int, ...] = (),
 ) -> Any:
     """Run `claude -p` and return validated output.
 
@@ -86,6 +99,10 @@ def run(
     ENV_ALLOWLIST env, and a fresh empty temp dir as cwd. Plain runs get the ALLOWED_TOOLS,
     pre-approved; `chrome=True` runs get `--chrome` and no built-in tools. The run holds one of
     settings.claude_max_concurrent cross-process slots (settings.claude_lock_dir) throughout.
+
+    `hold_fds` are open fds each claude child inherits alongside its slot, so a lock the caller
+    holds through one (a job lock, cart's Chrome lock) lives as long as claude does, even if the
+    caller dies first (ADR-0001, Orphaned Chrome child). A closed fd stops claude starting.
 
     Raises ClaudeRunnerError (with raw_output) on a non-zero exit, an is_error result, output
     that fails parsing or validation, or a timeout. A plain run retries once on anything except a
@@ -101,7 +118,7 @@ def run(
         attempt = 1
         while True:
             try:
-                return _parse(*_run_once(command, prompt, timeout, slot_fd), schema)
+                return _parse(*_run_once(command, prompt, timeout, (slot_fd, *hold_fds)), schema)
             except _TimedOut as exc:
                 logger.warning("claude timed out after %ss", timeout)
                 raise ClaudeRunnerError(f"claude timed out after {timeout}s", str(exc)) from None
@@ -186,7 +203,9 @@ def _slot() -> Iterator[int]:
         time.sleep(_SLOT_POLL_S)
 
 
-def _run_once(command: list[str], prompt: str, timeout: int, slot_fd: int) -> tuple[int, str, str]:
+def _run_once(
+    command: list[str], prompt: str, timeout: int, pass_fds: tuple[int, ...]
+) -> tuple[int, str, str]:
     with tempfile.TemporaryDirectory(prefix="meals-claude-") as cwd:
         try:
             process = subprocess.Popen(
@@ -198,7 +217,7 @@ def _run_once(command: list[str], prompt: str, timeout: int, slot_fd: int) -> tu
                 env=_child_env(),
                 text=True,
                 start_new_session=True,
-                pass_fds=(slot_fd,),
+                pass_fds=pass_fds,
             )
         except OSError as exc:
             raise ClaudeRunnerError(f"could not start {command[0]!r}: {exc}") from exc
