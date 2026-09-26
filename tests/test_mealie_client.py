@@ -1,4 +1,5 @@
 import json
+import logging
 import uuid
 from datetime import date
 from typing import Any
@@ -584,6 +585,10 @@ NON_PUBLIC_URLS = [
     pytest.param("http://127.1/", id="inet-aton-short"),
     # The host is judged as the fetcher (httpx) parses it, IDNA-normalised: this is 127.0.0.1.
     pytest.param("http://127。0.0.1/", id="idna-dot-loopback"),
+    # A host that isn't an IP must be a DNS name as sent on the wire; httpx keeps these as
+    # "%20127.0.0.1" and "127.0.0.1%20", which no IP check recognises.
+    pytest.param("http:// 127.0.0.1/", id="space-before-loopback"),
+    pytest.param("http://127.0.0.1 /", id="space-after-loopback"),
 ]
 
 PUBLIC_URLS = [
@@ -618,6 +623,24 @@ def test_import_url_sends_a_public_url_to_mealie_unchanged(
 
     [request] = stub.requests
     assert json.loads(request.content)["url"] == url
+
+
+def test_import_url_keeps_a_refused_urls_credentials_out_of_the_error_and_logs(
+    client: HttpMealieClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING, logger="meals.mealie_client")
+
+    with pytest.raises(ValueError) as refused:
+        client.import_url("https://user:s3cretpw@example.com/r")
+
+    assert "s3cretpw" not in str(refused.value) and "user:" not in str(refused.value)
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "meals.mealie_client" and record.levelno == logging.WARNING
+    ]
+    assert warnings, "the refusal should still be logged"
+    assert [message for message in warnings if "s3cretpw" in message] == []
 
 
 BAD_SLUGS = [
