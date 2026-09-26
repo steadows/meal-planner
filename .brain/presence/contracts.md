@@ -2,16 +2,16 @@
 type: presence
 agent: contracts
 feature: "Shared contracts: config, db schema + migrations, pydantic contracts, claude_runner, fakes"
-status: idle
-phase: "#18 (MealieUnavailable + MEALS_LIVE_CLAUDE gate, 9db72c1) and #21 (ADR-0001 asks: job_run migration 3, run(hold_fds), layer tiers, 8c24816) both MERGED 2026-09-26; base feat/contracts = main 8c24816. Next when scheduled: confirm_stocked Pantry Protocol + paired ask-date fix (pantry #19 is merged) on feat/contracts-confirm-stocked"
+status: active
+phase: "Lane 0 (contracts), supporting Phase 3 / Lane B: PR A on feat/contracts-confirm-stocked (Steve go via pm, 17:01 EDT): confirm_stocked joins the Pantry Protocol + stale fake docstring + PLAN pantry row; no behaviour change. F2 (don't freeze a computed ask date) split out as ONE joint PR with pantry 2b, since either half alone breaks test_pantry_parity"
 owns_branches: ["contracts"]
 plan: docs/PLAN.md (Implementation plan, Concurrency lanes)
 tracker_epic: none
 current_worktree: /Users/stevemeadows/meal-planner-contracts
-current_branch: feat/contracts
+current_branch: feat/contracts-confirm-stocked
 current_ticket: none
-touches: [.brain/presence/mealie.md, .brain/presence/pantry.md, .brain/presence/wiring.md]
-updated: 2026-09-26T20:59:27Z
+touches: [meals/contracts.py, meals/fakes/pantry.py, tests/test_contracts.py, docs/PLAN.md]
+updated: 2026-09-26T21:05:00Z
 ---
 Lane 0 — everything else builds on this. Deliver the database schema from PLAN.md (Pantry rules → Table schema), the pydantic models (WeekProposal, RecipeOption, Intent, CartList, CartReport), `claude_runner.run()` wrapping `claude -p` / `claude --chrome -p` with timeouts and JSON validation, and a fake for every contract in `meals/fakes/`. Done when fakes pass and one real `claude -p` call returns valid JSON. Merge first; then set status: done to unblock [[contracts-pantry-waiting-on]], [[contracts-mealie-waiting-on]], [[contracts-search-waiting-on]], [[bot-contracts-waiting-on]] and [[cart-contracts-waiting-on]]. Sole owner of the contracts rule: [[bot-cart-contracts-mealie-pantry-search-wiring-shared-rule]].
 
