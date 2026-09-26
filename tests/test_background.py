@@ -14,14 +14,15 @@ import logging
 import subprocess
 import sys
 import threading
-from collections.abc import Callable, Coroutine, Sequence
+from collections.abc import Callable, Coroutine, Iterator, Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 from telegram import Update
-from telegram.error import NetworkError
+from telegram.constants import MessageLimit
+from telegram.error import BadRequest, NetworkError
 from telegram.ext import ContextTypes
 
 from meals import background
@@ -41,7 +42,8 @@ RESULT = "three sheet-pan dinners"
 
 class FakeMessage:
     """Records each reply as (text, kwargs). From reply number `fail_from` on (0-based), the
-    reply is recorded and then raises, like a send Telegram rejected."""
+    reply is recorded and then raises, like a send Telegram rejected. A text over Telegram's
+    length limit is rejected unrecorded, as Telegram rejects it."""
 
     def __init__(self, fail_from: int | None = None) -> None:
         self.replies: list[tuple[str, dict[str, Any]]] = []
@@ -49,6 +51,8 @@ class FakeMessage:
 
     async def reply_text(self, text: str, **kwargs: Any) -> None:
         await asyncio.sleep(SEND_S)
+        if len(text) > MessageLimit.MAX_TEXT_LENGTH:
+            raise BadRequest("Message is too long")
         self.replies.append((text, kwargs))
         if self._fail_from is not None and len(self.replies) > self._fail_from:
             raise NetworkError("fake send failed")
@@ -103,8 +107,12 @@ class Render:
 
 
 @pytest.fixture(autouse=True)
-def _nothing_in_flight(monkeypatch: pytest.MonkeyPatch) -> None:
+def _nothing_in_flight(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr(background, "_in_flight", 0)
+    yield
+    assert background._in_flight == 0, (
+        f"the test ended with {background._in_flight} slot(s) in flight: a path leaked its slot"
+    )
 
 
 async def _start(
@@ -210,6 +218,28 @@ def test_second_update_is_acknowledged_while_the_first_work_is_blocked() -> None
     assert _texts(second) == ["second ack", f"rendered: {RESULT}"]
 
 
+def test_render_over_telegrams_limit_is_sent_as_several_plain_text_replies() -> None:
+    limit = MessageLimit.MAX_TEXT_LENGTH
+    lines = "".join(
+        f"{n}. Sheet-pan chicken fajitas, option {n}: peppers, onions\n" for n in range(400)
+    )
+    text = lines[: 2 * limit + 10]
+    assert len(text) == 2 * limit + 10
+    message, context = FakeMessage(), FakeContext()
+
+    async def scenario() -> None:
+        await _start(message, context, lambda: RESULT, lambda _: text)
+        await _drain(context)
+
+    asyncio.run(scenario())
+
+    ack, *chunks = _texts(message)
+    assert not [chunk for chunk in chunks if chunk.startswith("Sorry")], chunks
+    assert ack == ACK
+    assert all(len(chunk) <= limit for chunk in chunks)
+    assert "".join(chunks) == text
+
+
 # ── start: the in-flight cap ─────────────────────────────────────────────────
 
 
@@ -241,6 +271,42 @@ def test_request_beyond_the_cap_gets_busy_and_its_work_never_runs() -> None:
 
     assert _texts(refused) == [BUSY_TEXT]
     assert not refused_work.started.is_set()
+    for message in running:
+        assert _texts(message) == [ACK, "rendered: unblocked"]
+
+
+def test_busy_reply_that_fails_to_send_does_not_escape_start(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="meals.background")
+    context = FakeContext()
+    blockers = [Blocker() for _ in range(MAX_IN_FLIGHT)]
+    running = [FakeMessage() for _ in blockers]
+    refused, refused_work = FakeMessage(fail_from=0), Blocker()
+
+    async def scenario() -> None:
+        try:
+            for message, blocker in zip(running, blockers, strict=True):
+                await _start(message, context, blocker, Render())
+            await _wait_until(lambda: all(b.started.is_set() for b in blockers), "the works ran")
+            try:
+                await _start(refused, context, refused_work, Render())
+            except NetworkError as exc:
+                pytest.fail(f"the failed BUSY send escaped start(): {exc!r}")
+        finally:
+            for blocker in [*blockers, refused_work]:
+                blocker.release.set()
+        await _drain(context)
+
+    asyncio.run(scenario())
+
+    assert _texts(refused) == [BUSY_TEXT]
+    assert not refused_work.started.is_set()
+    assert any(
+        record.exc_info and isinstance(record.exc_info[1], NetworkError)
+        for record in caplog.records
+        if record.name == "meals.background"
+    ), "the failed BUSY send must be logged with its traceback"
     for message in running:
         assert _texts(message) == [ACK, "rendered: unblocked"]
 
@@ -367,11 +433,13 @@ def test_hung_work_gets_timeout_text_and_nothing_after_its_thread_ends(
     context = FakeContext()
     hung, hung_render, message = Blocker(), Render(), FakeMessage()
     after, after_render = FakeMessage(), Render()
+    late_error = RuntimeError("the abandoned work failed after the deadline")
+    released_at: list[int] = []
 
     def hung_work() -> str:
         result = hung()
         if late == "raises":
-            raise RuntimeError("the abandoned work failed after the deadline")
+            raise late_error
         return result
 
     async def scenario() -> None:
@@ -384,6 +452,7 @@ def test_hung_work_gets_timeout_text_and_nothing_after_its_thread_ends(
                 if record.name == "meals.background" and record.levelno == logging.WARNING
             ], "the deadline must log a WARNING that the abandoned work still holds its slot"
         finally:
+            released_at.append(len(caplog.records))
             hung.release.set()
         await _wait_until(lambda: _in_flight() == 0, "the hung thread ended and freed its slot")
         # A late reply scheduled when the thread ended finishes before this whole request does.
@@ -395,6 +464,18 @@ def test_hung_work_gets_timeout_text_and_nothing_after_its_thread_ends(
     assert _texts(message) == [ACK, TIMEOUT_TEXT]
     assert hung_render.calls == []
     assert _texts(after) == [ACK, f"rendered: {RESULT}"]
+    # The "gave up" WARNING came before the release; this one comes after it.
+    ended = [
+        record
+        for record in caplog.records[released_at[0] :]
+        if record.name == "meals.background" and record.levelno == logging.WARNING
+    ]
+    assert len(ended) == 1, "the abandoned work ending must be logged once, at WARNING"
+    exc_info = ended[0].exc_info
+    if late == "raises":
+        assert exc_info and exc_info[1] is late_error
+    else:
+        assert not exc_info or exc_info[1] is None
 
 
 def test_slot_stays_held_after_the_deadline_until_the_thread_ends(
