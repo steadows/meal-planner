@@ -7,7 +7,7 @@ phase: waiting on contracts
 owns_branches: ["pantry"]
 plan: docs/PLAN.md (Implementation plan, Concurrency lanes)
 tracker_epic: none
-current_worktree: /Users/amap3i/meal-planner
+current_worktree: /Users/stevemeadows/meal-planner-pantry
 current_branch: feat/pantry
 current_ticket: none
 touches: [meals/pantry.py, meals/rollup.py, meals/seed_loader.py, meals/mcp_tools.py, tests/test_pantry.py, tests/test_rollup.py]

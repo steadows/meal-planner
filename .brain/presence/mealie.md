@@ -7,7 +7,7 @@ phase: waiting on contracts
 owns_branches: ["mealie"]
 plan: docs/PLAN.md (Implementation plan, Concurrency lanes)
 tracker_epic: none
-current_worktree: /Users/amap3i/meal-planner
+current_worktree: /Users/stevemeadows/meal-planner-mealie
 current_branch: feat/mealie
 current_ticket: none
 touches: [meals/mealie_client.py, docker/mealie/, tests/test_mealie_client.py]

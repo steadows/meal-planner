@@ -7,7 +7,7 @@ phase: waiting on contracts + existing-bot answers
 owns_branches: ["bot"]
 plan: docs/PLAN.md (Implementation plan, Concurrency lanes)
 tracker_epic: none
-current_worktree: /Users/amap3i/meal-planner
+current_worktree: /Users/stevemeadows/meal-planner-bot
 current_branch: feat/bot
 current_ticket: none
 touches: [meals/bot/, meals/prompts/intents/, tests/test_bot/]

@@ -7,7 +7,7 @@ phase: waiting on contracts
 owns_branches: ["search"]
 plan: docs/PLAN.md (Implementation plan, Concurrency lanes)
 tracker_epic: none
-current_worktree: /Users/amap3i/meal-planner
+current_worktree: /Users/stevemeadows/meal-planner-search
 current_branch: feat/search
 current_ticket: none
 touches: [meals/search.py, meals/planner.py, meals/prefs.yaml, meals/prompts/search/, meals/prompts/planner/, tests/test_search.py, tests/test_planner.py]

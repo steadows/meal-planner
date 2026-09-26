@@ -7,7 +7,7 @@ phase: waiting on contracts + pantry (spike first)
 owns_branches: ["cart"]
 plan: docs/PLAN.md (Implementation plan, Concurrency lanes)
 tracker_epic: none
-current_worktree: /Users/amap3i/meal-planner
+current_worktree: /Users/stevemeadows/meal-planner-cart
 current_branch: feat/cart
 current_ticket: none
 touches: [meals/cart.py, meals/prompts/cart/, tests/test_cart.py]

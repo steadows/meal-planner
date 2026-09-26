@@ -7,7 +7,7 @@ phase: waiting on pantry, mealie, search, bot
 owns_branches: ["wiring"]
 plan: docs/PLAN.md (Implementation plan, Concurrency lanes)
 tracker_epic: none
-current_worktree: /Users/amap3i/meal-planner
+current_worktree: /Users/stevemeadows/meal-planner-wiring
 current_branch: feat/wiring
 current_ticket: none
 touches: [meals/jobs.py, meals/__main__.py, deploy/, tests/test_jobs.py, tests/test_e2e.py]
