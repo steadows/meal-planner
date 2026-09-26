@@ -344,7 +344,7 @@ CREATE TABLE job_run (
 | 21 | Bot work piles up while both Claude slots are busy | MED | In-flight cap of 2; abandoned-work residual accepted |
 | 22 | Cook-day-evening approval recovered after midnight | MED → fixed | Persisted-week scan + explicit `--week`; expired → one message |
 | 23 | Telegram outage or SIGTERM after the result commits | HIGH → fixed | Claim stays unfinished; redelivery without re-acting; result preservation |
-| 24 | Duplicate Mealie entries after an ambiguous publish timeout | LOW | Accepted; the mealie lane's replace-the-week implementation |
+| 24 | Duplicate Mealie entries after an ambiguous publish timeout | LOW → fixed | Mealie lane's `set_meal_plan` replaces the week idempotently (PR #11, tested); needs a single publisher per week, which `reconcile`'s job lock gives |
 | 25 | Mac powered off through a whole window | accepted | PLAN fallback (reuse last week / manual loop) |
 | 26 | Reboot with no login (FileVault) → nothing runs | accepted | Updates set to manual install; log in after restarts |
 | 27 | Which Chrome profile an unattended run drives | accepted until the cart spike | The cart spike must prove it |

@@ -64,6 +64,7 @@ tr:last-child td { border-bottom: 0; }
 .sev { font-size: 11px; font-weight: 800; padding: 2px 7px; border-radius: 5px; white-space: nowrap; }
 .sev.CRITICAL { background: color-mix(in srgb, var(--bad) 25%, transparent); color: var(--bad); }
 .sev.HIGH { background: color-mix(in srgb, var(--warn) 22%, transparent); color: var(--warn); }
+.sev.LOW { background: var(--panel-2); color: var(--muted); }
 .sev.MED { background: color-mix(in srgb, var(--info) 18%, transparent); color: var(--info); }
 .sev.ACCEPT { background: var(--panel-2); color: var(--text); border: 1px dashed var(--muted); }
 .req { color: var(--bad); font-weight: 700; font-size: 12px; }
@@ -550,10 +551,9 @@ tr:last-child td { border-bottom: 0; }
 {
 "n": 24,
 "risk": "Duplicate Mealie entries after an ambiguous publish timeout",
-"sev": "ACCEPT",
-"mit": "Mealie lane implements set_meal_plan as replace-the-week",
-"accept": true,
-"required": true
+"sev": "LOW",
+"mit": "Fixed: set_meal_plan replaces the week idempotently (mealie PR #11); reconcile's lock gives a single publisher",
+"accept": true
 },
 {
 "n": 25,
@@ -656,7 +656,7 @@ tr:last-child td { border-bottom: 0; }
   }
 
   let sortKey = 'n', sortDir = 1;
-  const SEVRANK = { CRITICAL: 0, HIGH: 1, MED: 2, ACCEPT: 3 };
+  const SEVRANK = { CRITICAL: 0, HIGH: 1, MED: 2, LOW: 3, ACCEPT: 4 };
   function renderRisks() {
     const rows = [...state.risks].sort((a, b) => {
       const va = sortKey === 'sev' ? SEVRANK[a.sev] : a[sortKey], vb = sortKey === 'sev' ? SEVRANK[b.sev] : b[sortKey];
