@@ -21,7 +21,7 @@ from typing import Any, TypeVar, overload
 from pydantic import BaseModel, ValidationError
 
 from meals.config import get_settings
-from meals.contracts import ClaudeRunnerError
+from meals.contracts import ClaudeRunnerError, validate_claude_output
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +41,9 @@ MAX_ATTEMPTS = 2
 _SLOT_POLL_S = 0.1
 _KILL_DRAIN_S = 5
 _JSON_FENCE = re.compile(r"\A\s*```(?:json)?[ \t]*\n(.*?)\n?```\s*\Z", re.DOTALL)
+_PROMPT_PART = re.compile(
+    r"[a-z0-9_-]+"
+)  # no ".", "/" or "\": a lane or name can't leave PROMPTS_DIR
 
 
 class _TimedOut(Exception):
@@ -73,8 +76,10 @@ def run(
     """Run `claude -p` and return validated output.
 
     With `schema`: the model's JSON schema goes to `--json-schema`, and the returned
-    `structured_output` is validated into a model instance. Without: `result` parsed as JSON
-    (a surrounding ```json fence is stripped).
+    `structured_output` is validated into a model instance with `validate_claude_output`, which
+    refuses fields only trusted code may set. Without: `result` parsed as JSON (a surrounding
+    ```json fence is stripped); a caller that builds a model from it must use
+    `validate_claude_output` too.
 
     The prompt goes on stdin. The child runs with `--safe-mode --output-format json`, the
     ENV_ALLOWLIST env, and a fresh empty temp dir as cwd. Plain runs get the ALLOWED_TOOLS,
@@ -84,7 +89,8 @@ def run(
     Raises ClaudeRunnerError (with raw_output) on a non-zero exit, an is_error result, output
     that fails parsing or validation, or a timeout. A plain run retries once on anything except a
     timeout; a Chrome run is never retried, because it has side effects (a second run would
-    double the cart). On timeout the whole process group is killed.
+    double the cart). On timeout, and on any other exception while claude runs (Ctrl-C included),
+    the whole process group is killed; that exception propagates as is, without a retry.
     """
     command = _command(schema, chrome)
     attempts = 1 if chrome else MAX_ATTEMPTS
@@ -109,8 +115,13 @@ def load_prompt(lane: str, name: str, **variables: str) -> str:
     """Read PROMPTS_DIR/<lane>/<name>.md and fill `$placeholders`.
 
     A missing variable raises KeyError, never a half-filled prompt. A `$` not followed by a
-    placeholder name (e.g. "$35") is left as written.
+    placeholder name (e.g. "$35") is left as written. `lane` and `name` must each be lowercase
+    letters, digits, `_` or `-`, or ValueError is raised before any file is read, so neither can
+    reach outside PROMPTS_DIR.
     """
+    for part in (lane, name):
+        if not _PROMPT_PART.fullmatch(part):
+            raise ValueError(f"prompt lane and name must match {_PROMPT_PART.pattern}: {part!r}")
     template = (PROMPTS_DIR / lane / f"{name}.md").read_text(encoding="utf-8")
     return _PromptTemplate(template).substitute(variables)
 
@@ -193,6 +204,12 @@ def _run_once(command: list[str], prompt: str, timeout: int, slot_fd: int) -> tu
         except subprocess.TimeoutExpired:
             _kill_tree(process)
             raise _TimedOut(_raw(*_drain(process))) from None
+        except BaseException:
+            # Ctrl-C or any other error: start_new_session keeps the signal from reaching claude,
+            # so it would run on (for a Chrome run, still filling the cart). Same as subprocess.run.
+            _kill_tree(process)
+            process.wait()
+            raise
     return process.returncode, stdout, stderr
 
 
@@ -239,7 +256,7 @@ def _parse(returncode: int, stdout: str, stderr: str, schema: type[BaseModel] | 
         if "structured_output" not in envelope:
             raise ClaudeRunnerError("claude returned no structured_output", raw)
         try:
-            return schema.model_validate(envelope["structured_output"])
+            return validate_claude_output(schema, envelope["structured_output"])
         except ValidationError as exc:
             raise ClaudeRunnerError(f"output failed {schema.__name__} validation", raw) from exc
     result = envelope.get("result")
