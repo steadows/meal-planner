@@ -44,3 +44,18 @@ and don't re-raise dispositions recorded in `.context/reviews/p2-code-review.md`
 A table of U1–U5 with CLOSED or OPEN plus evidence. Then any regressions, each with file, line,
 severity (CRITICAL/HIGH/MEDIUM/LOW), the sequence and a fix. End with an overall verdict: **CLOSED**
 (nothing open, no regressions) or **NOT CLOSED**. List the files you actually read.
+
+## Pass 2 (after convergence 1)
+
+Convergence 1 (`.context/reviews/p2-convergence-1.md`) closed U2–U5 and left **U1 OPEN**: a signal
+just after `finish` commits, before it returns, still produced "job … failed" with empty-the-cart
+advice. The repair is RED-first: test 73081f3, fix 912b5b7 (decision D23b in `.context/seams/P2.md`).
+Its diff (both commits, `meals/` and `tests/`) is pre-written at
+`.context/reviews/p2-convergence-1-repairs.patch`. The suite is green: 964 passed.
+
+For pass 2, answer only: is **U1 now CLOSED**? Did the D23b change (the `_finish` wrapper and its
+`finishing` mark, the catch-all's early return, advice only for this run's own claimed fill)
+introduce a regression, shown with a concrete sequence? Check D12 (advice on a real mid-fill
+failure), D18 (a signal right after the claim), D23 (a signal during Inspect's redelivery), the
+Inspect notice path, and `_fail_quietly`. Same rules as above: single agent, no git/uv/pytest/python,
+findings only. End with **CLOSED** or **NOT CLOSED**.
