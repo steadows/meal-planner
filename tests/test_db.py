@@ -131,6 +131,24 @@ def test_migration_1_creates_exactly_the_plan_schema(
             assert actual == expected, table
 
 
+def test_migration_2_adds_next_ask_on_and_changes_nothing_else(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Seam map contracts-3-followup, Migration 2: a nullable DATE with no default, plus an index."""
+    monkeypatch.setattr(meals.db, "MIGRATIONS", meals.db.MIGRATIONS[:2])
+    expected_schema = PLAN_SCHEMA | {
+        "pantry_item": PLAN_SCHEMA["pantry_item"] | {"next_ask_on": ("DATE", 0, None, 0)}
+    }
+
+    with _open(tmp_path) as conn:
+        assert _version(conn) == 2
+        assert _tables(conn) == set(expected_schema)
+        for table, expected in expected_schema.items():
+            info = conn.execute(f"PRAGMA table_info({table})").fetchall()
+            actual = {row[1]: (row[2].upper(), row[3], row[4], row[5]) for row in info}
+            assert actual == expected, table
+
+
 @pytest.mark.parametrize(
     ("table", "column"), [("pantry_item", "name"), ("weekly_plan", "week_start")]
 )
@@ -206,6 +224,33 @@ def test_foreign_keys_are_enforced(tmp_path: Path) -> None:
         assert _column(conn, "SELECT item_id FROM purchase_log") == [item_id]
 
 
+LOG_PURCHASE = "INSERT INTO purchase_log (item_id, purchased_on) VALUES (?, ?)"
+
+
+def test_purchase_log_holds_one_row_per_item_per_day(tmp_path: Path) -> None:
+    """Migration 2's UNIQUE (item_id, purchased_on): per item and day, not per item or per day."""
+    with _open(tmp_path) as conn:
+        _insert(conn, "pantry_item", name="olive oil")
+        _insert(conn, "pantry_item", name="tahini")
+        oil, tahini = _column(conn, "SELECT id FROM pantry_item ORDER BY id")
+        conn.execute(LOG_PURCHASE, (oil, "2026-09-20"))
+        conn.execute(LOG_PURCHASE, (oil, "2026-09-27"))
+        conn.execute(LOG_PURCHASE, (tahini, "2026-09-20"))
+
+        # The key leaves out `source` on purpose: a second source is still the same day's purchase.
+        with pytest.raises(sqlite3.IntegrityError, match="UNIQUE"):
+            conn.execute(
+                "INSERT INTO purchase_log (item_id, purchased_on, source) VALUES (?, ?, 'manual')",
+                (oil, "2026-09-20"),
+            )
+        rows = conn.execute("SELECT item_id, purchased_on FROM purchase_log ORDER BY id")
+        assert [tuple(row) for row in rows] == [
+            (oil, "2026-09-20"),
+            (oil, "2026-09-27"),
+            (tahini, "2026-09-20"),
+        ]
+
+
 # ── connection settings ──────────────────────────────────────────────────────
 
 
@@ -248,6 +293,59 @@ def test_reopening_is_idempotent_and_keeps_data(tmp_path: Path) -> None:
         assert _version(reopened) == len(meals.db.MIGRATIONS)
         assert meals.db.migrate(reopened) == len(meals.db.MIGRATIONS)
         assert _column(reopened, "SELECT name FROM pantry_item") == ["tahini"]
+
+
+def test_migration_2_upgrades_a_v1_database_and_keeps_its_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    migrations = meals.db.MIGRATIONS
+    monkeypatch.setattr(meals.db, "MIGRATIONS", migrations[:1])
+    with _open(tmp_path) as v1:
+        _insert(v1, "pantry_item", aliases='["evoo"]', typical_interval_days=70)
+        (item_id,) = _column(v1, "SELECT id FROM pantry_item")
+        v1.execute(
+            "INSERT INTO purchase_log (item_id, purchased_on, qty, price_cents) VALUES (?, ?, ?, ?)",
+            (item_id, "2026-07-23", 1.0, 899),
+        )
+        v1.commit()
+
+    monkeypatch.setattr(meals.db, "MIGRATIONS", migrations[:2])
+    with _open(tmp_path) as conn:
+        assert _version(conn) == 2
+        items = conn.execute(
+            "SELECT id, name, aliases, category, typical_interval_days, next_ask_on FROM pantry_item"
+        )
+        assert [tuple(row) for row in items] == [
+            (item_id, "olive oil", '["evoo"]', "staple", 70, None)
+        ]
+        purchases = conn.execute("SELECT item_id, purchased_on, qty, price_cents FROM purchase_log")
+        assert [tuple(row) for row in purchases] == [(item_id, "2026-07-23", 1.0, 899)]
+        with pytest.raises(sqlite3.IntegrityError, match="UNIQUE"):
+            conn.execute(LOG_PURCHASE, (item_id, "2026-07-23"))
+
+
+def test_migration_2_refuses_duplicate_purchases_and_leaves_v1_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Seam map: non-destructive, so it fails atomically rather than deleting purchase history."""
+    path = tmp_path / "pantry.sqlite"
+    migrations = meals.db.MIGRATIONS
+    monkeypatch.setattr(meals.db, "MIGRATIONS", migrations[:1])
+    with _open(tmp_path) as v1:
+        _insert(v1, "pantry_item")
+        (item_id,) = _column(v1, "SELECT id FROM pantry_item")
+        v1.executemany(LOG_PURCHASE, [(item_id, "2026-09-20")] * 2)
+        v1.commit()
+
+    monkeypatch.setattr(meals.db, "MIGRATIONS", migrations[:2])
+    with pytest.raises(sqlite3.DatabaseError):
+        meals.db.get_db(path).close()
+    with closing(sqlite3.connect(path)) as check:
+        assert _version(check) == 1
+        assert "next_ask_on" not in _column(
+            check, "SELECT name FROM pragma_table_info('pantry_item')"
+        )
+        assert check.execute("SELECT count(*) FROM purchase_log").fetchone()[0] == 2
 
 
 def test_appended_migration_is_applied_once_in_order(
