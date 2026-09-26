@@ -13,7 +13,8 @@ def _ask_date(item: PantryItem) -> date | None:
         return item.next_ask_on
     if item.typical_interval_days is None or item.last_purchased is None:
         return None
-    return item.last_purchased + timedelta(days=-(-9 * item.typical_interval_days // 10))
+    ninety_percent = -(-9 * item.typical_interval_days // 10)  # ceil, in integers: no float
+    return item.last_purchased + timedelta(days=ninety_percent)
 
 
 def _is_due(item: PantryItem, on: date) -> bool:
