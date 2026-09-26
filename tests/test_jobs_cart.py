@@ -14,6 +14,7 @@ records any SIGTERM or SIGALRM that reaches the test instead of run_job's own ha
 """
 
 import fcntl
+import logging
 import os
 import signal
 import sqlite3
@@ -217,7 +218,7 @@ def job(db: sqlite3.Connection, tmp_path: Path, fake_mealie: FakeMealieClient) -
 
 
 def _run(
-    job: Job, name: str, now: datetime, week: date | None = None, *, retry: bool = False
+    job: Job, name: "jobs.JobName", now: datetime, week: date | None = None, *, retry: bool = False
 ) -> int:
     return jobs.run_job(name, job.deps, now=now, week=week, retry=retry)
 
@@ -476,13 +477,18 @@ def test_a_finished_claim_exits_0_and_does_nothing(job: Job) -> None:
 
 
 @pytest.mark.parametrize("outcome", ["interrupted", "failed"])
-def test_retry_cart_resets_an_interrupted_or_failed_claim_and_fills(job: Job, outcome: str) -> None:
-    # ADR Retries :173-180; seam map reset_for_retry.
+def test_retry_cart_resets_an_interrupted_or_failed_claim_and_fills(
+    job: Job, outcome: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    # ADR Retries :173-180 (the prior row goes to the job log before the reset); seam map
+    # reset_for_retry.
+    caplog.set_level(logging.DEBUG)
     _seed_week(job, "approved")
     _seed_claim(job, outcome=outcome, detail="Meijer asked for a login")
 
     _run(job, "cart_fill", SUN_10, W, retry=True)
 
+    assert "Meijer asked for a login" in caplog.text, "the prior row is logged before the reset"
     assert len(job.filler.calls) == 1
     claim = _claim(job)
     assert claim["outcome"] == "done"
@@ -846,6 +852,7 @@ def test_reconcile_spawns_a_fill_only_for_weeks_that_need_one(
 
     assert job.spawner.calls == ([WEEK_ARGS] if spawns else [])
     assert _snapshot(job)[0] == claims_before
+    assert job.mealie.meal_plans == {}, "a proposed week, or one already published, isn't published"
 
 
 @pytest.mark.parametrize(

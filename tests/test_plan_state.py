@@ -38,9 +38,8 @@ from meals.db import get_db
 
 _MISSING: ImportError | None = None
 try:
-    from meals.plan_state import JobRun, PlanStateError, StoredWeek
-
     from meals import plan_state
+    from meals.plan_state import JobRun, PlanStateError, StoredWeek
 except ImportError as exc:  # RED: meals/plan_state.py isn't written yet
     _MISSING = exc
 
@@ -244,9 +243,10 @@ def test_claims_are_one_per_job_and_week(
     assert len(_snapshot(reader)[0]) == 3
 
 
-def _claim_in_child(path: str, go: Event, results: "Queue[str]") -> None:
+def _claim_in_child(path: str, ready: "Queue[str]", go: Event, results: "Queue[str]") -> None:
     conn = get_db(Path(path))
     try:
+        ready.put("ready")  # the connection is open; only the claim is left
         go.wait(RACE_WAIT_S)
         results.put(str(plan_state.claim(conn, "cart_fill", W)))
     except Exception as exc:  # reported to the parent, which fails the test with it
@@ -262,11 +262,16 @@ def test_two_processes_racing_one_claim_get_exactly_one_claimed(
     path = db.execute("PRAGMA database_list").fetchone()["file"]
     context = multiprocessing.get_context("spawn")
     go = context.Event()
+    ready: Queue[str] = context.Queue()
     results: Queue[str] = context.Queue()
-    children = [context.Process(target=_claim_in_child, args=(path, go, results)) for _ in range(2)]
+    children = [
+        context.Process(target=_claim_in_child, args=(path, ready, go, results)) for _ in range(2)
+    ]
     try:
         for child in children:
             child.start()
+        for _ in children:  # both have started and opened the database before either claims
+            ready.get(timeout=RACE_WAIT_S)
         go.set()
         outcomes = sorted(results.get(timeout=RACE_WAIT_S) for _ in children)
     finally:
@@ -656,17 +661,19 @@ def test_get_run_reads_started_at_as_utc(db: sqlite3.Connection) -> None:
 def test_running_is_the_oldest_unfinished_claim_for_the_job_in_any_week(
     db: sqlite3.Connection,
 ) -> None:
-    # Seam map `running`: the lock holder's week may not be the waiter's target.
+    # Seam map `running`: the lock holder's week may not be the waiter's target. "Oldest" is by
+    # started_at (dispatcher ruling after the watchdog pass): W's claim started before PRIOR's, so
+    # ordering by week would pick the wrong one.
     _seed_claim(db, "cart_fill", date(2026, 9, 13), outcome="done", started="2026-09-12 08:00:00")
     _seed_claim(db, "cart_fill", PRIOR, started="2026-09-26 13:05:00")
-    _seed_claim(db, "cart_fill", W, started="2026-09-27 01:00:00")
+    _seed_claim(db, "cart_fill", W, started="2026-09-26 09:30:00")
     _seed_claim(db, "sat_propose", date(2026, 9, 6), started="2026-09-05 12:00:00")
 
     run = plan_state.running(db, "cart_fill")
 
     assert run is not None
-    assert (run.week_start, run.outcome) == (PRIOR, None)
-    assert run.started_at == datetime(2026, 9, 26, 13, 5, tzinfo=UTC)
+    assert (run.week_start, run.outcome) == (W, None)
+    assert run.started_at == datetime(2026, 9, 26, 9, 30, tzinfo=UTC)
     assert plan_state.running(db, "reconcile") is None
 
 

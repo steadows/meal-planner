@@ -191,7 +191,7 @@ def job(db: sqlite3.Connection, tmp_path: Path, fake_mealie: FakeMealieClient) -
     reader.close()
 
 
-def _run(job: Job, name: str, now: datetime, *, retry: bool = False) -> int:
+def _run(job: Job, name: "jobs.JobName", now: datetime, *, retry: bool = False) -> int:
     return jobs.run_job(name, job.deps, now=now, retry=retry)
 
 
@@ -385,18 +385,22 @@ def test_a_week_inserted_by_someone_else_mid_run_finishes_quietly(job: Job) -> N
 @pytest.mark.parametrize(
     ("stored", "now", "outcome", "expect"),
     [
-        pytest.param(True, _local(2026, 9, 26, 11), "done", STORED_PICK, id="resent-in-window"),
-        pytest.param(True, _local(2026, 9, 26, 20, 30), "failed", None, id="not-sent-after-20:00"),
-        pytest.param(False, _local(2026, 9, 26, 20, 30), "interrupted", "resend plan", id="notice"),
+        pytest.param(
+            "proposed", _local(2026, 9, 26, 11), "done", STORED_PICK, id="resent-in-window"
+        ),
+        pytest.param("approved", _local(2026, 9, 26, 11), "failed", None, id="approved-not-resent"),
+        pytest.param("proposed", _local(2026, 9, 26, 20, 30), "failed", None, id="after-20:00"),
+        pytest.param(None, _local(2026, 9, 26, 20, 30), "interrupted", "resend plan", id="notice"),
     ],
 )
 def test_an_unfinished_sat_propose_claim_is_settled_before_the_window_is_checked(
-    job: Job, stored: bool, now: datetime, outcome: str, expect: str | None
+    job: Job, stored: str | None, now: datetime, outcome: str, expect: str | None
 ) -> None:
-    # ADR :124-135 (inspect before decide; a proposal outside its window is never sent) and the
-    # sat_propose notice (:169); seam map "Inspect is one step".
-    if stored:
-        _seed_week(job, "proposed")
+    # ADR :124-135 (inspect before decide; the proposal is re-sent only while proposed and within
+    # its window, else finish failed) and the sat_propose notice (:169); seam map "Inspect is one
+    # step".
+    if stored is not None:
+        _seed_week(job, stored)
     _seed_claim(job, "sat_propose")
 
     _run(job, "sat_propose", now)
@@ -737,6 +741,30 @@ def test_an_unfinished_autoapprove_claim_is_settled_by_inspect(
 
 
 # ── end to end ───────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("name", ["sun_autoapprove", "sat_nudge"])
+def test_no_claim_finishes_before_its_message_is_delivered(job: Job, name: "jobs.JobName") -> None:
+    # ADR :147-149: a send that exhausts its retries leaves the claim unfinished, and the next tick
+    # redelivers it through Inspect.
+    if name == "sun_autoapprove":
+        _seed_week(job, "cart_filled", PRIOR, plan=_proposal(PRIOR, LAST_PICK), ref="plan-20")
+        _seed_week(job, "proposed")
+        first, second = SUN_8, _local(2026, 9, 27, 9)
+    else:
+        first, second = _local(2026, 9, 26, 18), _local(2026, 9, 26, 19)
+        _ready_to_nudge(job, W, first)
+    job.telegram.down = True
+
+    _run(job, name, first)
+
+    assert _claim(job, name)["outcome"] is None, "no claim finishes before its message is delivered"
+    job.telegram.down = False
+
+    _run(job, name, second)
+
+    _one_message(job)
+    assert _claim(job, name)["outcome"] == "done"
 
 
 def test_a_proposal_that_missed_saturday_is_never_sent_and_sunday_says_so(job: Job) -> None:

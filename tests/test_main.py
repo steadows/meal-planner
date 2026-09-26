@@ -13,7 +13,7 @@ nothing, and handlers main adds are removed afterwards.
 """
 
 import logging
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
@@ -22,10 +22,11 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from meals import background
+from meals import background, planner
 from meals.config import PROJECT_ROOT, Settings
 from meals.contracts import Components, WeekProposal
 from meals.mealie_client import HttpMealieClient
+from meals.pantry import SqlitePantry
 
 _MISSING: ImportError | None = None
 try:
@@ -56,10 +57,13 @@ class RunJobSpy:
         self.calls: list[dict[str, Any]] = []
         self.code = 0
         self.log_files: list[Path] = []
+        self.with_deps: Callable[[Any], object] | None = None  # runs on the live Deps
 
     def __call__(
         self, name: str, deps: Any, *, now: datetime, week: date | None = None, retry: bool = False
     ) -> int:
+        if self.with_deps is not None:
+            self.with_deps(deps)
         tables = {row[0] for row in deps.conn.execute("SELECT name FROM sqlite_master")}
         try:
             deps.fill(PLAN, ())
@@ -242,3 +246,30 @@ def test_the_job_log_is_data_logs_jobs_log_under_the_project_root(run_job: RunJo
     _main(["job", "reconcile", *NOW])
 
     assert PROJECT_ROOT / "data" / "logs" / "jobs.log" in run_job.log_files
+
+
+def test_propose_is_the_planner_bound_to_the_real_pantry_and_the_mealie_client(
+    run_job: RunJobSpy, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Seam map `__main__`: `planner.propose` bound to SqlitePantry and the Mealie client. The planner
+    # is replaced by a recorder, so nothing reaches Claude or Mealie.
+    seen: list[dict[str, Any]] = []
+
+    def record_propose(week_start: date, custody: str, **kwargs: Any) -> WeekProposal:
+        seen.append({"week": week_start, "custody": custody} | kwargs)
+        return PLAN
+
+    _replace_everywhere(monkeypatch, planner.propose, record_propose, planner, cli)
+    run_job.with_deps = lambda deps: deps.propose(date(2026, 9, 27), "wed+sat_sun", ())
+
+    _main(["job", "sat_propose", *NOW])
+
+    assert len(seen) == 1, seen
+    call = seen[0]
+    assert (call["week"], call["custody"], tuple(call["recent"])) == (
+        date(2026, 9, 27),
+        "wed+sat_sun",
+        (),
+    )
+    assert isinstance(call["pantry"], SqlitePantry)
+    assert call["mealie"] is run_job.calls[0]["deps"].mealie
