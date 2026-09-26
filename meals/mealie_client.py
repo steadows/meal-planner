@@ -201,25 +201,23 @@ class HttpMealieClient:
     def get_recipe(self, slug: str) -> RecipeOption:
         recipe = self._fetch_recipe(slug)
         seconds = recipe.prep_time_seconds
-        # Trusted code: only the client may set mealie_slug (contracts.TRUSTED). Validating, not
-        # model_copy, so the slug charset is checked too.
-        return RecipeOption.model_validate(
-            {
-                "name": recipe.name or slug,
-                "url": recipe.org_url or "",
-                "source": _source(recipe.org_url),
-                "hands_on_min": _minutes(recipe.prep_time) if seconds is None else seconds // 60,
-                "servings": _servings(recipe),
-                "batch_ok": any(tag.slug == BATCH_OK_TAG for tag in recipe.tags or ()),
-                "fit_note": "",
-                "ingredients": self._ingredients(recipe.recipe_ingredient),
-                "steps": tuple(
-                    step.text for step in recipe.recipe_instructions or () if step.text.strip()
-                ),
-                "mealie_slug": slug,
-            },
-            context={TRUSTED: True},
+        option = RecipeOption(
+            name=recipe.name or slug,
+            url=recipe.org_url or "",
+            source=_source(recipe.org_url),
+            hands_on_min=_minutes(recipe.prep_time) if seconds is None else seconds // 60,
+            servings=_servings(recipe),
+            batch_ok=any(tag.slug == BATCH_OK_TAG for tag in recipe.tags or ()),
+            fit_note="",
+            ingredients=self._ingredients(recipe.recipe_ingredient),
+            steps=tuple(
+                step.text for step in recipe.recipe_instructions or () if step.text.strip()
+            ),
         )
+        # The scraped fields above go through the untrusted path; only the slug is added under
+        # contracts.TRUSTED. Revalidated rather than model_copy'd, which would skip its checks.
+        fields = option.model_dump() | {"mealie_slug": slug}
+        return RecipeOption.model_validate(fields, context={TRUSTED: True})
 
     def list_by_tag(self, tag: str) -> tuple[str, ...]:
         if not _SLUG.fullmatch(tag):
