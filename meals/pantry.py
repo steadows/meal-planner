@@ -60,6 +60,7 @@ class _Existing(NamedTuple):
     id: int
     name: str
     aliases: tuple[str, ...]
+    category: str
     typical_interval_days: int | None
 
 
@@ -340,26 +341,37 @@ class SqlitePantry:
             )
 
     def _update_from_seed(self, item: _Existing, seed: SeedItem) -> None:
-        interval = item.typical_interval_days
-        learning_owns_it = (
-            seed.category == "staple"
-            and len(self._purchase_dates(item.id)) >= LEARN_AFTER_PURCHASES
-        )
-        if seed.typical_interval_days is not None and not learning_owns_it:
-            interval = seed.typical_interval_days
-        columns = {**_product_map(seed), "typical_interval_days": interval}
+        columns = {**_product_map(seed), "typical_interval_days": self._seeded_interval(item, seed)}
         assignments = ", ".join(f"{column} = ?" for column in columns)
         self._conn.execute(
             f"UPDATE pantry_item SET {assignments}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
             (*columns.values(), item.id),
         )
 
+    def _seeded_interval(self, item: _Existing, seed: SeedItem) -> int | None:
+        """The interval an existing item ends up with after a seed row. Once a staple has enough
+        purchase dates, learning owns it: kept if it was already a staple (learning has run),
+        learned now if the seed has just promoted it (learning never ran for other categories).
+        Otherwise the seed's guess, if it gives one."""
+        dates = self._purchase_dates(item.id)
+        if seed.category == "staple" and len(dates) >= LEARN_AFTER_PURCHASES:
+            return item.typical_interval_days if item.category == "staple" else _median_gap(dates)
+        if seed.typical_interval_days is not None:
+            return seed.typical_interval_days
+        return item.typical_interval_days
+
     def _existing_rows(self) -> tuple[_Existing, ...]:
         rows = self._conn.execute(
-            "SELECT id, name, aliases, typical_interval_days FROM pantry_item ORDER BY id"
+            "SELECT id, name, aliases, category, typical_interval_days FROM pantry_item ORDER BY id"
         ).fetchall()
         return tuple(
-            _Existing(row["id"], row["name"], _stored_aliases(row), row["typical_interval_days"])
+            _Existing(
+                row["id"],
+                row["name"],
+                _stored_aliases(row),
+                row["category"],
+                row["typical_interval_days"],
+            )
             for row in rows
         )
 

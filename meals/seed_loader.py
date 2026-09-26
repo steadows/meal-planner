@@ -125,7 +125,10 @@ def read_seed_csv(path: Path) -> tuple[SeedItem, ...]:
     """
     with path.open(encoding="utf-8-sig", newline="") as file:
         reader = csv.DictReader(file, strict=True)  # a bad quote is an error, not a merged row
-        header = [column.strip() for column in reader.fieldnames or ()]
+        try:
+            header = [column.strip() for column in reader.fieldnames or ()]
+        except csv.Error as error:
+            raise SeedError([f"row 1 (header): malformed CSV ({error})"]) from error
         problems = _header_problems(header)
         if problems:
             raise SeedError(problems)
