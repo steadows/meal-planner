@@ -11,7 +11,7 @@ current_worktree: /Users/stevemeadows/meal-planner-pm
 current_branch: feat/pm
 current_ticket: none
 touches: [docs/PLAN.md, CLAUDE.md, .claude/settings.json, .gitignore, .github/, .brain/presence/, .brain/connections/, .brain/journal/]
-updated: 2026-09-26T14:23:15Z
+updated: 2026-09-26T14:28:49Z
 ---
 Coordination lane, not a build lane — owns no files under `meals/`. Job: periodic sweep of `.brain/` (presence notes, `connections/`, journal) to catch stalled lanes, unresolved `waiting-on` edges, and merge-order violations against the diagram in PLAN.md (`Concurrency lanes`); message a stuck lane; keep this note's `status` honest. Comms: live `SendMessage` between lanes (Steve, 2026-09-25) — do NOT arm a watcher on `dm/pm/pending`.
 
@@ -69,3 +69,9 @@ Pre-checked on 2026-09-25: none of these files existed, `~/.gitconfig` had no in
 - [ ] **Queued for Steve:** the CLAUDE.md `seed_loader` entry-point word; `CLAUDE_LOCK_DIR` in `.env.example`; the `/steadows-verify` subagent naming fix. See `~/meal-planner-pm/.context/task-master-2026-09-26.md`.
 - [ ] **ADR-0001 deferred follow-ups (not v1):** a `python -m meals doctor` command (env, claude probe, launchd state, lock holders), and an outside heartbeat or uptime alert for "the Mac is down". File as backlog when Steve wants them.
 - [ ] **Optional for Steve:** set macOS updates to download but not auto-install (ADR-0001 risk #26: FileVault means nothing runs after a reboot until he logs in).
+- [ ] **mealie (merged #11, lane done) punch list:**
+  - [[mealie]] owns the `mealie_slug` TRUSTED one-liner once contracts #13 merges; pm pings mealie then.
+  - Steve owns the Lane A live Mealie check (compose up, change the default login, `MEALIE_URL`/`MEALIE_TOKEN` in `.env`, then `uv run pytest -m integration tests/test_mealie_client_integration.py`) and the Phase 2 phone path (`tailscale serve --bg 9925`, plus a matching `MEALIE_BASE_URL`).
+  - Deferred: duplicate-import detection (a re-import makes "Name (1)"); plan-entry ownership via a dedicated Mealie bot user.
+  - LOW: the Mealie image is pinned by tag, not digest; double tag I/O.
+  - Handoff: `~/meal-planner-mealie/.context/handoffs/HANDOFF-2026-09-26-lane-c-mealie.md`.
