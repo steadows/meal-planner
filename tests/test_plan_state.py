@@ -620,19 +620,43 @@ def test_recent_proposals_are_approved_or_later_before_the_week_newest_first(
     assert plan_state.recent_proposals(db, date(2026, 8, 23)) == ()
 
 
-def test_weeks_since_returns_every_status_from_the_date_oldest_first(
+def test_week_starts_since_returns_every_week_from_the_date_oldest_first(
     db: sqlite3.Connection,
 ) -> None:
-    filled = _proposal(W, slug=FAJITAS)
+    # Seam map D15 (#6): reconcile lists the weeks, then reads each one inside its own try, so one
+    # unreadable row can't stop the others. Listing never parses `components`.
+    unreadable = date(2026, 10, 4)
     _seed_week(db, _proposal(date(2026, 9, 13)), "approved")
-    _seed_week(db, filled, "cart_filled", ref="plan-27")
+    _seed_week(db, _proposal(W, slug=FAJITAS), "cart_filled", ref="plan-27")
     _seed_week(db, _proposal(PRIOR), "proposed")
+    db.execute(
+        "INSERT INTO weekly_plan (week_start, custody, components, status)"
+        " VALUES (?, 'wed+sat_sun', '{\"not\": \"a proposal\"}', 'approved')",
+        (unreadable.isoformat(),),
+    )
+    db.commit()
 
-    weeks = plan_state.weeks_since(db, PRIOR)
+    assert plan_state.week_starts_since(db, PRIOR) == (PRIOR, W, unreadable)
 
-    assert isinstance(weeks, tuple)
-    assert [(w.week_start, w.status) for w in weeks] == [(PRIOR, "proposed"), (W, "cart_filled")]
-    assert (weeks[1].proposal, weeks[1].mealie_plan_ref) == (filled, "plan-27")
+
+def test_job_run_reads_survive_a_column_added_by_a_later_migration(
+    db: sqlite3.Connection,
+) -> None:
+    # Review #4: job_run reads name their columns, so a future column can't break every read
+    # (JobRun forbids extra fields).
+    db.execute("ALTER TABLE job_run ADD COLUMN pid INTEGER")
+    db.commit()
+    _seed_claim(db, "cart_fill", W)
+    _seed_claim(db, "cart_fill", PRIOR, outcome="failed")
+
+    run = plan_state.get_run(db, "cart_fill", W)
+    holder = plan_state.running(db, "cart_fill")
+    failed = plan_state.latest_run(db, "cart_fill", ("failed",))
+
+    assert run is not None and run.week_start == W
+    assert holder is not None and holder.week_start == W
+    assert failed is not None and failed.week_start == PRIOR
+    assert plan_state.claim(db, "cart_fill", W) == "running"  # the conflict path re-reads
 
 
 def test_get_run_reads_started_at_as_utc(db: sqlite3.Connection) -> None:

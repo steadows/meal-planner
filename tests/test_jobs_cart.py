@@ -44,7 +44,7 @@ from meals.fakes import FakeMealieClient
 
 _MISSING: ImportError | None = None
 try:
-    from meals import jobs
+    from meals import jobs, plan_state
 except ImportError as exc:  # RED: meals/jobs.py isn't written yet
     _MISSING = exc
 
@@ -978,3 +978,147 @@ def test_an_approval_late_sunday_then_a_crash_expires_once_then_retry_cart_fills
     assert len(job.filler.calls) == 1
     assert (_week(job)["status"], _claim(job)["outcome"]) == ("cart_filled", "done")
     assert CartReport.model_validate_json(_claim(job)["detail"]) == REPORT
+
+
+# ── code-review repairs (seam map D12-D18; review findings #1-#16) ───────────
+
+
+def test_a_failed_fill_tells_steve_to_empty_the_cart_before_retrying(job: Job) -> None:
+    # D12 (#1): a failure mid-fill can leave items in the cart, and --retry accepts `failed`
+    # (ADR risk #16), so the failure message carries the partway advice too.
+    _seed_week(job, "approved")
+    job.filler.error = RuntimeError("Meijer asked for a login")
+
+    _run(job, "cart_fill", SUN_10, W)
+
+    message = _one_message(job)
+    assert "job cart_fill failed: Meijer asked for a login" in message
+    assert "empty it" in message.lower() and "retry cart" in message
+
+
+def test_the_stale_alert_looks_only_at_the_target_weeks_claim(job: Job) -> None:
+    # D13 (#2): the ADR's "the unfinished claim" (:121) is the target week's. Another week's claim,
+    # left unfinished for hours, is no reason to call this week's lock stuck.
+    _seed_week(job, "approved")
+    _seed_claim(job, PRIOR, started=_utc_text(SUN_10 - timedelta(hours=3)))
+    before = _snapshot(job)
+
+    with _held(job.lock_dir / "job-cart_fill.lock"):
+        _run(job, "cart_fill", SUN_10, W)
+
+    assert job.telegram.attempts == []
+    assert _snapshot(job) == before
+
+
+@pytest.mark.parametrize(
+    ("week", "now", "refused"),
+    [
+        pytest.param(date(2026, 8, 2), SUN_10, True, id="eight-weeks-old"),
+        pytest.param(PRIOR, SUN_10, True, id="seven-days-old"),
+        pytest.param(PRIOR, _local(2026, 9, 26, 10), False, id="six-days-old"),
+    ],
+)
+def test_retry_cart_refuses_a_week_past_the_six_day_horizon(
+    job: Job, week: date, now: datetime, refused: bool
+) -> None:
+    # D14 (#5): "retry cart" mustn't fill an old list. The horizon is reconcile's, today − 6 days.
+    _seed_week(job, "approved", week)
+    _seed_claim(job, week, outcome="interrupted", detail="Meijer asked for a login")
+    before = _snapshot(job)
+
+    _run(job, "cart_fill", now, week, retry=True)
+
+    message = _one_message(job)
+    if refused:
+        assert "too old" in message.lower()
+        assert job.filler.calls == []
+        assert _snapshot(job) == before
+    else:
+        assert len(job.filler.calls) == 1
+
+
+def test_an_unreadable_week_doesnt_stop_reconcile_reaching_the_next(
+    job: Job, caplog: pytest.LogCaptureFixture
+) -> None:
+    # D15 (#6): reconcile reads each week inside its own try; the unreadable one is logged.
+    caplog.set_level(logging.DEBUG)
+    job.db.execute(
+        "INSERT INTO weekly_plan (week_start, custody, components, status)"
+        " VALUES (?, 'wed+sat_sun', '{\"not\": \"a proposal\"}', 'approved')",
+        (PRIOR.isoformat(),),
+    )
+    job.db.commit()
+    _seed_week(job, "approved")
+
+    _run(job, "reconcile", _local(2026, 9, 26, 18, 15))
+
+    assert job.spawner.calls == [WEEK_ARGS]
+    assert _week(job)["mealie_plan_ref"] == "fake-plan-2026-09-27"
+    assert "2026-09-20" in caplog.text, "the unreadable week must be logged"
+
+
+def test_an_undelivered_expiry_is_resent_as_the_expiry_not_as_a_partway_notice(job: Job) -> None:
+    # D17 (#9): the expiry message failed to send, so its claim is unfinished with detail
+    # "expired". No fill ran, so the partway advice would be wrong.
+    _seed_week(job, "approved")
+    _seed_claim(job, detail="expired")
+
+    _run(job, "cart_fill", _local(2026, 9, 28, 1, 16), W)
+
+    message = _one_message(job)
+    assert "never filled" in message and "retry cart" in message
+    assert "stopped partway" not in message
+    assert job.filler.calls == []
+    assert _claim(job)["outcome"] == "interrupted"
+
+
+def test_a_sigterm_just_after_the_claim_commits_still_fails_our_claim(
+    job: Job, monkeypatch: pytest.MonkeyPatch, signal_guard: SignalGuard
+) -> None:
+    # D18 (#10): "our claim" is decided by re-reading, not by an in-memory flag, so a signal between
+    # the claim's commit and the flag still gets detail, one message and `failed`. The next tick
+    # then has nothing to say.
+    real_claim = plan_state.claim
+
+    def claim_then_sigterm(conn: sqlite3.Connection, name: str, week_start: date) -> str:
+        state = real_claim(conn, name, week_start)
+        os.kill(os.getpid(), signal.SIGTERM)
+        return state
+
+    for module in (plan_state, jobs):
+        for attribute, value in list(vars(module).items()):
+            if value is real_claim:
+                monkeypatch.setattr(module, attribute, claim_then_sigterm)
+    _seed_week(job, "approved")
+
+    _run(job, "cart_fill", SUN_10, W)
+    _run(job, "cart_fill", SUN_10_16, W)
+
+    assert signal_guard.hits == []
+    claim = _claim(job)
+    assert claim["outcome"] == "failed" and claim["detail"]
+    assert job.filler.calls == []
+    assert f"job cart_fill failed: {claim['detail']}" in _one_message(job)
+
+
+@pytest.mark.parametrize("path", ["stale-alert", "busy-retry", "inspect-notice"])
+def test_a_message_sent_outside_the_act_step_leaves_a_log_line(
+    job: Job, caplog: pytest.LogCaptureFixture, path: str
+) -> None:
+    # Review #16: jobs.log is the record (ADR), so the stale alert, the busy --retry reply and
+    # Inspect's interrupted notice each log a line on the meals logger.
+    _seed_week(job, "approved")
+    _seed_claim(
+        job, PRIOR if path == "busy-retry" else W, started=_utc_text(SUN_10 - timedelta(minutes=46))
+    )
+    caplog.set_level(logging.INFO)
+    lock = job.lock_dir / "job-cart_fill.lock"
+
+    with _held(lock) if path != "inspect-notice" else nullcontext():
+        _run(job, "cart_fill", SUN_10, W, retry=path == "busy-retry")
+
+    _one_message(job)
+    lines = [
+        r for r in caplog.records if r.name.split(".")[0] == "meals" and r.levelno >= logging.INFO
+    ]
+    assert lines, f"the {path} message left no line in jobs.log"

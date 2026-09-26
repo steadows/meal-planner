@@ -24,7 +24,7 @@ import pytest
 
 from meals import background, planner
 from meals.config import PROJECT_ROOT, Settings
-from meals.contracts import Components, WeekProposal
+from meals.contracts import Components, MealieUnavailable, WeekProposal
 from meals.mealie_client import HttpMealieClient
 from meals.pantry import SqlitePantry
 
@@ -58,12 +58,15 @@ class RunJobSpy:
         self.code = 0
         self.log_files: list[Path] = []
         self.with_deps: Callable[[Any], object] | None = None  # runs on the live Deps
+        self.raises: BaseException | None = None  # escapes run_job, as a crash would
 
     def __call__(
         self, name: str, deps: Any, *, now: datetime, week: date | None = None, retry: bool = False
     ) -> int:
         if self.with_deps is not None:
             self.with_deps(deps)
+        if self.raises is not None:
+            raise self.raises
         tables = {row[0] for row in deps.conn.execute("SELECT name FROM sqlite_master")}
         try:
             deps.fill(PLAN, ())
@@ -273,3 +276,59 @@ def test_propose_is_the_planner_bound_to_the_real_pantry_and_the_mealie_client(
     )
     assert isinstance(call["pantry"], SqlitePantry)
     assert call["mealie"] is run_job.calls[0]["deps"].mealie
+
+
+# ── code-review repairs (seam map "Also fixed"; review findings #3, #13) ─────
+
+
+def _record_sends(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """TelegramSend without the network: the texts main tries to send."""
+    sent: list[str] = []
+
+    def record(self: object, text: str) -> None:
+        sent.append(text)
+
+    monkeypatch.setattr(jobs.TelegramSend, "__call__", record)
+    return sent
+
+
+@pytest.mark.parametrize("escaping", ["error", "sigterm"])
+def test_anything_escaping_run_job_is_logged_reported_and_exits_1(
+    run_job: RunJobSpy,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    escaping: str,
+) -> None:
+    # Review #3: __main__ catches whatever escapes run_job (a locked DB, a PlanStateError in the
+    # catch-all, a SIGTERM outside it), logs it to jobs.log and tells Steve.
+    sent = _record_sends(monkeypatch)
+    error: BaseException = (
+        RuntimeError("db locked")
+        if escaping == "error"
+        else jobs.JobTerminated("stopped by SIGTERM")
+    )
+    run_job.raises = error
+
+    assert _main(["job", "reconcile", *NOW]) == 1
+
+    assert any("job reconcile failed" in text for text in sent), sent
+    assert str(error) in caplog.text
+
+
+def test_a_startup_failure_logs_mealies_message_but_not_its_unvetted_cause(
+    run_job: RunJobSpy, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Review #13 (contracts.MealieUnavailable: log the message, not the chained cause), on
+    # __main__'s start-up failure path.
+    sent = _record_sends(monkeypatch)
+
+    def mealie_down(*args: object, **kwargs: object) -> None:
+        raise MealieUnavailable("Mealie is down") from RuntimeError("UNVETTED-CAUSE")
+
+    monkeypatch.setattr(HttpMealieClient, "from_settings", mealie_down)
+
+    assert _main(["job", "reconcile", *NOW]) == 1
+
+    assert run_job.calls == [] and sent, "a start-up failure is reported, and no job runs"
+    assert "Mealie is down" in caplog.text
+    assert "UNVETTED-CAUSE" not in caplog.text

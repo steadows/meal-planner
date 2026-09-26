@@ -15,6 +15,7 @@ exhausted TelegramSend does; `spawn` records each argv; `propose` records (week,
 and returns a fresh proposal. Rows are seeded and read back with SQL on a second connection.
 """
 
+import logging
 import os
 import re
 import signal
@@ -34,6 +35,7 @@ from meals.contracts import (
     CartReport,
     Components,
     Custody,
+    MealieUnavailable,
     RecipeOption,
     WeekProposal,
 )
@@ -115,6 +117,7 @@ class Proposer:
     def __init__(self) -> None:
         self.calls: list[tuple[date, str, list[WeekProposal]]] = []
         self.before: Callable[[], object] | None = None
+        self.returns: WeekProposal | None = None  # a plan to return instead of a fresh one
 
     def __call__(
         self, week_start: date, custody: Custody, recent: Sequence[WeekProposal]
@@ -122,6 +125,8 @@ class Proposer:
         self.calls.append((week_start, custody, list(recent)))
         if self.before is not None:
             self.before()
+        if self.returns is not None:
+            return self.returns
         return _proposal(week_start, NEW_PICK, custody=custody)
 
 
@@ -719,24 +724,29 @@ def test_the_first_week_sends_exactly_one_message_and_fails_the_claim(job: Job) 
 
 
 @pytest.mark.parametrize(
-    ("status", "outcome"),
-    [("approved", "done"), ("proposed", "interrupted")],
-    ids=["recorded", "not-recorded"],
+    ("status", "pick", "outcome", "messages"),
+    [
+        pytest.param("approved", LAST_PICK, "done", 1, id="recorded"),
+        pytest.param("proposed", STORED_PICK, "interrupted", 1, id="not-recorded"),
+        pytest.param("approved", STORED_PICK, "done", 0, id="approved-by-steve"),
+    ],
 )
 def test_an_unfinished_autoapprove_claim_is_settled_by_inspect(
-    job: Job, status: str, outcome: str
+    job: Job, status: str, pick: str, outcome: str, messages: int
 ) -> None:
     # ADR :125-135: effect recorded (approved or later) → re-send, finish done; not recorded →
-    # notice, then interrupted. Seam map D4: either way the run ends there.
+    # notice, then interrupted. Seam map D4: either way the run ends there. D16 (#8): it re-sends
+    # only when the stored plan is last week's restamped, which is what this job writes; a week
+    # Steve approved with other picks (after the job died before its compare-and-set) is quiet.
     _seed_week(job, "cart_filled", PRIOR, plan=_proposal(PRIOR, LAST_PICK), ref="plan-20")
-    _seed_week(job, status)
+    _seed_week(job, status, plan=_proposal(W, pick))
     _seed_claim(job, "sun_autoapprove")
     week_before = tuple(_week(job))
 
     _run(job, "sun_autoapprove", _local(2026, 9, 27, 9))
 
     assert _claim(job, "sun_autoapprove")["outcome"] == outcome
-    _one_message(job)
+    assert len(job.telegram.attempts) == len(job.telegram.delivered) == messages
     assert tuple(_week(job)) == week_before
 
 
@@ -801,3 +811,49 @@ def test_a_fallback_week_publishes_last_weeks_plan(job: Job) -> None:
 
     assert job.mealie.meal_plans[W] == (FAJITAS,)
     assert _week(job)["mealie_plan_ref"] == "fake-plan-2026-09-27"
+
+
+# ── code-review repairs (seam map "Also fixed"; review findings #11, #13, #15) ─
+
+
+def test_the_three_hour_wait_is_measured_in_real_time_across_the_dst_change(job: Job) -> None:
+    # Review #11: from 01:30 EDT to 04:00 EST on Nov 1 is 3.5 real hours, but only 2.5 by Detroit
+    # wall-clock arithmetic. (Seeded: a proposal finishing after Sat 20:00 isn't reachable today,
+    # so this pins the arithmetic, not a live path.)
+    week = date(2026, 11, 1)
+    _seed_week(job, "proposed", week)
+    _seed_claim(job, "sat_propose", week, outcome="done", started="2026-11-01 05:30:00")
+
+    _run(job, "sat_nudge", _utc(2026, 11, 1, 9))
+
+    _one_message(job)
+    assert _claim(job, "sat_nudge", week)["outcome"] == "done"
+
+
+def test_the_catch_all_logs_mealies_message_but_not_its_unvetted_cause(
+    job: Job, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Review #13 (contracts.MealieUnavailable: log the message, not the chained cause).
+    def mealie_down() -> None:
+        raise MealieUnavailable("Mealie returned 503 for /api/recipes") from RuntimeError(
+            "UNVETTED-CAUSE"
+        )
+
+    job.proposer.before = mealie_down
+    caplog.set_level(logging.DEBUG)
+
+    _run(job, "sat_propose", SAT_9)
+
+    assert "Mealie returned 503 for /api/recipes" in caplog.text
+    assert "UNVETTED-CAUSE" not in caplog.text
+
+
+def test_a_recipe_with_no_hands_on_time_says_0_minutes(job: Job) -> None:
+    # Review #15: hands_on_min=0 is known (no hands-on time), not unknown.
+    plan = _proposal(W, NEW_PICK)
+    quick = plan.recipe_options[0].model_copy(update={"hands_on_min": 0})
+    job.proposer.returns = plan.model_copy(update={"recipe_options": (quick,)})
+
+    _run(job, "sat_propose", SAT_9)
+
+    assert "0 min hands-on" in _one_message(job)
