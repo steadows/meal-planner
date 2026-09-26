@@ -209,6 +209,14 @@ def test_fakes_implement_protocols(fake_mealie: FakeMealieClient, fake_pantry: F
     assert isinstance(fake_pantry, Pantry)
 
 
+def test_pantry_protocol_has_confirm_stocked_as_the_fake_implements_it() -> None:
+    """bot's "still good" / "have plenty" replies and pantry's MCP tools call it through `Pantry`,
+    with the fake's (and SqlitePantry's) names, kinds, defaults and types."""
+    assert inspect.signature(Pantry.confirm_stocked, eval_str=True) == inspect.signature(
+        FakePantry.confirm_stocked, eval_str=True
+    )
+
+
 # ── FakeClaudeRunner ─────────────────────────────────────────────────────────
 
 
