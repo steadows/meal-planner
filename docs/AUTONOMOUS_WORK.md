@@ -28,7 +28,8 @@ in each lane's `.brain/presence/<lane>.md`.
 ## 1. How lanes are organized here
 
 One long-lived worktree and branch per lane (`~/meal-planner-<lane>`, `feat/<lane>`). The brain
-resolves your lane from the branch name, so don't work on other branches in a lane worktree. There
+resolves your lane from the branch name. `feat/<lane>` is your base branch; each new feature gets
+its own feature branch cut from it (§2 step 10). There
 is no issue tracker: status lives in PLAN.md's checkboxes and your presence note.
 
 **File ownership is in your presence note's `touches`.** The contracts lane alone edits
@@ -67,7 +68,16 @@ The `pm` lane sweeps the brain and relays to Steve.
    may open its own PR; **only merging needs Steve's explicit go** (§6).
 8. **`/steadows-ultrareview`** after the PR is open (§3.2).
 9. **`/steadows-verify`** once at the end of each phase, not per task or per PR.
-10. **Update status right away:** tick the PLAN.md checkbox the task closes, and keep your presence
+10. **Branches, merge and clean-up** *(Steve, 2026-09-26)*. Your **base branch** is the `feat/<lane>`
+    seeded at bootstrap. It stays forever: **never delete it.** **Start every new feature on a new
+    feature branch cut from it** (`git switch feat/<lane> && git fetch && git merge --ff-only origin/main &&
+    git switch -c feat/<lane>-<topic>`), and
+    open the PR from that feature branch. After Steve's go, the lane merges its own PR (never
+    `--admin`), deletes the feature branch (on GitHub and locally) if its name differs from the base
+    branch, and syncs the base branch back up with main: `git switch feat/<lane> && git fetch &&
+    git merge --ff-only origin/main && git push`. The brain's `whoami` only resolves `feat/<lane>`, so
+    update your presence note by hand while you're on a feature branch.
+11. **Update status right away:** tick the PLAN.md checkbox the task closes, and keep your presence
     note's `status`, `phase` and `touches` honest. When your lane merges, set `status: done`; that's
     what unblocks the lanes waiting on you.
 
@@ -155,7 +165,8 @@ instrument, not to stop the loop.** Keep going, and change what the next fix tar
 ## 6. Boundaries
 
 - **Merging is Steve's, always, explicitly and separately from any other approval.** A lane stops
-  at a clean, mergeable PR. Never use `gh pr merge --admin` to get past a failing check.
+  at a clean, mergeable PR. Once Steve says go, the lane does the merge and the branch clean-up
+  itself (§2 step 10). Never use `gh pr merge --admin` to get past a failing check.
 - **The cart lane stops at a filled cart.** Claude in Chrome must never complete a purchase, and
   must never open a non-meijer.com URL in the logged-in session. That's the prompt-injection
   boundary in PLAN.md → Risks, edge cases and costs.

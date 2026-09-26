@@ -32,3 +32,4 @@ Read this, then `docs/AUTONOMOUS_WORK.md` (how a lane runs its build loop: gates
 - Conventional commit messages (`feat:`, `fix:`, `docs:`, `chore:`, `test:`).
 - PR per lane into `main`. Announce with `brain announce "about to PR"` before opening it.
 - CI (`.github/workflows/ci.yml`) must pass before merging. Every agent acts as the repo admin, so never use `gh pr merge --admin` to get past a failing check. Fix the failure, or ask Steve.
+- Your base branch `feat/<lane>` (seeded at bootstrap) is permanent: **never delete it.** Cut a new feature branch from it for each new feature (`feat/<lane>-<topic>`) and PR from that. After Steve's go, merge your PR, delete the feature branch, and sync `feat/<lane>` back up with main (`docs/AUTONOMOUS_WORK.md` §2 step 10).
