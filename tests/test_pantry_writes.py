@@ -348,10 +348,10 @@ def test_a_purchase_reads_and_writes_only_its_own_items_rows(
 # ── transaction discipline (seam map, Revision 1: "Transactions") ─────────────
 
 
-@pytest.mark.parametrize("write", ["log_purchase", "load_seed"])
+@pytest.mark.parametrize("write", ["log_purchase", "load_seed", "confirm_stocked"])
 def test_a_write_refuses_to_run_inside_the_callers_open_transaction(
     db: sqlite3.Connection, insert_item: Insert, write: str
-) -> None:  # [R10]
+) -> None:  # [R10]; confirm_stocked: B3 brief A10, seam map Revision 4 ("It runs under `_write`")
     insert_item(_item(1, "rice", notes="committed"))
     db.execute("UPDATE pantry_item SET notes = 'pending' WHERE id = 1")
     assert db.in_transaction
@@ -359,8 +359,10 @@ def test_a_write_refuses_to_run_inside_the_callers_open_transaction(
     with pytest.raises(sqlite3.ProgrammingError):
         if write == "log_purchase":
             pantry.log_purchase("rice", ON)
+        elif write == "confirm_stocked":
+            pantry.confirm_stocked("rice", ON)
         else:
-            pantry.load_seed([_seed("couscous", last_purchased=ON)])
+            pantry.load_seed([_seed("couscous", last_purchased=ON)], ON)
     # Still the caller's transaction: open, holding its own write, and not committed by us.
     assert db.in_transaction
     assert db.execute("SELECT notes FROM pantry_item").fetchone()[0] == "pending"
@@ -373,7 +375,7 @@ def test_a_write_refuses_to_run_inside_the_callers_open_transaction(
     assert db.execute("SELECT notes FROM pantry_item").fetchone()[0] == "committed"
 
 
-@pytest.mark.parametrize("write", ["log_purchase", "load_seed"])
+@pytest.mark.parametrize("write", ["log_purchase", "load_seed", "confirm_stocked"])
 def test_a_write_takes_the_write_lock_before_it_reads_anything(
     db: sqlite3.Connection, insert_item: Insert, write: str
 ) -> None:  # [R9]; seam map: every read-modify-write runs in one BEGIN IMMEDIATE transaction
@@ -383,8 +385,10 @@ def test_a_write_takes_the_write_lock_before_it_reads_anything(
     try:
         if write == "log_purchase":
             SqlitePantry(db).log_purchase("rice", ON)
+        elif write == "confirm_stocked":
+            SqlitePantry(db).confirm_stocked("rice", ON)
         else:
-            SqlitePantry(db).load_seed([_seed("rice"), _seed("couscous")])
+            SqlitePantry(db).load_seed([_seed("rice"), _seed("couscous")], ON)
     finally:
         db.set_trace_callback(None)
     begins = [sql for sql in seen if sql.lstrip().upper().startswith("BEGIN")]
@@ -393,7 +397,7 @@ def test_a_write_takes_the_write_lock_before_it_reads_anything(
     assert re.match(r"(?i)begin\s+immediate", seen[0].lstrip()), seen
 
 
-@pytest.mark.parametrize("write", ["flip_status", "log_purchase"])
+@pytest.mark.parametrize("write", ["flip_status", "log_purchase", "confirm_stocked"])
 def test_the_returned_item_is_read_before_the_commit(
     db: sqlite3.Connection, insert_item: Insert, write: str
 ) -> None:  # Codex sweep B: a re-read after COMMIT can return another writer's change
@@ -403,6 +407,8 @@ def test_the_returned_item_is_read_before_the_commit(
     try:
         if write == "flip_status":
             result = SqlitePantry(db).flip_status("rice", "buy_next_time")
+        elif write == "confirm_stocked":
+            result = SqlitePantry(db).confirm_stocked("rice", ON)
         else:
             result = SqlitePantry(db).log_purchase("rice", ON)
     finally:
@@ -461,7 +467,7 @@ def test_load_seed_inserts_new_items_with_every_field_and_logs_only_real_purchas
         notes="the green tin",
     )
     bare = _seed("couscous", typical_interval_days=60)
-    result = SqlitePantry(db).load_seed([bare, full])
+    result = SqlitePantry(db).load_seed([bare, full], ON)
     assert result == SeedResult(inserted=("couscous", "olive oil"), updated=(), untouched=())
     items = {item.name: item for item in SqlitePantry(db).list_items()}
     assert items.keys() == {"olive oil", "couscous"}
@@ -493,7 +499,7 @@ def test_load_seed_repairs_a_stored_url_that_fails_the_meijer_check(
     with pytest.raises(PantryRowError):
         pantry.list_items()  # reads still fail closed
     fixed = "https://www.meijer.com/shopping/product/example-rice/100002.html"
-    result = pantry.load_seed([_seed("rice", meijer_url=fixed)])
+    result = pantry.load_seed([_seed("rice", meijer_url=fixed)], ON)
     assert result == SeedResult(inserted=(), updated=("rice",), untouched=())
     assert pantry.list_items() == (_item(1, "rice", meijer_url=fixed),)
 
@@ -506,7 +512,7 @@ def test_load_seed_runs_while_an_untouched_row_fails_the_meijer_check(
         ("tahini", "staple", "https://evil.example/tahini"),
     )
     db.commit()
-    result = SqlitePantry(db).load_seed([_seed("rice")])
+    result = SqlitePantry(db).load_seed([_seed("rice")], ON)
     assert result == SeedResult(inserted=("rice",), updated=(), untouched=("tahini",))
     names = [row[0] for row in db.execute("SELECT name FROM pantry_item ORDER BY id")]
     assert names == ["tahini", "rice"]
@@ -569,7 +575,8 @@ def test_load_seed_rewrites_the_product_map_but_never_stock_or_history(
                 for_miles=True,
             ),
             _seed("tortillas", "fallback"),  # every blank field clears; flags go to defaults
-        ]
+        ],
+        ON,
     )
     assert result == SeedResult(inserted=(), updated=("olive oil", "tortillas"), untouched=())
     assert _by_id(db) == (
@@ -615,7 +622,7 @@ def test_a_seed_interval_replaces_the_guess_until_learning_takes_over(
     insert_item(_item(1, "rice", typical_interval_days=70, last_purchased=last))
     for offset in logged:
         _log(db, 1, _day(offset))
-    SqlitePantry(db).load_seed([_seed("rice", typical_interval_days=seed_interval)])
+    SqlitePantry(db).load_seed([_seed("rice", typical_interval_days=seed_interval)], ON)
     assert _interval(db, 1) == interval
 
 
@@ -640,7 +647,7 @@ def test_only_an_item_that_ends_up_a_staple_keeps_its_interval_after_two_purchas
     insert_item(_item(1, "nuggets", category, typical_interval_days=14, last_purchased=_day(14)))
     _log(db, 1, D0)
     _log(db, 1, _day(14))
-    SqlitePantry(db).load_seed([_seed("nuggets", seed_category, typical_interval_days=21)])
+    SqlitePantry(db).load_seed([_seed("nuggets", seed_category, typical_interval_days=21)], ON)
     assert _interval(db, 1) == interval
 
 
@@ -669,7 +676,7 @@ def test_promoting_an_item_to_staple_learns_its_interval_from_its_purchases(
     for offset in dates:
         _log(db, 1, _day(offset))
     pantry = SqlitePantry(db)
-    pantry.load_seed([_seed("tortillas", "staple", typical_interval_days=70)])
+    pantry.load_seed([_seed("tortillas", "staple", typical_interval_days=70)], ON)
     assert _interval(db, 1) == learned
     # Due a full learned interval after the last purchase. Keeping the old interval (none, or a
     # stale 30) or taking the seed's 70 would leave it unasked.
@@ -680,7 +687,7 @@ def test_seed_rows_match_existing_names_ignoring_case_and_never_by_alias(
     db: sqlite3.Connection, insert_item: Insert
 ) -> None:  # [R12] [R13]
     insert_item(_item(1, "olive oil", aliases=("evoo",)))
-    result = SqlitePantry(db).load_seed([_seed("Olive Oil"), _seed("EVOO")])
+    result = SqlitePantry(db).load_seed([_seed("Olive Oil"), _seed("EVOO")], ON)
     assert result.inserted == ("EVOO",)
     assert [name.casefold() for name in result.updated] == ["olive oil"]
     first, second = _by_id(db)
@@ -692,7 +699,7 @@ def test_seed_names_match_existing_names_beyond_ascii_case(
     db: sqlite3.Connection, insert_item: Insert
 ) -> None:  # [R12] [R13]; seam map "Match": casefold(), not SQLite's ASCII-only NOCASE/lower()
     insert_item(_item(1, "jalapeño"))
-    result = SqlitePantry(db).load_seed([_seed("JALAPEÑO")])
+    result = SqlitePantry(db).load_seed([_seed("JALAPEÑO")], ON)
     assert result.inserted == ()
     assert [name.casefold() for name in result.updated] == ["jalapeño"]
     assert db.execute("SELECT COUNT(*) FROM pantry_item").fetchone()[0] == 1
@@ -750,7 +757,7 @@ def test_a_namespace_clash_raises_naming_the_key_and_writes_nothing(
     before = _snapshot(db)
     items = [SeedItem.model_validate({"category": "staple", **row}) for row in seed]
     with pytest.raises(ValueError, match=f"(?i){re.escape(key)}"):
-        SqlitePantry(db).load_seed(items)
+        SqlitePantry(db).load_seed(items, ON)
     assert _snapshot(db) == before
 
 
@@ -759,7 +766,7 @@ def test_an_alias_may_move_to_another_item_in_the_same_seed(
 ) -> None:  # [R14]: the RESULTING namespace is checked, not today's
     insert_item(_OLIVE_OIL)
     result = SqlitePantry(db).load_seed(
-        [_seed("olive oil"), _seed("extra virgin olive oil", aliases=("evoo",))]
+        [_seed("olive oil"), _seed("extra virgin olive oil", aliases=("evoo",))], ON
     )
     assert result == SeedResult(
         inserted=("extra virgin olive oil",), updated=("olive oil",), untouched=()
@@ -770,7 +777,7 @@ def test_an_alias_may_move_to_another_item_in_the_same_seed(
 
 
 def test_an_item_may_repeat_its_own_name_as_an_alias(db: sqlite3.Connection) -> None:  # [R14]
-    result = SqlitePantry(db).load_seed([_seed("rice", aliases=("Rice", "RICE"))])
+    result = SqlitePantry(db).load_seed([_seed("rice", aliases=("Rice", "RICE"))], ON)
     assert result.inserted == ("rice",)
     assert db.execute("SELECT COUNT(*) FROM pantry_item").fetchone()[0] == 1
 
@@ -787,7 +794,7 @@ def test_a_seed_that_fails_halfway_leaves_nothing_behind(
     before = _snapshot(db)
     seed = [_seed("rice", notes="after"), _seed("couscous", last_purchased=D0), _seed("boom")]
     with pytest.raises(sqlite3.IntegrityError, match="boom"):
-        SqlitePantry(db).load_seed(seed)
+        SqlitePantry(db).load_seed(seed, ON)
     assert not db.in_transaction
     assert _snapshot(db) == before
 
@@ -801,7 +808,7 @@ def test_seed_result_keeps_csv_order_and_sorts_untouched_names(
     for id_, name in enumerate(("tahini", "rice", "butter", "zaatar", "anise"), start=1):
         insert_item(_item(id_, name))
     names = ("tahini", "couscous", "butter", "rice", "allspice")
-    result = SqlitePantry(db).load_seed([_seed(name) for name in names])
+    result = SqlitePantry(db).load_seed([_seed(name) for name in names], ON)
     assert result == SeedResult(
         inserted=("couscous", "allspice"),
         updated=("tahini", "butter", "rice"),
@@ -817,11 +824,11 @@ def test_running_the_same_seed_twice_updates_everything_and_logs_nothing_new(
         _seed("couscous"),
     ]
     pantry = SqlitePantry(db)
-    pantry.load_seed(seed)
+    pantry.load_seed(seed, ON)
     items, log = pantry.list_items(), _log_rows(db)
     assert len(items) == 2
     assert len(log) == 1
-    again = pantry.load_seed(seed)
+    again = pantry.load_seed(seed, ON)
     assert again == SeedResult(inserted=(), updated=("olive oil", "couscous"), untouched=())
     assert pantry.list_items() == items
     assert _log_rows(db) == log

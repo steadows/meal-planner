@@ -16,7 +16,7 @@ import re
 import sqlite3
 from collections.abc import Mapping, Sequence
 from contextlib import closing
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -470,11 +470,11 @@ def test_an_unterminated_quote_is_an_error_not_a_merge_of_the_rows_after_it(
 
 def test_staples_due_is_right_on_the_seed_fixture(db: sqlite3.Connection) -> None:  # [R23]
     pantry = SqlitePantry(db)
-    assert pantry.load_seed(read_seed_csv(FIXTURE)).inserted == FIXTURE_NAMES
+    assert pantry.load_seed(read_seed_csv(FIXTURE), ON).inserted == FIXTURE_NAMES
     # On 2026-09-26, days past the ask date (last purchase + 90% of the interval, rounded up):
     # olive oil 14, tahini 6, butter 0. Not due: taco shells (ask date 7 days away), rice (26
-    # away), couscous (no purchase date). Never due: eggs (perishable) and chicken nuggets
-    # (fallback, though 43 days past).
+    # away), couscous (no purchase date; its bootstrap reminder is 54 days away). Never due: eggs
+    # (perishable) and chicken nuggets (fallback, though 43 days past).
     assert [item.name for item in pantry.staples_due(ON)] == ["olive oil", "tahini", "butter"]
 
 
@@ -495,6 +495,22 @@ def test_main_loads_the_csv_prints_counts_and_names_and_exits_0(
         assert conn.execute("SELECT COUNT(*) FROM pantry_item").fetchone() == (8,)
         # a seed purchase row per inserted item with a date: not couscous (blank), not rice (updated)
         assert conn.execute("SELECT source FROM purchase_log").fetchall() == [("seed",)] * 6
+
+
+def test_main_loads_on_todays_date_so_an_owned_staple_gets_its_reminder(tmp_path: Path) -> None:
+    # B3 brief D; seam map Revision 4: "`load_seed(items, on)` ... (the CLI passes `date.today()`)"
+    db_path = tmp_path / "cli.sqlite"
+    first_day = date.today()
+    assert main([str(FIXTURE), "--db", str(db_path)]) == 0
+    with closing(sqlite3.connect(db_path)) as conn:
+        stored = conn.execute(
+            "SELECT next_ask_on, last_purchased FROM pantry_item WHERE name = 'couscous'"
+        ).fetchone()
+    # couscous: a staple, interval 60, no purchase date. 90% of 60 days from the load day. Either
+    # day's date, in case the test runs across midnight.
+    reminders = {str(day + timedelta(days=54)) for day in (first_day, date.today())}
+    assert stored[0] in reminders
+    assert stored[1] is None
 
 
 def test_main_prints_every_bad_row_to_stderr_writes_nothing_and_exits_1(
