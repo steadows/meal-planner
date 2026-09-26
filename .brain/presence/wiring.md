@@ -10,8 +10,8 @@ tracker_epic: none
 current_worktree: /Users/stevemeadows/meal-planner-wiring
 current_branch: feat/wiring
 current_ticket: none
-touches: [meals/background.py, meals/plan_state.py, meals/jobs.py, meals/__main__.py, deploy/, docs/adr/ADR-0001-runtime-model.md, architecture-plan.html, tests/test_background.py, tests/test_plan_state.py, tests/test_jobs.py, tests/test_e2e.py]
-updated: 2026-09-26T14:21:06Z
+touches: [.brain/journal/2026-09-26.md]
+updated: 2026-09-26T15:41:41Z
 ---
 Lane G — last. Jobs keyed on weekly_plan.status so every job is safe to rerun; one Chrome session at a time via a lock; bot never blocks (background subprocesses); max two concurrent claude processes. Done when a full Saturday dry run works end to end (M4). Waits on [[pantry-wiring-waiting-on]], [[mealie-wiring-waiting-on]], [[search-wiring-waiting-on]] and [[bot-wiring-waiting-on]].
 
