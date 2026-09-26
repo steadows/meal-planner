@@ -131,6 +131,10 @@ def test_meijer_url_accepts_meijer_pages(model: type[BaseModel], url: str | None
         pytest.param("https://www.meijer.com/x y", id="whitespace"),
         pytest.param("https://www.meijer.com\t@evil.example/", id="tab"),
         pytest.param("https://www.meijer.com\\evil", id="backslash"),
+        pytest.param("https://me\u0131jer.com/", id="dotless-i"),
+        pytest.param("https://me\u0130jer.com/", id="dotted-capital-i"),
+        pytest.param("https://www.meijer.com/x\u00a0y", id="no-break-space"),
+        pytest.param("https://www.meijer.com/x\x00", id="c0-control"),
     ],
 )
 def test_meijer_url_rejects_other_sites(model: type[BaseModel], url: str) -> None:

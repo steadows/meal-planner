@@ -22,9 +22,12 @@ MAX_PANTRY_QUESTIONS = 3
 
 
 # Matched against the raw string, not a parsed URL: Python's urlsplit and a browser disagree on
-# backslashes, userinfo and whitespace, and that gap would let another host through.
+# backslashes, userinfo and whitespace, and that gap would let another host through. Printable
+# ASCII only, case-folded as ASCII: Unicode case folding lets "ı" match "i", and a browser sends
+# "meıjer.com" to a different (punycode) host.
 _MEIJER_URL = re.compile(
-    r"\Ahttps://(?:[a-z0-9-]+\.)*meijer\.com(?::443)?(?:[/?#][^\s\\]*)?\Z", re.IGNORECASE
+    r"\Ahttps://(?:[a-z0-9-]+\.)*meijer\.com(?::443)?(?:[/?#][!-\[\]-~]*)?\Z",
+    re.ASCII | re.IGNORECASE,
 )
 
 
