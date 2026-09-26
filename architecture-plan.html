@@ -85,7 +85,7 @@ tr:last-child td { border-bottom: 0; }
       <h1>Runtime model — build plan</h1>
       <p class="lede">Option B: the bot handles chat; macOS launchd runs Saturday/Sunday; every scheduled or long job is
       its own short-lived, rerun-safe command. Decision record: <code>docs/adr/ADR-0001-runtime-model.md</code>.</p>
-      <span class="status-pill" id="planStatus">PROPOSED — debate done, awaiting your confirmation</span>
+      <span class="status-pill" id="planStatus">ACCEPTED — confirmed by Steve 2026-09-26</span>
     </div>
     <button class="ghost" id="theme" type="button">Light / dark</button>
   </div>
@@ -131,7 +131,7 @@ tr:last-child td { border-bottom: 0; }
 {
 "feature": "runtime-model",
 "version": "v3",
-"status": "proposed",
+"status": "accepted",
 "phases": [
 {
 "id": "P0",
@@ -409,7 +409,7 @@ tr:last-child td { border-bottom: 0; }
 "risk": "Orphaned claude holds a slot or lock (residual after SIGKILL/power loss)",
 "sev": "ACCEPT",
 "mit": "Runner kills its child on any exception; residual surfaced by stale-lock alert + Stuck-run procedure",
-"accept": false,
+"accept": true,
 "required": true
 },
 {
@@ -494,7 +494,7 @@ tr:last-child td { border-bottom: 0; }
 "risk": "Retry over a partly filled cart doubles items",
 "sev": "ACCEPT",
 "mit": "Retry requires an emptied cart (the notice says so) until the cart-path gate decides set-to-quantity",
-"accept": false,
+"accept": true,
 "required": true
 },
 {
@@ -530,7 +530,7 @@ tr:last-child td { border-bottom: 0; }
 "risk": "Bot work abandoned at the 15-min deadline may still run once",
 "sev": "ACCEPT",
 "mit": "Bounded by the in-flight cap of 2 and the runner timeout",
-"accept": false,
+"accept": true,
 "required": true
 },
 {
@@ -552,7 +552,7 @@ tr:last-child td { border-bottom: 0; }
 "risk": "Duplicate Mealie entries after an ambiguous publish timeout",
 "sev": "ACCEPT",
 "mit": "Mealie lane implements set_meal_plan as replace-the-week",
-"accept": false,
+"accept": true,
 "required": true
 },
 {
@@ -560,7 +560,7 @@ tr:last-child td { border-bottom: 0; }
 "risk": "Mac powered off through a whole job window",
 "sev": "ACCEPT",
 "mit": "PLAN fallback: reuse last week / manual loop",
-"accept": false,
+"accept": true,
 "required": true
 },
 {
@@ -568,7 +568,7 @@ tr:last-child td { border-bottom: 0; }
 "risk": "Reboot with no login (FileVault on) → nothing runs until Steve logs in",
 "sev": "ACCEPT",
 "mit": "Set macOS updates to manual install; log in after restarts",
-"accept": false,
+"accept": true,
 "required": true
 },
 {
@@ -576,7 +576,7 @@ tr:last-child td { border-bottom: 0; }
 "risk": "Which Chrome profile an unattended run drives (extension in 2 profiles)",
 "sev": "ACCEPT",
 "mit": "Cart spike must prove it before cart_fill is trusted",
-"accept": false,
+"accept": true,
 "required": true
 },
 {
@@ -584,7 +584,7 @@ tr:last-child td { border-bottom: 0; }
 "risk": "In-bot /find lost if the bot restarts mid-run",
 "sev": "ACCEPT",
 "mit": "Steve resends; update already acknowledged",
-"accept": false,
+"accept": true,
 "required": true
 },
 {
@@ -592,7 +592,7 @@ tr:last-child td { border-bottom: 0; }
 "risk": "Claude Desktop rotates the shared login (#94464) → runs fail with auth errors",
 "sev": "ACCEPT",
 "mit": "Catch-all message tells Steve; run /login (not happening today)",
-"accept": false,
+"accept": true,
 "required": true
 },
 {
@@ -600,7 +600,7 @@ tr:last-child td { border-bottom: 0; }
 "risk": "No proposal after Sat 20:00 (e.g. Mac off all Saturday)",
 "sev": "ACCEPT",
 "mit": "Sunday message says so; last week's plan reused",
-"accept": false,
+"accept": true,
 "required": true
 }
 ]

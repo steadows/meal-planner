@@ -1,7 +1,7 @@
 # ADR-0001: Runtime model — bot for chat, launchd for the schedule
 
 **Date:** 2026-09-26
-**Status:** Proposed
+**Status:** Accepted (Steve, 2026-09-26: `CONFIRM runtime-model v3`, which includes accepting the risks marked accepted in the Risk Matrix: #4, #16, #21, #24–#30)
 **Context:** meal-planner / runtime-model architecture gate (PLAN.md → Architecture gates), run by the wiring lane
 
 ## Context
@@ -64,6 +64,10 @@ short-lived, rerun-safe command.**
   - while `proposed`, the full proposal;
   - from `approved` on, the narrowed plan (picked `recipe_options` only, swapped `components`, empty
     `pantry_questions`).
+
+  `plan_state` reloads it with `WeekProposal.model_validate_json(stored, context={contracts.TRUSTED: True})`, the only
+  place TRUSTED is passed. It is safe because the planner takes `mealie_slug` only from `mealie.get_recipe()`, never
+  from Claude's text (the contracts guard rejects a slug on untrusted input).
 
   A new `job_run` table (the next contracts migration, numbered at merge) records one claim per (job, week) for
   what status can't carry: nudge once, never refill after a crash, retries, and redelivery. All transitions live
@@ -431,6 +435,8 @@ state mutation after the drain. Verdict: **closed, no findings.**
   - busy-lock messages (user-initiated vs stale)
   - the first week sends exactly one message
   - SIGTERM → catch-all
+  - a pantry read raising `PantryRowError` (a hand-corrupted row) → the Telegram failure message carries the
+    exception text (row id, item name, "re-run the seed loader"), not a generic "plan failed"
 
   These use fakes for planner, cart, Mealie and Telegram send.
 - **`background.start`:**
