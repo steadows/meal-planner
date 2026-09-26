@@ -239,6 +239,16 @@ def test_fake_mealie_records_meal_plans(fake_mealie: FakeMealieClient) -> None:
         fake_mealie.set_meal_plan(week, ("no-such-recipe",))
 
 
+def test_fake_mealie_refuses_slugs_mealie_would_never_issue(sample_recipe: RecipeOption) -> None:
+    """The real client treats a slug outside [A-Za-z0-9_-]+ as unknown; the fake can't hold one."""
+    with pytest.raises(ValueError, match="slug"):
+        FakeMealieClient(recipes={"Bad Slug/..": sample_recipe})
+    unsluggable = sample_recipe.model_copy(update={"name": "!!!"})
+    mealie = FakeMealieClient(importable={"https://example.com/p": unsluggable})
+    with pytest.raises(ValueError, match="slug"):
+        mealie.import_url("https://example.com/p")
+
+
 # ── FakePantry ───────────────────────────────────────────────────────────────
 
 
@@ -444,6 +454,35 @@ def test_fake_pantry_plenty_pushes_the_ask_back_one_interval(
     assert item is not None
     assert (item.status, item.next_ask_on) == ("have", today + _days(wait))
     assert pantry.get_item("rice") == item
+
+
+def test_fake_pantry_still_good_never_pulls_the_ask_earlier(today: date) -> None:
+    """PLAN: "still good" pushes the next ask back. Volunteered early, it must not bring it forward."""
+    last = today - _days(10)
+    pantry = FakePantry((_staple(1, "olive oil", typical_interval_days=70, last_purchased=last),))
+
+    item = pantry.confirm_stocked("olive oil", today)
+
+    assert item is not None
+    assert item.next_ask_on == last + _days(63)  # the 90% point, not today + 7
+
+
+@pytest.mark.parametrize("plenty", [False, True], ids=["still_good", "plenty"])
+def test_fake_pantry_confirming_keeps_a_later_postponement(plenty: bool, today: date) -> None:
+    later = today + _days(90)
+    pantry = FakePantry((_staple(1, "rice", typical_interval_days=42, next_ask_on=later),))
+
+    item = pantry.confirm_stocked("rice", today, plenty=plenty)
+
+    assert item is not None
+    assert item.next_ask_on == later
+
+
+def test_fake_pantry_refuses_items_the_real_schema_cannot_hold() -> None:
+    with pytest.raises(ValueError, match="id"):
+        FakePantry((_staple(1, "rice"), _staple(1, "oats")))
+    with pytest.raises(ValueError, match="name"):  # names are unique under casefold
+        FakePantry((_staple(1, "Jalapeño"), _staple(2, "JALAPEÑO")))
 
 
 def test_fake_pantry_logging_the_latest_purchase_resets_the_item(today: date) -> None:

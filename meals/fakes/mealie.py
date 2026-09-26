@@ -2,11 +2,24 @@ import re
 from collections.abc import Mapping, Sequence
 from datetime import date
 
-from meals.contracts import RecipeOption
+from pydantic import TypeAdapter, ValidationError
+
+from meals.contracts import MealieSlug, RecipeOption
 
 
 def _slugify(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+
+
+_SLUG = TypeAdapter(MealieSlug)
+
+
+def _require_slug(slug: str) -> str:
+    """The real client treats anything outside Mealie's slug charset as unknown."""
+    try:
+        return _SLUG.validate_python(slug)
+    except ValidationError as exc:
+        raise ValueError(f"FakeMealieClient: {slug!r} isn't a slug Mealie would issue") from exc
 
 
 class FakeMealieClient:
@@ -18,7 +31,9 @@ class FakeMealieClient:
         tags: Mapping[str, Sequence[str]] | None = None,
         importable: Mapping[str, RecipeOption] | None = None,
     ) -> None:
-        self.recipes: dict[str, RecipeOption] = dict(recipes or {})
+        self.recipes: dict[str, RecipeOption] = {
+            _require_slug(slug): recipe for slug, recipe in (recipes or {}).items()
+        }
         self._tags = {tag: tuple(slugs) for tag, slugs in (tags or {}).items()}
         self._importable = dict(importable or {})
         self.meal_plans: dict[date, tuple[str, ...]] = {}
@@ -27,7 +42,7 @@ class FakeMealieClient:
         if url not in self._importable:
             raise ValueError(f"FakeMealieClient: can't scrape {url}")
         recipe = self._importable[url]
-        slug = _slugify(recipe.name)
+        slug = _require_slug(_slugify(recipe.name))
         self.recipes[slug] = recipe
         return slug
 
