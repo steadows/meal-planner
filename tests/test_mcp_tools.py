@@ -1,16 +1,19 @@
 """meals.mcp_tools: the pantry's MCP tools, the LLM-callable boundary over Steve's pantry (PR 3).
 
 Authority: `.context/seams/lane-b-pantry-pr3-mcp-tools.md` [Seams] (the tool table, the error
-mapping, the date window, the security invariants), as amended by the PR 3 RED brief [Brief]
-(`open_real_pantry()` is public; `build_server(open_pantry, today=date.today)`), whose numbered
-requirements are cited [R1]..[R8]; and the `Pantry` Protocol docstrings in meals/contracts.py
-[Protocol]. Expected values are worked out by hand from conftest's `sample_pantry_items`, never
-from the code. The server is driven in-process through the SDK's own `Client`, over `FakePantry`;
-only [R7] and [R8] use a real database.
+mapping, the date window, the security invariants), whose Revision 2 [Rev2] wins over the rest of
+it (writes require `on`; strict argument types; only PantryRowError is translated; a missing
+database is refused); the PR 3 RED brief [Brief] (`open_real_pantry()` is public;
+`build_server(open_pantry, today=date.today)`), whose numbered requirements are cited [R1]..[R8];
+and the `Pantry` Protocol docstrings in meals/contracts.py [Protocol]. Expected values are worked
+out by hand from conftest's `sample_pantry_items`, never from the code. The server is driven
+in-process through the SDK's own `Client`, over `FakePantry`; the real-pantry tests at the end use
+a real database.
 """
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import sys
 from collections.abc import Callable
@@ -25,25 +28,19 @@ from mcp import Client, StdioServerParameters
 from mcp.server import MCPServer
 from mcp.types import CallToolResult, TextContent, Tool
 
+import meals.mcp_tools as mcp_tools
 from meals.config import PROJECT_ROOT
 from meals.contracts import PantryItem, PantryStatus
 from meals.db import get_db
 from meals.fakes import FakePantry
 from meals.pantry import PantryRowError, SeedItem, SqlitePantry
 
-_MISSING: ModuleNotFoundError | None = None
-try:
-    import meals.mcp_tools as mcp_tools
-except ModuleNotFoundError as error:  # RED: the module under test isn't built yet
-    if error.name != "meals.mcp_tools":
-        raise
-    _MISSING = error
-
 # The injected clock. conftest's TODAY (2026-09-26) is the day these tests were written, so a tool
 # reading the system clock instead of `today()` would pass on that day; this one is already past.
 # On CLOCK the due staples are butter (flagged) and tahini (asked from 2026-07-22). Olive oil's ask
 # date, 2026-09-24, is after it, so the system clock (2026-09-26 or later) also lists olive oil.
 CLOCK = date(2026, 9, 23)
+DAY = CLOCK.isoformat()  # CLOCK as the client sends it
 # [Seams] "Date window": `on` must be within [today - 366 days, today + 1 day], inclusive.
 EARLIEST, LATEST = CLOCK - timedelta(days=366), CLOCK + timedelta(days=1)  # 2025-09-22, 2026-09-24
 
@@ -56,14 +53,14 @@ TOOL_ARGS = {
     "log_purchase": {"name", "on", "qty", "price_cents"},
     "confirm_stocked": {"name", "plenty", "on"},
 }
-# One valid call per tool, on an item the fixture holds.
+# One valid call per tool, on an item the fixture holds. The writes take the message's date [Rev2].
 CALLS = [
     ("list_pantry", {}),
     ("staples_due", {}),
     ("resolve_product", {"name": "butter"}),
     ("set_status", {"name": "butter", "status": "have"}),
-    ("log_purchase", {"name": "butter"}),
-    ("confirm_stocked", {"name": "butter"}),
+    ("log_purchase", {"name": "butter", "on": DAY}),
+    ("confirm_stocked", {"name": "butter", "on": DAY}),
 ]
 CALL_IDS = [tool for tool, _ in CALLS]
 # The tools taking `on`, each with its other arguments.
@@ -84,18 +81,6 @@ ROW_ERROR = (
     "pantry_item 3 ('butter') is invalid; re-run the seed loader with a corrected row to fix it. "
     "Details: meijer_url must be an https URL on meijer.com"
 )
-
-
-@pytest.fixture(autouse=True)
-def _requires_mcp_tools() -> None:
-    """RED guard: each test fails on its own, naming the missing seam, instead of the whole file
-    erroring at import."""
-    if _MISSING is not None:
-        pytest.fail(
-            "meals.mcp_tools isn't built yet: it must provide build_server(open_pantry, "
-            "today=date.today) -> MCPServer and the open_real_pantry() context manager "
-            f"({_MISSING})"
-        )
 
 
 @pytest.fixture
@@ -210,6 +195,10 @@ def test_the_server_offers_exactly_the_six_tools_with_the_spec_arguments(
     tools = _tools(_server(fake_pantry)[0])
     assert {tool.name: set(tool.input_schema.get("properties", {})) for tool in tools} == TOOL_ARGS
     assert all(tool.description and tool.description.strip() for tool in tools)
+    # [Rev2] "Writes take the message's date": `on` is required on the writes, optional on the read.
+    required = {tool.name: set(tool.input_schema.get("required", ())) for tool in tools}
+    assert "on" in required["log_purchase"] and "on" in required["confirm_stocked"]
+    assert "on" not in required["staples_due"]
 
 
 # ── one pantry per call ([R6]) ─────────────────────────────────────────────────
@@ -254,7 +243,9 @@ def test_staples_due_asks_the_pantry_about_on_or_else_today(
     by_name: dict[str, PantryItem],
     args: dict[str, Any],
     due: tuple[str, ...],
-) -> None:  # [R2]; [Seams] staples_due → staples_due(on or today())
+) -> (
+    None
+):  # [R2]; [Seams] staples_due → staples_due(on or today()); [Rev2] a read keeps the default
     result = _call(_server(fake_pantry)[0], "staples_due", args)
     assert _ok(result) == _dump(*(by_name[name] for name in due))
 
@@ -286,24 +277,18 @@ def test_set_status_flips_the_stored_item(
     assert _ok(result) == expected.model_dump(mode="json")
 
 
-@pytest.mark.parametrize(
-    ("args", "day"),
-    [({"on": "2026-09-22"}, date(2026, 9, 22)), ({}, CLOCK)],
-    ids=["on given", "on omitted: today()"],
-)
 def test_log_purchase_restocks_the_stored_item(
     fake_pantry: FakePantry,
     sample_pantry_items: tuple[PantryItem, ...],
     by_name: dict[str, PantryItem],
-    args: dict[str, Any],
-    day: date,
-) -> None:  # [R2]; [Seams] log_purchase → log_purchase(name, on or today(), …); [Protocol]
-    # butter is flagged and was last bought 2026-09-21, so either day is its latest purchase:
-    # it becomes last_purchased, status goes to `have` and next_ask_on is cleared.
-    arguments = {"name": "butter", "qty": 2, "price_cents": 499, **args}
+) -> None:  # [R2]; [Seams] log_purchase → log_purchase(name, on, …); [Protocol]
+    # butter is flagged and was last bought 2026-09-21, so 2026-09-22 (not CLOCK) is its latest
+    # purchase: it becomes last_purchased, status goes to `have` and next_ask_on is cleared. qty is
+    # an int: [Rev2] "An int like 2 is still accepted".
+    arguments = {"name": "butter", "on": "2026-09-22", "qty": 2, "price_cents": 499}
     result = _call(_server(fake_pantry)[0], "log_purchase", arguments)
     expected = by_name["butter"].model_copy(
-        update={"last_purchased": day, "status": "have", "next_ask_on": None}
+        update={"last_purchased": date(2026, 9, 22), "status": "have", "next_ask_on": None}
     )
     assert fake_pantry.list_items() == _after(sample_pantry_items, expected)
     assert _ok(result) == expected.model_dump(mode="json")
@@ -314,10 +299,8 @@ def test_log_purchase_restocks_the_stored_item(
     [
         ({"on": "2026-09-01"}, date(2026, 9, 8)),  # still good: a week after `on`
         ({"on": "2026-09-01", "plenty": True}, date(2026, 10, 31)),  # plenty: 60 days after
-        ({}, date(2026, 9, 30)),  # a week after CLOCK
-        ({"plenty": True}, date(2026, 11, 22)),  # 60 days after CLOCK
     ],
-    ids=["still good", "plenty", "still good, on omitted: today()", "plenty, on omitted: today()"],
+    ids=["still good", "plenty"],
 )
 def test_confirm_stocked_pushes_the_stored_ask_date(
     fake_pantry: FakePantry,
@@ -325,7 +308,7 @@ def test_confirm_stocked_pushes_the_stored_ask_date(
     by_name: dict[str, PantryItem],
     args: dict[str, Any],
     ask: date,
-) -> None:  # [R2]; [Seams] confirm_stocked → confirm_stocked(name, on or today(), plenty)
+) -> None:  # [R2]; [Seams] confirm_stocked → confirm_stocked(name, on, plenty)
     # tahini: a 60-day interval and a current ask date of 2026-07-22, earlier than every push, so
     # the push alone decides next_ask_on (FakePantry.confirm_stocked's rules, worked by hand).
     result = _call(_server(fake_pantry)[0], "confirm_stocked", {"name": "tahini", **args})
@@ -345,12 +328,11 @@ def test_the_clock_is_read_on_every_call_not_when_the_server_is_built(
     before = _call(server, "staples_due", {})
     now[0] = CLOCK
     after = _call(server, "staples_due", {})
-    # The date window moves with it: LATEST is outside the window as of 2026-07-01.
+    # The date window moves with it, on every tool taking `on`: as of 2026-07-01 the window ends
+    # on 2026-07-02, so a clock read when the server was built would refuse all three calls.
     at_the_edge = _call(server, "staples_due", {"on": LATEST.isoformat()})
-    # The write tools' default `on` too: as of 2026-07-01, butter's purchase would be back-dated
-    # (no change) and tahini's push (to 2026-07-08) earlier than its ask date (2026-07-22).
-    _ok(_call(server, "log_purchase", {"name": "butter"}))
-    _ok(_call(server, "confirm_stocked", {"name": "tahini"}))
+    _ok(_call(server, "log_purchase", {"name": "butter", "on": DAY}))
+    _ok(_call(server, "confirm_stocked", {"name": "tahini", "on": DAY}))
     stored = {item.name: item for item in fake_pantry.list_items()}
     assert _ok(before) == _dump(by_name["butter"])
     assert _ok(after) == _dump(by_name["butter"], by_name["tahini"])
@@ -363,24 +345,54 @@ def test_the_clock_is_read_on_every_call_not_when_the_server_is_built(
 
 
 @pytest.mark.parametrize(
-    ("tool", "args", "bad"),
+    ("tool", "args", "named"),
     [
         ("set_status", {"name": "rice", "status": "bogus"}, "bogus"),
         ("log_purchase", {"name": "rice", "on": "not-a-date"}, "not-a-date"),
+        # [Rev2] "Writes take the message's date; there is no clock default"
+        ("log_purchase", {"name": "rice"}, r"\bon\b"),
+        ("confirm_stocked", {"name": "rice"}, r"\bon\b"),
+        # [Rev2] "Argument types are strict and checked by the schema"
+        ("log_purchase", {"name": "rice", "on": DAY, "price_cents": True}, "price_cents"),
+        ("log_purchase", {"name": "rice", "on": DAY, "price_cents": "499"}, "price_cents"),
+        ("log_purchase", {"name": "rice", "on": DAY, "price_cents": 4.0}, "price_cents"),
+        ("log_purchase", {"name": "rice", "on": DAY, "qty": True}, "qty"),
+        ("log_purchase", {"name": "rice", "on": DAY, "qty": "2"}, "qty"),
+        ("confirm_stocked", {"name": "rice", "on": DAY, "plenty": "yes"}, "plenty"),
+        # [Rev2] qty > 0 and price_cents >= 0 are the schema's now, so the pantry never sees them
+        ("log_purchase", {"name": "rice", "on": DAY, "qty": 0}, "qty"),
+        ("log_purchase", {"name": "rice", "on": DAY, "qty": -1.5}, "qty"),
+        ("log_purchase", {"name": "rice", "on": DAY, "price_cents": -1}, "price_cents"),
     ],
-    ids=["unknown status", "malformed date"],
+    ids=[
+        "unknown status",
+        "malformed date",
+        "log_purchase without on",
+        "confirm_stocked without on",
+        "price_cents true",
+        "price_cents '499'",
+        "price_cents 4.0",
+        "qty true",
+        "qty '2'",
+        "plenty 'yes'",
+        "qty 0",
+        "qty < 0",
+        "price_cents < 0",
+    ],
 )
 def test_invalid_arguments_are_refused_before_the_pantry_opens(
     fake_pantry: FakePantry,
     sample_pantry_items: tuple[PantryItem, ...],
     tool: str,
     args: dict[str, Any],
-    bad: str,
-) -> None:  # [R2] invalid status; [R6] 0 enters; [Seams] "Arguments are validated by pydantic"
+    named: str,
+) -> None:  # [R2] invalid status; [R6] 0 enters; [Rev2]; [Seams] "validated by pydantic"
     server, opener = _server(fake_pantry)
     result = _call(server, tool, args)
     assert result.is_error
-    assert bad in _text(result)  # the argument's validation message, not "Unknown tool"
+    # The rejected argument's own message, not "Unknown tool". A pattern, since "on" alone is in
+    # every validation message ("validati-on").
+    assert re.search(named, _text(result)), _text(result)
     assert (opener.entered, opener.exited) == (0, 0)
     assert fake_pantry.list_items() == sample_pantry_items
 
@@ -390,8 +402,8 @@ def test_invalid_arguments_are_refused_before_the_pantry_opens(
     [
         ("resolve_product", {"name": "saffron"}),
         ("set_status", {"name": "saffron", "status": "buy_next_time"}),
-        ("log_purchase", {"name": "saffron"}),
-        ("confirm_stocked", {"name": "saffron"}),
+        ("log_purchase", {"name": "saffron", "on": DAY}),
+        ("confirm_stocked", {"name": "saffron", "on": DAY}),
     ],
     ids=["resolve_product", "set_status", "log_purchase", "confirm_stocked"],
 )
@@ -409,34 +421,25 @@ def test_an_unknown_name_is_a_tool_error_naming_it(
     assert (opener.entered, opener.exited) == (1, 1)  # [R6]: closed although the call failed
 
 
-@pytest.mark.parametrize(
-    "bad", [{"qty": 0.0}, {"qty": -1.5}, {"price_cents": -1}], ids=["qty 0", "qty < 0", "price < 0"]
-)
-def test_a_pantry_value_error_reaches_the_client_in_the_pantrys_words(
-    fake_pantry: FakePantry, sample_pantry_items: tuple[PantryItem, ...], bad: dict[str, Any]
-) -> None:  # [R4]; [Seams] "`ValueError` from the pantry (bad qty or price) → ToolError(str(err))"
-    with pytest.raises(ValueError) as refused:  # what the pantry itself says, whatever it is
-        FakePantry(sample_pantry_items).log_purchase("butter", CLOCK, **bad)
-    result = _call(_server(fake_pantry)[0], "log_purchase", {"name": "butter", **bad})
-    assert result.is_error
-    assert str(refused.value) in _text(result)
-    assert fake_pantry.list_items() == sample_pantry_items
-
-
 @pytest.mark.parametrize(("tool", "args"), CALLS, ids=CALL_IDS)
 def test_a_corrupt_row_error_reaches_the_client_whichever_tool_hit_it(
     tool: str, args: dict[str, Any]
-) -> None:  # [R4]; [Seams] "`PantryRowError` → ToolError(str(err)) ... it must reach Steve"
+) -> None:  # [R4]; [Rev2] "The error mapping narrows to `PantryRowError` → ToolError"
     result = _call(_server(_FailingPantry(PantryRowError(ROW_ERROR)))[0], tool, args)
     assert result.is_error
     assert ROW_ERROR in _text(result)
 
 
+@pytest.mark.parametrize(
+    "error", [sqlite3.OperationalError, ValueError], ids=["sqlite error", "stray ValueError"]
+)
 @pytest.mark.parametrize(("tool", "args"), CALLS, ids=CALL_IDS)
-def test_an_unexpected_error_reaches_the_client_opaque(tool: str, args: dict[str, Any]) -> None:
-    # [R4]; [Seams] "Anything else propagates ... the client sees the opaque error", which the
+def test_an_unexpected_error_reaches_the_client_opaque(
+    tool: str, args: dict[str, Any], error: type[Exception]
+) -> None:
+    # [R4]; [Rev2] "every other exception, including a stray `ValueError`, stays opaque", which the
     # SDK renders as exactly "Error executing tool <name>": no internal detail, nothing re-dressed.
-    server, opener = _server(_FailingPantry(sqlite3.OperationalError("secret path /x")))
+    server, opener = _server(_FailingPantry(error("secret path /x")))
     result = _call(server, tool, args)
     assert result.is_error
     assert _text(result) == f"Error executing tool {tool}"
@@ -506,7 +509,7 @@ def test_the_real_pantry_opens_on_the_calls_thread_and_the_writes_land(pantry_db
     # [R7]; [Seams] "Sync tools run in a worker thread", so the connection is opened per call
     server = mcp_tools.build_server(mcp_tools.open_real_pantry, today=lambda: CLOCK)
     _ok(_call(server, "set_status", {"name": "butter", "status": "buy_next_time"}))
-    _ok(_call(server, "log_purchase", {"name": "rice", "qty": 2, "price_cents": 499}))
+    _ok(_call(server, "log_purchase", {"name": "rice", "on": DAY, "qty": 2, "price_cents": 499}))
     with closing(get_db(pantry_db)) as conn:  # a fresh connection: what was committed
         items = conn.execute("SELECT name, status, last_purchased FROM pantry_item ORDER BY id")
         stored = [tuple(row) for row in items]
@@ -515,8 +518,43 @@ def test_the_real_pantry_opens_on_the_calls_thread_and_the_writes_land(pantry_db
             "FROM purchase_log l JOIN pantry_item i ON i.id = l.item_id"
         )
         logged = [tuple(row) for row in log]
-    assert stored == [("butter", "buy_next_time", None), ("rice", "have", "2026-09-23")]
-    assert logged == [("rice", "2026-09-23", 2.0, 499)]  # qty and price_cents passed through
+    assert stored == [("butter", "buy_next_time", None), ("rice", "have", DAY)]
+    assert logged == [("rice", DAY, 2.0, 499)]  # qty and price_cents passed through
+
+
+def test_a_purchase_retried_after_midnight_changes_nothing(pantry_db: Path) -> None:
+    # [Rev2] "Writes take the message's date": a retried run carries the same `on`, so crossing
+    # midnight makes it a same-day replay, which writes nothing ([Protocol] log_purchase).
+    now = [CLOCK]
+    server = mcp_tools.build_server(mcp_tools.open_real_pantry, today=lambda: now[0])
+    bought = {"name": "rice", "on": DAY}
+    _ok(_call(server, "log_purchase", bought))
+    _ok(_call(server, "set_status", {"name": "rice", "status": "buy_next_time"}))
+    now[0] = CLOCK + timedelta(days=1)  # midnight passes, and the run is retried
+    _ok(_call(server, "log_purchase", bought))
+    with closing(get_db(pantry_db)) as conn:
+        log = conn.execute(
+            "SELECT i.name, l.purchased_on FROM purchase_log l JOIN pantry_item i ON i.id = l.item_id"
+        )
+        logged = [tuple(row) for row in log]
+        status = conn.execute("SELECT status FROM pantry_item WHERE name = 'rice'").fetchone()[0]
+    assert logged == [("rice", DAY)]  # one purchase, not a second one dated a day later
+    assert status == "buy_next_time"  # the flag set after the purchase survives the retry
+
+
+def test_a_missing_database_is_refused_not_created(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_settings: None
+) -> (
+    None
+):  # [Rev2] "`open_real_pantry` refuses a missing database ... never creates an empty pantry"
+    path = tmp_path / "absent" / "pantry.sqlite"
+    monkeypatch.setenv("PANTRY_DB", str(path))
+    server = mcp_tools.build_server(mcp_tools.open_real_pantry, today=lambda: CLOCK)
+    result = _call(server, "list_pantry", {})
+    assert result.is_error
+    text = _text(result)
+    assert str(path) in text and re.search(r"seed[ _]loader", text, re.IGNORECASE), text
+    assert not path.exists() and not path.parent.exists()
 
 
 @pytest.mark.parametrize("fails", [False, True], ids=["call returns", "call raises"])
