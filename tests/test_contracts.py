@@ -1,3 +1,4 @@
+import inspect
 import subprocess
 import sys
 import tomllib
@@ -9,6 +10,7 @@ from typing import Any
 import pytest
 from pydantic import BaseModel, ValidationError
 
+from meals import claude_runner
 from meals.contracts import (
     CartItem,
     CartList,
@@ -55,7 +57,10 @@ def test_layers_contract_has_adr_0001s_tiers() -> None:
     the tiers themselves are pinned here."""
     config = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     contracts = config["tool"]["importlinter"]["contracts"]
-    (layering,) = [c for c in contracts if c["type"] == "layers"]
+    # Lanes may add their own layers contracts; this one spans the whole package.
+    (layering,) = [
+        c for c in contracts if c["type"] == "layers" and c.get("containers") == ["meals"]
+    ]
 
     assert [_tier(layer) for layer in layering["layers"]] == [
         _tier(layer) for layer in ADR_0001_LAYERS
@@ -225,6 +230,16 @@ def test_fake_claude_records_hold_fds_with_the_real_runs_default() -> None:
 
     assert [call.hold_fds for call in fake.calls] == [(7, 9), ()]
     assert ClaudeCall("find recipes", None, False, 600).hold_fds == ()
+
+
+def test_fake_claude_run_takes_the_real_runs_parameters() -> None:
+    """`patched_claude` (tests/conftest.py) swaps the fake in for claude_runner.run, so a call
+    written against the real signature must bind to the fake's: same names, kinds and defaults."""
+
+    def shape(run: Callable[..., Any]) -> list[tuple[str, Any, Any]]:
+        return [(p.name, p.kind, p.default) for p in inspect.signature(run).parameters.values()]
+
+    assert shape(FakeClaudeRunner().run) == shape(claude_runner.run)
 
 
 def test_fake_claude_validates_against_schema(sample_recipe: RecipeOption) -> None:

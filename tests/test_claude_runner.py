@@ -772,6 +772,7 @@ def test_slot_stays_held_while_a_killed_callers_claude_runs_on(
 
 # ADR-0001, Orphaned Chrome child: a cart fill passes the job lock and its Chrome lock.
 HOLD_LOCKS = ("job-cart_fill.lock", "chrome.lock")
+CLOSED_FD = 999  # far above any fd run() opens for itself
 
 # A job process: takes its lock, then runs claude holding it. argv[1] is the lock file.
 HOLDING_DRIVER = (
@@ -834,18 +835,70 @@ def test_claude_inherits_every_hold_fd_as_well_as_its_slot(
         assert any(slot in inherited for slot in slots), "claude no longer holds its slot"
 
 
+@pytest.mark.parametrize("chrome", [False, True], ids=["plain", "chrome"])
 def test_a_closed_hold_fd_stops_claude_starting_rather_than_running_unlocked(
-    fake_claude_home: Path,
+    fake_claude_home: Path, chrome: bool
 ) -> None:
-    """Seam map contracts-5: a bad fd is left to Popen, so it fails the start ("could not
-    start"). Dropping it instead would fill the cart without the lock it was meant to hold."""
-    closed = 999  # far above any fd run() opens for itself
+    """Code review, contracts-5: run() checks its hold fds up front, so a closed one raises
+    ValueError before claude starts: no retry, and no "could not start" blaming the claude binary.
+    Dropping it instead would fill the cart without the lock it was meant to hold."""
     with pytest.raises(OSError):
-        os.fstat(closed)  # precondition: nothing here has it open
+        os.fstat(CLOSED_FD)  # precondition: nothing here has it open
 
-    with pytest.raises(ClaudeRunnerError, match="could not start"):
-        claude_runner.run(PROMPT, chrome=True, timeout=RUN_TIMEOUT, hold_fds=(closed,))
+    with pytest.raises(ValueError, match=f"hold_fds: fd {CLOSED_FD} isn't open"):
+        claude_runner.run(PROMPT, chrome=chrome, timeout=RUN_TIMEOUT, hold_fds=(CLOSED_FD,))
     assert _calls(fake_claude_home) == []
+
+
+# Popen makes fds 0-2 the child's stdin, stdout and stderr, so a lock passed as one of them is
+# silently replaced (checked by experiment): claude would run without it.
+UNINHERITABLE_FDS = [
+    pytest.param(0, "hold_fds: fd 0 is one of the child's stdin, stdout or stderr", id="stdin"),
+    pytest.param(1, "hold_fds: fd 1 is one of the child's stdin, stdout or stderr", id="stdout"),
+    pytest.param(2, "hold_fds: fd 2 is one of the child's stdin, stdout or stderr", id="stderr"),
+    pytest.param(-1, "hold_fds: fd -1", id="negative"),
+]
+
+
+@pytest.mark.parametrize("chrome", [False, True], ids=["plain", "chrome"])
+@pytest.mark.parametrize(("fd", "message"), UNINHERITABLE_FDS)
+def test_a_hold_fd_claude_cant_inherit_is_refused_before_it_starts(
+    fake_claude_home: Path, tmp_path: Path, chrome: bool, fd: int, message: str
+) -> None:
+    """Code review, contracts-5: ValueError up front, naming the bad fd, and claude never starts.
+    A good fd ahead of it doesn't hide it."""
+    good = os.open(tmp_path / "job-cart_fill.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        with pytest.raises(ValueError, match=message):
+            claude_runner.run(PROMPT, chrome=chrome, timeout=RUN_TIMEOUT, hold_fds=(good, fd))
+    finally:
+        os.close(good)
+    assert _calls(fake_claude_home) == []
+
+
+def test_a_bad_hold_fd_is_refused_without_waiting_for_a_busy_slot(
+    fake_claude_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Code review, contracts-5: the check comes before run() takes a slot. A call that can never
+    run must not queue behind another run (a cart fill holds its slot for minutes) only to fail
+    when its turn comes."""
+    with pytest.raises(OSError):
+        os.fstat(CLOSED_FD)  # precondition: nothing here has it open
+    _script(fake_claude_home, {"sleep": 10, **OK})
+    monkeypatch.setenv("CLAUDE_MAX_CONCURRENT", "1")
+    holder = _start_driver(dict(os.environ))
+    try:
+        _first_call(fake_claude_home, holder)  # its claude has the only slot
+
+        with pytest.raises(ValueError, match=f"hold_fds: fd {CLOSED_FD} isn't open"):
+            claude_runner.run(PROMPT, timeout=RUN_TIMEOUT, hold_fds=(CLOSED_FD,))
+        assert _events(fake_claude_home, "end") == [], "run() waited for the slot to check its fds"
+        assert len(_calls(fake_claude_home)) == 1
+    finally:
+        holder.kill()
+        holder.wait()
+        for call in _calls(fake_claude_home):
+            _kill(call["pid"])
 
 
 def test_a_hold_fd_lock_stays_held_while_a_killed_callers_claude_runs_on(
