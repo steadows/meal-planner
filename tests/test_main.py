@@ -332,3 +332,36 @@ def test_a_startup_failure_logs_mealies_message_but_not_its_unvetted_cause(
     assert run_job.calls == [] and sent, "a start-up failure is reported, and no job runs"
     assert "Mealie is down" in caplog.text
     assert "UNVETTED-CAUSE" not in caplog.text
+
+
+# ── Codex-sweep repair (seam map D20) ────────────────────────────────────────
+
+
+def test_a_job_that_doesnt_need_mealie_runs_without_a_mealie_token(
+    run_job: RunJobSpy, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # D20 (C2): with MEALIE_TOKEN unset, deps.mealie is a stand-in that raises RuntimeError naming
+    # MEALIE_TOKEN when used, so the nudge (and redeliveries) aren't blocked at start-up.
+    _record_sends(monkeypatch)  # a start-up failure report must not reach the network
+    monkeypatch.delenv("MEALIE_TOKEN")
+    refusals: list[str] = []
+
+    def use_mealie(deps: Any) -> None:
+        uses: list[Callable[[], object]] = [
+            lambda: deps.mealie.import_url("https://example.com/chili"),
+            lambda: deps.mealie.get_recipe("chili"),
+            lambda: deps.mealie.list_by_tag("rotation"),
+            lambda: deps.mealie.set_meal_plan(date(2026, 9, 27), ["chili"]),
+        ]
+        for use in uses:
+            try:
+                use()
+            except RuntimeError as exc:
+                refusals.append(str(exc))
+
+    run_job.with_deps = use_mealie
+
+    assert _main(["job", "sat_nudge", *NOW]) == 0
+
+    assert [call["name"] for call in run_job.calls] == ["sat_nudge"]
+    assert len(refusals) == 4 and all("MEALIE_TOKEN" in refusal for refusal in refusals)

@@ -52,11 +52,16 @@ class FakeTelegramApi:
         self.sends: list[tuple[str, str, object]] = []  # (chat id, text, parse_mode)
         self.failures: list[Exception | None] = []
         self.always: Exception | None = None
+        self.clock = 0.0  # fake monotonic seconds: each send costs `send_cost_s`
+        self.send_cost_s = 0.0
+        self.send_started: list[float] = []
 
     def record(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
         chat_id = kwargs.get("chat_id", args[0] if args else None)
         text = kwargs.get("text", args[1] if len(args) > 1 else None)
         self.sends.append((str(chat_id), str(text), kwargs.get("parse_mode")))
+        self.send_started.append(self.clock)
+        self.clock += self.send_cost_s
         failure = self.failures.pop(0) if self.failures else self.always
         if failure is not None:
             raise failure
@@ -263,3 +268,29 @@ def test_telegram_send_splits_through_split_message(
     _sender([])("the whole message")
 
     assert api.texts == ["chunk one", "chunk two"]
+
+
+# ── Codex-sweep repair (seam map D21) ────────────────────────────────────────
+
+
+def test_the_two_minute_budget_covers_the_sends_themselves_not_just_the_waits(
+    api: FakeTelegramApi,
+) -> None:
+    # D21 (C3): the 120 s budget covers the whole send on a monotonic clock (`clock=`), so no
+    # attempt or wait starts past it. Each attempt here takes 100 s of the fake clock.
+    api.always = NetworkError("connection reset")
+    api.send_cost_s = 100.0
+    waits: list[tuple[float, float]] = []  # (clock when the wait starts, seconds)
+
+    def sleep(seconds: float) -> None:
+        waits.append((api.clock, seconds))
+        api.clock += seconds
+
+    send = jobs.TelegramSend(TOKEN, CHAT_ID, sleep=sleep, clock=lambda: api.clock)
+    with pytest.raises(jobs.DeliveryFailed):
+        send("Cart ready")
+
+    assert api.send_started and all(start <= BUDGET_S for start in api.send_started), (
+        api.send_started
+    )
+    assert all(start <= BUDGET_S for start, _ in waits), waits

@@ -22,7 +22,7 @@ import signal
 import sqlite3
 import time
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -857,3 +857,24 @@ def test_a_recipe_with_no_hands_on_time_says_0_minutes(job: Job) -> None:
     _run(job, "sat_propose", SAT_9)
 
     assert "0 min hands-on" in _one_message(job)
+
+
+def test_a_proposal_planned_past_20_00_is_stored_but_never_sent(job: Job) -> None:
+    # D22 (C4): the job's current time is `now` plus the elapsed Deps.clock, so planning that starts
+    # at 19:59 and ends after 20:00 isn't delivered (ADR :133). The row stays; the claim fails.
+    # Sunday's autoapprove then says it didn't reach Steve (covered by the end-to-end test above).
+    elapsed = [0.0]
+
+    def plan_for_five_minutes() -> None:
+        elapsed[0] += 5 * 60
+
+    job = replace(job, deps=replace(job.deps, clock=lambda: elapsed[0]))
+    job.proposer.before = plan_for_five_minutes
+
+    _run(job, "sat_propose", _local(2026, 9, 26, 19, 59))
+
+    assert len(job.proposer.calls) == 1 and job.telegram.attempts == []
+    assert _week(job)["status"] == "proposed"
+    claim = _claim(job, "sat_propose")
+    assert claim["outcome"] == "failed"
+    assert "not delivered" in (claim["detail"] or "")

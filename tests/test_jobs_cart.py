@@ -25,7 +25,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import FrameType
-from typing import Any
+from typing import Any, NoReturn
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -837,6 +837,7 @@ def test_run_job_installs_its_own_handlers_and_restores_the_callers(
         pytest.param("approved", "interrupted", False, id="approved-interrupted"),
         pytest.param("cart_filled", None, True, id="filled-unfinished-D5"),
         pytest.param("cart_filled", "done", False, id="filled-done"),
+        pytest.param("ordered", None, True, id="ordered-unfinished-D19"),
     ],
 )
 def test_reconcile_spawns_a_fill_only_for_weeks_that_need_one(
@@ -1122,3 +1123,45 @@ def test_a_message_sent_outside_the_act_step_leaves_a_log_line(
         r for r in caplog.records if r.name.split(".")[0] == "meals" and r.levelno >= logging.INFO
     ]
     assert lines, f"the {path} message left no line in jobs.log"
+
+
+# ── Codex-sweep repairs (seam map D19, D20) ──────────────────────────────────
+
+
+def test_reconcile_redelivers_the_report_of_a_week_ordered_before_it_arrived(job: Job) -> None:
+    # D19 (C1): the report committed, Telegram failed, then the bot marked the week ordered.
+    # Reconcile still spawns the fill, whose Inspect re-sends the stored report without filling.
+    _seed_week(job, "ordered", ref="plan-27")
+    _seed_claim(job, detail=REPORT.model_dump_json())
+
+    _run(job, "reconcile", SUN_10_15)
+
+    assert job.spawner.calls == [WEEK_ARGS]
+    _run_spawned(job, SUN_10_16)
+    assert job.filler.calls == []
+    assert "tahini" in _one_message(job)
+    assert _claim(job)["outcome"] == "done"
+
+
+class MealieNotConfigured:
+    """__main__'s stand-in when MEALIE_TOKEN is unset (D20): every call raises."""
+
+    def _refuse(self, *args: object, **kwargs: object) -> NoReturn:
+        raise RuntimeError("MEALIE_TOKEN is not set")
+
+    import_url = get_recipe = list_by_tag = set_meal_plan = _refuse
+
+
+def test_reconcile_restarts_fills_even_when_mealie_cant_be_used(
+    job: Job, caplog: pytest.LogCaptureFixture
+) -> None:
+    # D20 (C2): Mealie's configuration mustn't block cart recovery; the publish failure is logged.
+    caplog.set_level(logging.DEBUG)
+    job = replace(job, deps=replace(job.deps, mealie=MealieNotConfigured()))
+    _seed_week(job, "approved")
+
+    _run(job, "reconcile", SUN_10_15)
+
+    assert job.spawner.calls == [WEEK_ARGS]
+    assert _week(job)["mealie_plan_ref"] is None
+    assert "MEALIE_TOKEN" in caplog.text
