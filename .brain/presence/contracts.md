@@ -10,8 +10,8 @@ tracker_epic: none
 current_worktree: /Users/stevemeadows/meal-planner-contracts
 current_branch: feat/contracts
 current_ticket: none
-touches: [meals/__init__.py, meals/config.py, meals/db.py, meals/contracts.py, meals/claude_runner.py, meals/fakes/, pyproject.toml, uv.lock, tests/conftest.py, tests/test_contracts.py, tests/test_config.py, tests/test_db.py, tests/test_claude_runner.py]
-updated: 2026-09-26T03:58:37Z
+touches: [.brain/journal/2026-09-26.md, .brain/presence/mealie.md, .brain/presence/pantry.md, .brain/presence/search.md]
+updated: 2026-09-26T04:28:22Z
 ---
 Lane 0 — everything else builds on this. Deliver the database schema from PLAN.md (Pantry rules → Table schema), the pydantic models (WeekProposal, RecipeOption, Intent, CartList, CartReport), `claude_runner.run()` wrapping `claude -p` / `claude --chrome -p` with timeouts and JSON validation, and a fake for every contract in `meals/fakes/`. Done when fakes pass and one real `claude -p` call returns valid JSON. Merge first; then set status: done to unblock [[contracts-pantry-waiting-on]], [[contracts-mealie-waiting-on]], [[contracts-search-waiting-on]], [[bot-contracts-waiting-on]] and [[cart-contracts-waiting-on]]. Sole owner of the contracts rule: [[bot-cart-contracts-mealie-pantry-search-wiring-shared-rule]].
 
