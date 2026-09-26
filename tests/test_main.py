@@ -222,7 +222,7 @@ def test_run_job_gets_deps_built_from_the_real_modules(run_job: RunJobSpy, tmp_p
     deps = call["deps"]
     assert "job_run" in call["tables"] and (tmp_path / "pantry.sqlite").exists()
     assert Path(deps.lock_dir) == tmp_path / "locks"
-    assert isinstance(deps.send, jobs.TelegramSend)
+    assert isinstance(deps.send, background.TelegramSend)
     assert deps.spawn is background.spawn_job
     assert isinstance(deps.mealie, HttpMealieClient)
     refusal = call["fill_refusal"]
@@ -288,7 +288,7 @@ def _record_sends(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     def record(self: object, text: str) -> None:
         sent.append(text)
 
-    monkeypatch.setattr(jobs.TelegramSend, "__call__", record)
+    monkeypatch.setattr(background.TelegramSend, "__call__", record)
     return sent
 
 

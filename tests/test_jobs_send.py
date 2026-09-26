@@ -1,13 +1,14 @@
-"""meals.jobs.TelegramSend, meals.background.split_message, and the jobs module's constants.
+"""meals.background.TelegramSend and split_message, and the jobs module's constants.
 
 Authority: the P2 seam map (.context/seams/P2.md: the `TelegramSend` row; the reuse table's EXTEND row,
 "lift it into a public background.split_message(text) -> list[str] (empty text → [text]), used by
-_reply and the jobs sender. This is one home for one concept"; the `JOBS` and constants rows) and
-ADR-0001 :146 (sends retry transient Telegram errors: 3 attempts, ≤ 2 min).
+_reply and the jobs sender. This is one home for one concept"; the `JOBS` and constants rows; "The
+Telegram sender moved to meals/background.py") and ADR-0001 :146 (sends retry transient Telegram
+errors: 3 attempts, ≤ 2 min).
 
 PTB's `telegram.Bot` is replaced by a local fake that records each Bot's token and each
 send_message call, and raises whatever a test scripts. House style from test_background.py: patch
-the attribute and any alias of it in meals.jobs. `sleep` is injected, so nothing waits.
+the attribute and any alias of it in meals.background. `sleep` is injected, so nothing waits.
 """
 
 import asyncio
@@ -72,7 +73,7 @@ class FakeTelegramApi:
 
 
 @pytest.fixture
-def api(monkeypatch: pytest.MonkeyPatch, _jobs_exists: None) -> FakeTelegramApi:
+def api(monkeypatch: pytest.MonkeyPatch) -> FakeTelegramApi:
     api = FakeTelegramApi()
 
     class FakeBot:
@@ -97,14 +98,14 @@ def api(monkeypatch: pytest.MonkeyPatch, _jobs_exists: None) -> FakeTelegramApi:
 
     real = telegram.Bot
     monkeypatch.setattr(telegram, "Bot", FakeBot)
-    for name, value in list(vars(jobs).items()):  # `from telegram import Bot`
+    for name, value in list(vars(background).items()):  # `from telegram import Bot`
         if value is real:
-            monkeypatch.setattr(jobs, name, FakeBot)
+            monkeypatch.setattr(background, name, FakeBot)
     return api
 
 
 def _sender(sleeps: list[float]) -> Callable[[str], None]:
-    return jobs.TelegramSend(TOKEN, CHAT_ID, sleep=sleeps.append)
+    return background.TelegramSend(TOKEN, CHAT_ID, sleep=sleeps.append)
 
 
 # ── constants ────────────────────────────────────────────────────────────────
@@ -113,7 +114,8 @@ def _sender(sleeps: list[float]) -> Callable[[str], None]:
 def test_the_jobs_and_limits_are_the_seam_maps(_jobs_exists: None) -> None:
     expected = {"sat_propose", "sat_nudge", "sun_autoapprove", "cart_fill", "reconcile"}
     assert set(jobs.JOBS) == expected and len(jobs.JOBS) == 5
-    assert (jobs.ALARM_S, jobs.SEND_ATTEMPTS, jobs.SEND_BUDGET_S) == (45 * 60, 3, BUDGET_S)
+    assert jobs.ALARM_S == 45 * 60
+    assert (background.SEND_ATTEMPTS, background.SEND_BUDGET_S) == (3, BUDGET_S)
     assert str(jobs.TZ) == "America/Detroit"
 
 
@@ -182,7 +184,7 @@ def test_three_transient_failures_raise_delivery_failed(api: FakeTelegramApi) ->
     api.always = NetworkError("connection reset")
     sleeps: list[float] = []
 
-    with pytest.raises(jobs.DeliveryFailed):
+    with pytest.raises(background.DeliveryFailed):
         _sender(sleeps)("Cart ready")
 
     assert len(api.sends) == 3
@@ -201,7 +203,7 @@ def test_non_transient_errors_raise_delivery_failed_without_retrying(
     api.always = error
     sleeps: list[float] = []
 
-    with pytest.raises(jobs.DeliveryFailed):
+    with pytest.raises(background.DeliveryFailed):
         _sender(sleeps)("Cart ready")
 
     assert (len(api.sends), sleeps) == (1, [])
@@ -213,7 +215,7 @@ def test_waiting_never_passes_the_two_minute_budget(api: FakeTelegramApi, retry_
     api.always = RetryAfter(retry_after)
     sleeps: list[float] = []
 
-    with pytest.raises(jobs.DeliveryFailed):
+    with pytest.raises(background.DeliveryFailed):
         _sender(sleeps)("Cart ready")
 
     assert sum(sleeps) <= BUDGET_S, sleeps
@@ -257,13 +259,13 @@ def test_bot_replies_split_through_split_message(monkeypatch: pytest.MonkeyPatch
 def test_telegram_send_splits_through_split_message(
     api: FakeTelegramApi, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # One home for splitting: the jobs sender uses background's, whether imported as a module
-    # attribute or by name.
+    # One home for splitting: the Telegram sender uses split_message, under any name it's bound to
+    # in background.
     original = background.split_message
     monkeypatch.setattr(background, "split_message", _split_spy)
-    for name, value in list(vars(jobs).items()):
+    for name, value in list(vars(background).items()):
         if value is original:
-            monkeypatch.setattr(jobs, name, _split_spy)
+            monkeypatch.setattr(background, name, _split_spy)
 
     _sender([])("the whole message")
 
@@ -286,8 +288,8 @@ def test_the_two_minute_budget_covers_the_sends_themselves_not_just_the_waits(
         waits.append((api.clock, seconds))
         api.clock += seconds
 
-    send = jobs.TelegramSend(TOKEN, CHAT_ID, sleep=sleep, clock=lambda: api.clock)
-    with pytest.raises(jobs.DeliveryFailed):
+    send = background.TelegramSend(TOKEN, CHAT_ID, sleep=sleep, clock=lambda: api.clock)
+    with pytest.raises(background.DeliveryFailed):
         send("Cart ready")
 
     assert api.send_started and all(start <= BUDGET_S for start in api.send_started), (

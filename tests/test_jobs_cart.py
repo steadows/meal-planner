@@ -30,6 +30,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from meals import background
 from meals.contracts import (
     TRUSTED,
     CartReport,
@@ -97,7 +98,7 @@ class Telegram:
         if self.on_send is not None:
             self.on_send(text)
         if self.down:
-            raise jobs.DeliveryFailed("fake: Telegram is unreachable")
+            raise background.DeliveryFailed("fake: Telegram is unreachable")
         self.delivered.append(text)
 
 

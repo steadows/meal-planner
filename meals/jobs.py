@@ -14,7 +14,6 @@ reconcile runs steps 1, 5 and 7 only. Dependencies arrive in `Deps`, so tests us
 `__main__` composes the real modules.
 """
 
-import asyncio
 import fcntl
 import logging
 import os
@@ -31,11 +30,8 @@ from types import FrameType
 from typing import Literal, get_args
 from zoneinfo import ZoneInfo
 
-import telegram
-from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError
-
 from meals import plan_state
-from meals.background import first_line, split_message
+from meals.background import DeliveryFailed, first_line
 from meals.contracts import CartReport, Custody, MealieClient, MealieUnavailable, WeekProposal
 from meals.plan_state import APPROVED_OR_LATER, JobRun, StoredWeek
 
@@ -46,14 +42,11 @@ JOBS: tuple[JobName, ...] = get_args(JobName)
 
 TZ = ZoneInfo("America/Detroit")
 ALARM_S = 45 * 60
-SEND_ATTEMPTS = 3
-SEND_BUDGET_S = 120
 REASON_MAX_CHARS = 500
 NUDGE_AFTER = timedelta(hours=3)
 RECONCILE_DAYS = 6
 DEFAULT_CUSTODY: Custody = "wed+sat_sun"  # the first week's guess (seam map D2)
 
-_BACKOFF_S = (5.0, 15.0)
 _SAT, _SUN = 5, 6
 _FILLED = ("cart_filled", "ordered")
 _EXPIRED = "expired"  # cart_fill's detail when the week passed before it filled
@@ -64,10 +57,6 @@ _EMPTY_THE_CART = (
 # Spelled out rather than strftime, which follows the process locale.
 _DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
-
-
-class DeliveryFailed(Exception):
-    """A Telegram message wasn't delivered: retries ran out, or Telegram refused it."""
 
 
 class JobTimeout(BaseException):
@@ -743,65 +732,3 @@ _REDELIVER: dict[str, Callable[[_Run, JobRun], None]] = {
     "sun_autoapprove": _redeliver_autoapprove,
     "cart_fill": _redeliver_report,
 }
-
-
-# ── the Telegram sender ──────────────────────────────────────────────────────
-
-
-class TelegramSend:
-    """Deps.send for a job process: plain text to Steve's chat, split at Telegram's limit, with a
-    fresh `telegram.Bot` per attempt. Transient errors (network, flood control) are retried up to
-    SEND_ATTEMPTS within SEND_BUDGET_S, which counts the attempts themselves as well as the waits
-    (no attempt or wait starts past it); anything else, or running out, raises DeliveryFailed.
-
-    DeliveryFailed carries only the error's type, never its text, and drops the chain: PTB's
-    InvalidToken message includes the token."""
-
-    def __init__(
-        self,
-        token: str,
-        chat_id: int,
-        *,
-        sleep: Callable[[float], object] = time.sleep,
-        clock: Callable[[], float] = time.monotonic,
-    ) -> None:
-        self._token = token
-        self._chat_id = chat_id
-        self._sleep = sleep
-        self._clock = clock
-
-    def __call__(self, text: str) -> None:
-        pending = list(split_message(text))
-        spent = 0.0  # attempts timed on the clock, plus each wait (the sleep may be injected)
-        for attempt in range(1, SEND_ATTEMPTS + 1):
-            began = self._clock()
-            try:
-                asyncio.run(self._send(pending))
-                return
-            except TelegramError as exc:
-                spent += self._clock() - began
-                wait = _retry_wait(exc, attempt)
-                kind = type(exc).__name__
-                if wait is None or attempt == SEND_ATTEMPTS or spent + wait > SEND_BUDGET_S:
-                    raise DeliveryFailed(f"Telegram didn't take the message ({kind})") from None
-                logger.warning("Telegram send attempt %d failed (%s); retrying", attempt, kind)
-                self._sleep(wait)
-                spent += wait
-
-    async def _send(self, pending: list[str]) -> None:
-        """Send the chunks in order, dropping each from `pending` once it's delivered, so a retry
-        resumes where the last attempt stopped."""
-        async with telegram.Bot(self._token) as bot:
-            while pending:
-                await bot.send_message(chat_id=self._chat_id, text=pending[0], parse_mode=None)
-                pending.pop(0)
-
-
-def _retry_wait(exc: TelegramError, attempt: int) -> float | None:
-    """Seconds to wait before retrying, or None if the error isn't transient."""
-    if isinstance(exc, RetryAfter):
-        wait = exc.retry_after
-        return wait.total_seconds() if isinstance(wait, timedelta) else float(wait)
-    if isinstance(exc, NetworkError) and not isinstance(exc, BadRequest):
-        return _BACKOFF_S[min(attempt, len(_BACKOFF_S)) - 1]
-    return None

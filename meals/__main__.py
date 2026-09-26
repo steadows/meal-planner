@@ -48,7 +48,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if token is None or chat_id is None:
         logger.error("TELEGRAM_BOT_TOKEN and TELEGRAM_ALLOWED_CHAT_ID must be set in .env")
         return 2
-    send = jobs.TelegramSend(token.get_secret_value(), chat_id)
+    send = background.TelegramSend(token.get_secret_value(), chat_id)
     try:
         conn = get_db()
     except Exception as exc:
@@ -107,7 +107,7 @@ def _configure_logging() -> None:
     logger.setLevel(logging.INFO)
 
 
-def _deps(conn: sqlite3.Connection, send: jobs.TelegramSend, lock_dir: Path) -> jobs.Deps:
+def _deps(conn: sqlite3.Connection, send: background.TelegramSend, lock_dir: Path) -> jobs.Deps:
     pantry = SqlitePantry(conn)
     mealie: MealieClient
     try:
@@ -160,18 +160,18 @@ class _MealieNotConfigured:
         self._fail()
 
 
-def _report_startup_failure(send: jobs.TelegramSend, name: str, exc: Exception) -> int:
+def _report_startup_failure(send: background.TelegramSend, name: str, exc: Exception) -> int:
     """The job couldn't even start (a bad path, a database that won't open)."""
     return _report(send, name, exc, "failed to start")
 
 
-def _report(send: jobs.TelegramSend, name: str, exc: BaseException, what: str) -> int:
+def _report(send: background.TelegramSend, name: str, exc: BaseException, what: str) -> int:
     """Log the failure to jobs.log and tell Steve, loudly, then exit 1."""
     reason = background.first_line(exc)
     logger.error("job %s %s: %s", name, what, reason, exc_info=jobs.safe_exc_info(exc))
     try:
         send(f"job {name} {what}: {reason}"[: jobs.REASON_MAX_CHARS])
-    except jobs.DeliveryFailed:
+    except background.DeliveryFailed:
         logger.error("couldn't tell Steve that job %s %s", name, what)
     return 1
 
