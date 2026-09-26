@@ -1242,3 +1242,60 @@ def test_a_cart_under_35_dollars_warns_about_the_pickup_fee(
     _run(job, "cart_fill", SUN_10, W)
 
     assert ("under $35" in _one_message(job)) is warns
+
+
+# ── convergence repair (seam map D23b) ───────────────────────────────────────
+
+PROPOSED_PICK = "Gochujang turkey meatballs"
+
+
+def _propose_a_week(
+    week_start: date, custody: Custody, recent: Sequence[WeekProposal]
+) -> WeekProposal:
+    return _proposal(week_start, PROPOSED_PICK)
+
+
+@pytest.mark.parametrize("path", ["report-redelivery", "fresh-fill", "sat-propose"])
+def test_a_signal_just_after_finish_commits_sends_no_failure_message(
+    job: Job, monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    # D23b (convergence 1, U1): the run marks itself finishing before `finish`, so a signal after
+    # the finish commits (its message has already gone out) is only logged. There's no "failed"
+    # message, and never empty-the-cart advice for a filled cart.
+    real_finish = plan_state.finish
+    fired: list[str] = []
+
+    def finish_then_sigterm(
+        conn: sqlite3.Connection, name: str, week: date, outcome: plan_state.Outcome
+    ) -> None:
+        real_finish(conn, name, week, outcome)
+        if not fired:
+            fired.append(outcome)
+            raise jobs.JobTerminated("stopped by SIGTERM")
+
+    for module in (plan_state, jobs):
+        for attribute, value in list(vars(module).items()):
+            if value is real_finish:
+                monkeypatch.setattr(module, attribute, finish_then_sigterm)
+    name: jobs.JobName = "cart_fill"
+    now, expected = SUN_10, "tahini"
+    if path == "report-redelivery":
+        _seed_week(job, "cart_filled", ref="plan-27")
+        _seed_claim(job, detail=REPORT.model_dump_json())
+    elif path == "fresh-fill":
+        _seed_week(job, "approved")
+    else:
+        job = replace(job, deps=replace(job.deps, propose=_propose_a_week))
+        name, now, expected = "sat_propose", _local(2026, 9, 26, 9), PROPOSED_PICK
+
+    _run(job, name, now, W if name == "cart_fill" else None)
+
+    assert fired == ["done"], "the spy must fire on the run's own finish"
+    assert len(job.telegram.delivered) == 1 and expected in job.telegram.delivered[0], (
+        job.telegram.delivered
+    )
+    assert not any("failed" in text or "Empty it" in text for text in job.telegram.attempts)
+    outcome = job.reader.execute(
+        "SELECT outcome FROM job_run WHERE job = ? AND week_start = ?", (name, W.isoformat())
+    ).fetchone()[0]
+    assert outcome == "done"
