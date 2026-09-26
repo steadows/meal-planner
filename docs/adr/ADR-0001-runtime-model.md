@@ -273,7 +273,7 @@ is no queue, no outbox table, and no second always-on process.
   1. The next migration (numbered at merge order): `job_run` (DDL below). No new columns and no `weekly_plan`
      change.
   2. `hold_fds` on `claude_runner.run`.
-  3. Layers contract: `"(__main__)"` > `"(bot) | (jobs) | (mcp_tools)"` > `"(pantry) | (mealie_client) | (search)
+  3. Layers contract: `"(__main__)"` > `"(bot) | (jobs) | (mcp_tools) | (seed_loader)"` > `"(pantry) | (mealie_client) | (search)
      | (planner) | (cart) | (background) | (plan_state)"` > `"(db) | (claude_runner) | (rollup)"` >
      `"contracts | (config)"`. `__main__` becomes the composition root; today (pyproject.toml:95) it's an
      independent sibling of bot and jobs, so it can't import either.
