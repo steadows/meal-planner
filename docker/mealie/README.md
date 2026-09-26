@@ -11,10 +11,14 @@ it through `meals/mealie_client.py`.
    password right away.
 3. Create a long-lived API token at `/user/profile/api-tokens`. Put it in the repo's `.env` as
    `MEALIE_TOKEN`, and set `MEALIE_URL=http://localhost:9925`.
-4. After Tailscale (Phase 2), start with `MEALIE_BIND=<tailscale-ip>` so the phone can reach it
-   (it listens on 127.0.0.1 only until then) and
-   `MEALIE_BASE_URL=http://<tailscale-hostname>:9925` so links Mealie generates point at the
-   right host.
+4. After Tailscale (Phase 2), give the phone a path in. Mealie listens on 127.0.0.1 only, so
+   nothing on the LAN can reach it (or its default admin password). The recommended path is
+   [Tailscale Serve](https://tailscale.com/kb/1312/serve), which relays tailnet traffic to a
+   local-only service: run `tailscale serve --bg 9925` on this machine, then restart Mealie with
+   `MEALIE_BASE_URL=https://<machine>.<tailnet>.ts.net` so its links match. The phone opens
+   that URL on cellular. The alternative is to publish on the Tailscale interface directly with
+   `MEALIE_BIND=<tailscale-ip>` (and `MEALIE_BASE_URL=http://<tailscale-hostname>:9925`), but
+   Docker then can't start Mealie until Tailscale is up at boot.
 
 Check the client against it:
 `uv run pytest -m integration tests/test_mealie_client_integration.py`. Those tests skip when

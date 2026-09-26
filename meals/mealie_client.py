@@ -39,6 +39,11 @@ _SLUG = re.compile(r"[A-Za-z0-9_-]+", re.ASCII)
 # How Mealie answers a URL it can't scrape: no recipe data, scrape timeout, scraper crash. Mealie
 # also answers 500 for a server fault, which it can't be told apart from here, so it is logged.
 _SCRAPE_FAILURES = frozenset({400, 408, 500})
+# A term of a Mealie duration: "1 hour 30 minutes" (its scraper's format), "25 min", "PT1H30M".
+_DURATION_PART = re.compile(
+    r"(\d+(?:\.\d+)?)\s*(days?|d|hours?|hrs?|h|minutes?|mins?|m)(?![a-z])", re.IGNORECASE
+)
+_UNIT_MINUTES = {"d": 24 * 60, "h": 60, "m": 1}
 # Hosts reserved for local networks (RFC 6761, 6762, 8375; ICANN .internal), besides single labels.
 _LOCAL_SUFFIXES = (".localhost", ".local", ".internal", ".home.arpa")
 
@@ -68,7 +73,13 @@ class _IngredientLine(_Mealie):
 
     @property
     def text(self) -> str:
-        return (self.original_text or self.display or self.note or "").strip()
+        """The line as it reads now. originalText is what was first imported, so it comes last."""
+        return (self.display or self.note or self.original_text or "").strip()
+
+    @property
+    def structured(self) -> bool:
+        """Carries a food, or an amount of its own (then its note names the food)."""
+        return self.food is not None or bool(self.quantity and self.quantity > 0) or bool(self.unit)
 
 
 class _Parsed(_Mealie):
@@ -88,6 +99,8 @@ class _Recipe(_Mealie):
     name: str | None = None
     org_url: str | None = Field(default=None, alias="orgURL")
     recipe_servings: float | None = Field(default=None, alias="recipeServings")
+    prep_time: str | None = Field(default=None, alias="prepTime")
+    # Not in v3.28.0 (prepTime is free text there); used when a later Mealie provides it.
     prep_time_seconds: int | None = Field(default=None, alias="prepTimeSeconds")
     tags: tuple[_Slugged, ...] | None = None
     recipe_ingredient: tuple[_IngredientLine, ...] = Field(default=(), alias="recipeIngredient")
@@ -158,12 +171,12 @@ class HttpMealieClient:
 
     def get_recipe(self, slug: str) -> RecipeOption:
         recipe = self._fetch_recipe(slug)
-        prep = recipe.prep_time_seconds
+        seconds = recipe.prep_time_seconds
         return RecipeOption(
             name=recipe.name or slug,
             url=recipe.org_url or "",
             source=_source(recipe.org_url),
-            hands_on_min=None if prep is None else prep // 60,
+            hands_on_min=_minutes(recipe.prep_time) if seconds is None else seconds // 60,
             servings=_servings(recipe),
             batch_ok=any(tag.slug == BATCH_OK_TAG for tag in recipe.tags or ()),
             fit_note="",
@@ -189,7 +202,12 @@ class HttpMealieClient:
 
     def set_meal_plan(self, week_start: date, slugs: Sequence[str]) -> str:
         """Replace this client's entries on the cook day (`week_start`) with `slugs`, one dinner
-        entry each. Every slug is resolved before anything is written."""
+        entry each. Every slug is resolved before anything is written.
+
+        Not safe to run concurrently for one week: two overlapping calls can leave the union of
+        their recipes. Callers serialize. This relies on the runtime model's single publisher
+        (wiring's ADR-0001, not yet confirmed: only `reconcile` publishes, under its job lock);
+        revisit if that changes."""
         wanted = tuple(self._fetch_recipe(slug).id for slug in dict.fromkeys(slugs))
         day = week_start.isoformat()
         entries = self._paged("/api/households/mealplans", {"start_date": day, "end_date": day})
@@ -233,12 +251,12 @@ class HttpMealieClient:
 
     def _ingredients(self, lines: Sequence[_IngredientLine]) -> tuple[Ingredient, ...]:
         """Structured lines as they are; text-only lines (what a URL import leaves) through
-        Mealie's parser in one call. A line the parser can't find a food in keeps its raw text."""
-        kept = [line for line in lines if line.food is not None or line.text]
-        texts = list(dict.fromkeys(line.text for line in kept if line.food is None))
+        Mealie's parser in one call. A line the parser can't read keeps its raw text."""
+        kept = [line for line in lines if line.structured or line.text]
+        texts = list(dict.fromkeys(line.text for line in kept if not line.structured))
         parsed = dict(zip(texts, self._parse(texts), strict=True))
         return tuple(
-            _to_ingredient(line if line.food else parsed[line.text], fallback=line.text)
+            _to_ingredient(line if line.structured else parsed[line.text], fallback=line.text)
             for line in kept
         )
 
@@ -301,11 +319,24 @@ def _ip_literal(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | No
 
 
 def _to_ingredient(line: _IngredientLine, fallback: str) -> Ingredient:
-    if line.food is None:
-        return Ingredient(name=fallback)
     qty = line.quantity if line.quantity and line.quantity > 0 else None
     unit = line.unit.name if line.unit else None
-    return Ingredient(name=line.food.name, qty=qty, unit=unit, note=line.note or "")
+    if line.food is not None:
+        return Ingredient(name=line.food.name, qty=qty, unit=unit, note=line.note or "")
+    if qty is None and unit is None:
+        return Ingredient(name=fallback)
+    return Ingredient(name=(line.note or "").strip() or fallback, qty=qty, unit=unit)
+
+
+def _minutes(text: str | None) -> int | None:
+    """Minutes in a Mealie duration string; a bare number is minutes. None if unreadable."""
+    if not text:
+        return None
+    parts = _DURATION_PART.findall(text)
+    if parts:
+        return round(sum(float(n) * _UNIT_MINUTES[unit[0].lower()] for n, unit in parts))
+    stripped = text.strip()
+    return int(stripped) if stripped.isdigit() else None
 
 
 def _source(org_url: str | None) -> str:

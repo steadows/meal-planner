@@ -24,7 +24,7 @@ def recipe_json(slug: str, **fields: Any) -> Json:
         "orgURL": f"https://www.budgetbytes.com/{slug}/",
         "recipeServings": 4.0,
         "recipeYieldQuantity": 0.0,
-        "prepTimeSeconds": 1200,
+        "prepTime": "20 minutes",
         "tags": [],
         "recipeIngredient": [],
         "recipeInstructions": [{"text": "Cook it."}],
@@ -222,7 +222,8 @@ def test_get_recipe_maps_mealie_fields_onto_recipe_option(
         name="Sheet-Pan Fajitas",
         orgURL="https://www.budgetbytes.com/fajitas/",
         recipeServings=4.0,
-        prepTimeSeconds=1500,
+        prepTime="20 minutes",
+        prepTimeSeconds=1500,  # not in v3.28.0; wins over prepTime when a later Mealie sends it
         tags=[{"id": "t1", "name": BATCH_OK_TAG, "slug": BATCH_OK_TAG}],
         recipeInstructions=[{"text": "Slice."}, {"text": ""}, {"text": "Roast."}],
     )
@@ -243,7 +244,7 @@ def test_get_recipe_fills_gaps_for_a_hand_entered_recipe(
     client: HttpMealieClient, stub: MealieStub
 ) -> None:
     stub.recipes["mac"] = recipe_json(
-        "mac", orgURL=None, recipeServings=0.0, recipeYieldQuantity=6.0, prepTimeSeconds=None
+        "mac", orgURL=None, recipeServings=0.0, recipeYieldQuantity=6.0, prepTime=None
     )
 
     recipe = client.get_recipe("mac")
@@ -252,6 +253,25 @@ def test_get_recipe_fills_gaps_for_a_hand_entered_recipe(
     assert recipe.servings is None  # a yield counts cookies or loaves, not people
     assert recipe.hands_on_min is None
     assert recipe.batch_ok is False
+
+
+# v3.28.0 sends prepTime as free text (its scraper writes "1 hour 30 minutes"), not seconds.
+@pytest.mark.parametrize(
+    ("prep_time", "minutes"),
+    [
+        pytest.param("1 hour 30 minutes", 90, id="scraper-format"),
+        pytest.param("25 min", 25, id="abbreviated"),
+        pytest.param("PT1H30M", 90, id="iso-8601"),
+        pytest.param("45", 45, id="bare-number-is-minutes"),
+        pytest.param("about half an hour", None, id="unreadable"),
+    ],
+)
+def test_get_recipe_reads_hands_on_minutes_from_free_text_prep_time(
+    client: HttpMealieClient, stub: MealieStub, prep_time: str, minutes: int | None
+) -> None:
+    stub.recipes["stew"] = recipe_json("stew", prepTime=prep_time)
+
+    assert client.get_recipe("stew").hands_on_min == minutes
 
 
 def test_get_recipe_reads_a_malformed_org_url_as_an_unknown_source(
@@ -318,6 +338,38 @@ def test_get_recipe_parses_text_only_lines_in_one_call_and_keeps_order(
         "parser": "nlp",
         "ingredients": ["2 lb chicken thighs", "salt to taste"],
     }
+
+
+def test_get_recipe_uses_a_food_less_line_with_its_own_amount_as_is(
+    client: HttpMealieClient, stub: MealieStub
+) -> None:
+    line = {
+        "food": None,
+        "quantity": 3,
+        "unit": {"name": "cup"},
+        "note": "rice",
+        "display": "3 cups rice",
+        "originalText": "1 cup rice",
+    }
+    stub.recipes["pilaf"] = recipe_json("pilaf", recipeIngredient=[line])
+
+    recipe = client.get_recipe("pilaf")
+
+    assert recipe.ingredients == (Ingredient(name="rice", qty=3, unit="cup"),)
+    assert not any(r.url.path == "/api/parser/ingredients" for r in stub.requests)
+
+
+def test_get_recipe_parses_a_text_only_line_as_it_reads_now_not_as_first_imported(
+    client: HttpMealieClient, stub: MealieStub
+) -> None:
+    stub.recipes["pilaf"] = recipe_json(
+        "pilaf", recipeIngredient=[raw("2 cups rice") | {"originalText": "1 cup rice"}]
+    )
+
+    client.get_recipe("pilaf")
+
+    [parser_call] = [r for r in stub.requests if r.url.path == "/api/parser/ingredients"]
+    assert json.loads(parser_call.content)["ingredients"] == ["2 cups rice"]
 
 
 def test_get_recipe_raises_key_error_for_an_unknown_slug(client: HttpMealieClient) -> None:
