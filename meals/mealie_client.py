@@ -36,12 +36,17 @@ MEALIE_IMPORT_TIMEOUT_S = 60.0
 # What Mealie's slugify produces. Slugs and tags go into URL paths, and some come from Claude's
 # output, so anything else is treated as unknown and never sent.
 _SLUG = re.compile(r"[A-Za-z0-9_-]+", re.ASCII)
+# RFC 6750 b64token (Mealie's tokens are JWTs). Anything else would reach the HTTP layer, whose
+# error for an illegal header value quotes the whole header, token included.
+_BEARER_TOKEN = re.compile(r"[A-Za-z0-9._~+/-]+=*", re.ASCII)
 # How Mealie answers a URL it can't scrape: no recipe data, scrape timeout, scraper crash. Mealie
 # also answers 500 for a server fault, which it can't be told apart from here, so it is logged.
 _SCRAPE_FAILURES = frozenset({400, 408, 500})
 # A term of a Mealie duration: "1 hour 30 minutes" (its scraper's format), "25 min", "PT1H30M".
+# The number must start the token (not "5" in ".5" or "2" in "1/2"); unsupported forms read None.
 _DURATION_PART = re.compile(
-    r"(\d+(?:\.\d+)?)\s*(days?|d|hours?|hrs?|h|minutes?|mins?|m)(?![a-z])", re.IGNORECASE
+    r"(?<![\d./])(\d+(?:\.\d+)?|\.\d+)\s*(days?|d|hours?|hrs?|h|minutes?|mins?|m)(?![a-z])",
+    re.IGNORECASE,
 )
 _UNIT_MINUTES = {"d": 24 * 60, "h": 60, "m": 1}
 # Hosts reserved for local networks (RFC 6761, 6762, 8375; ICANN .internal), besides single labels.
@@ -58,6 +63,10 @@ class _Named(_Mealie):
     name: str
 
 
+class _Referenced(_Mealie):
+    name: str | None = None
+
+
 class _Tag(_Mealie):
     id: str
     slug: str
@@ -70,6 +79,8 @@ class _IngredientLine(_Mealie):
     note: str | None = None
     display: str | None = None
     original_text: str | None = Field(default=None, alias="originalText")
+    # An ingredient that is another recipe ("Homemade sauce"); its name isn't in `display`.
+    referenced_recipe: _Referenced | None = Field(default=None, alias="referencedRecipe")
 
     @property
     def text(self) -> str:
@@ -78,8 +89,20 @@ class _IngredientLine(_Mealie):
 
     @property
     def structured(self) -> bool:
-        """Carries a food, or an amount of its own (then its note names the food)."""
-        return self.food is not None or bool(self.quantity and self.quantity > 0) or bool(self.unit)
+        """Carries a food or a linked recipe, or an amount of its own (then its note names it)."""
+        return (
+            self.food is not None
+            or self.referenced_recipe is not None
+            or bool(self.quantity and self.quantity > 0)
+            or bool(self.unit)
+        )
+
+    @property
+    def item_name(self) -> str | None:
+        """What the line is, when Mealie says so: its food, or the recipe it links to."""
+        if self.food is not None:
+            return self.food.name
+        return self.referenced_recipe.name if self.referenced_recipe else None
 
 
 class _Parsed(_Mealie):
@@ -135,7 +158,10 @@ class HttpMealieClient:
         settings = get_settings() if settings is None else settings
         if settings.mealie_token is None:
             raise RuntimeError("MEALIE_TOKEN is not set: add a Mealie API token to .env")
-        auth = {"Authorization": f"Bearer {settings.mealie_token.get_secret_value()}"}
+        token = settings.mealie_token.get_secret_value().strip()
+        if not _BEARER_TOKEN.fullmatch(token):
+            raise RuntimeError("MEALIE_TOKEN is malformed: paste the token from Mealie exactly")
+        auth = {"Authorization": f"Bearer {token}"}
         http = httpx.Client(
             base_url=settings.mealie_url,
             headers=auth,
@@ -321,8 +347,8 @@ def _ip_literal(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | No
 def _to_ingredient(line: _IngredientLine, fallback: str) -> Ingredient:
     qty = line.quantity if line.quantity and line.quantity > 0 else None
     unit = line.unit.name if line.unit else None
-    if line.food is not None:
-        return Ingredient(name=line.food.name, qty=qty, unit=unit, note=line.note or "")
+    if line.item_name:
+        return Ingredient(name=line.item_name, qty=qty, unit=unit, note=line.note or "")
     if qty is None and unit is None:
         return Ingredient(name=fallback)
     return Ingredient(name=(line.note or "").strip() or fallback, qty=qty, unit=unit)
