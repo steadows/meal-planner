@@ -22,3 +22,5 @@ Agents keep working with current machinery until a human applies this deliberate
 3. **`_detect_collisions` (~L1630-1645)** skips the lane's own presence note but not connections that list the lane in `features:`. Example: contracts pushing `meals/contracts.py` gets flagged against the shared-rule note it owns.
 
 Suggested fix: diff `$(_toplevel)` (already defined, L58) instead of `$ROOT` in 1 and 2; in 3, skip a connection whose `features` includes `$_me` when it's a shared-rule the lane owns (or any connection naming `$_me`).
+
+4. **Related UX trap (hit by [[contracts]], 2026-09-26):** each lane worktree carries a *tracked* copy of `.brain/`, which looks editable but is never read, since the brain resolves `$ROOT` to the main checkout. Contracts edited its worktree copy all session, and `brain status` showed it idle. Mitigated in CLAUDE.md (PR #5). A machinery fix could warn when the worktree's `.brain/presence/<me>.md` differs from `$ROOT`'s.
