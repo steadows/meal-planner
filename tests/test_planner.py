@@ -633,3 +633,49 @@ def test_propose_live_against_real_claude(
     assert proposal.components.proteins and proposal.components.veg
     assert len(proposal.lunch_builds) == 2
     assert proposal.kid_nights
+
+
+# ── ultrareview round 1: blanks and duplicates don't count ───────────────────
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"components": {"proteins": [" "], "grains": ["rice"], "veg": ["kale"], "sauces": ["x"]}},
+        {"lunch_builds": ["Chicken sweet-potato bowl", "  "]},
+        {"kid_meals": [*KID_MEALS[:2], {"day": "Sat", "meal": "dinner", "plan": " "}]},
+    ],
+    ids=["blank-component", "blank-lunch", "blank-kid-plan"],
+)
+def test_blank_entries_fail_validation(
+    patched_claude: FakeClaudeRunner,
+    fake_mealie: FakeMealieClient,
+    fake_pantry: FakePantry,
+    new_recipes: tuple[RecipeOption, ...],
+    overrides: dict[str, Any],
+) -> None:
+    patched_claude.queue(_draft(new_recipes, **overrides))
+
+    with pytest.raises(ClaudeRunnerError):
+        _propose(fake_mealie, fake_pantry)
+
+
+@pytest.mark.parametrize("duplicate", ["repeated-new-find", "new-find-is-a-favorite", "blank-url"])
+def test_duplicate_or_unlinked_recipes_fail_validation(
+    patched_claude: FakeClaudeRunner,
+    fake_mealie: FakeMealieClient,
+    fake_pantry: FakePantry,
+    sample_recipe: RecipeOption,
+    new_recipes: tuple[RecipeOption, ...],
+    duplicate: str,
+) -> None:
+    first, second, third = new_recipes
+    replacement = {
+        "repeated-new-find": first,
+        "new-find-is-a-favorite": sample_recipe,  # the rotation favorite's own page
+        "blank-url": third.model_copy(update={"url": " "}),
+    }[duplicate]
+    patched_claude.queue(_draft((first, second, replacement)))
+
+    with pytest.raises(ClaudeRunnerError):
+        _propose(fake_mealie, fake_pantry)

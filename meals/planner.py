@@ -11,9 +11,9 @@ draft that doesn't fit.
 import logging
 from collections.abc import Mapping, Sequence
 from datetime import date
-from typing import ClassVar, Literal, Self, get_args
+from typing import Annotated, ClassVar, Literal, Self, get_args
 
-from pydantic import Field, model_validator
+from pydantic import Field, StringConstraints, model_validator
 
 from meals import claude_runner
 from meals.config import get_settings
@@ -50,12 +50,13 @@ _KID_DINNERS_BY_CUSTODY: dict[Custody, frozenset[str]] = {
 }
 
 Weekday = Literal["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+_Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
 class _KidMeal(Contract):
     day: Weekday
     meal: Literal["lunch", "dinner"]
-    plan: str = Field(description="What Miles eats, e.g. 'from the batch: chicken, rice'")
+    plan: _Text = Field(description="What Miles eats, e.g. 'from the batch: chicken, rice'")
 
 
 class _Draft(Contract):
@@ -64,7 +65,7 @@ class _Draft(Contract):
     The ClassVars are this week's rules; `_draft_model` sets them on a per-call subclass.
     """
 
-    pool_slugs: ClassVar[frozenset[str]] = frozenset()
+    pool_urls: ClassVar[Mapping[str, str]] = {}  # rotation slug -> its recipe URL
     option_count: ClassVar[tuple[int, int]] = (0, 0)
     kid_dinners: ClassVar[frozenset[str]] = frozenset()
 
@@ -73,7 +74,7 @@ class _Draft(Contract):
     components: Components = Field(
         description="At least one each of proteins, grains, veg and sauces"
     )
-    lunch_builds: tuple[str, ...] = Field(
+    lunch_builds: tuple[_Text, ...] = Field(
         min_length=2, max_length=2, description="The two lunch build names picked"
     )
     kid_meals: tuple[_KidMeal, ...] = Field(
@@ -82,20 +83,38 @@ class _Draft(Contract):
 
     @model_validator(mode="after")
     def _fits_the_week(self) -> Self:
-        problems = []
-        if missing := [slot for slot in _REQUIRED_SLOTS if not getattr(self.components, slot)]:
-            problems.append(f"components have no {', '.join(missing)}")
-        if unknown := sorted(set(self.favorites) - self.pool_slugs):
-            problems.append(f"favorites not in the rotation pool: {', '.join(unknown)}")
-        low, high = self.option_count
-        if not low <= len(set(self.favorites)) + len(self.new_recipes) <= high:
-            problems.append(f"need {low}-{high} recipe options in all")
+        problems = [*self._component_problems(), *self._recipe_problems()]
         dinners = {meal.day for meal in self.kid_meals if meal.meal == "dinner"}
         if uncovered := sorted(self.kid_dinners - dinners):
             problems.append(f"no kid dinner for {', '.join(uncovered)}")
         if problems:
             raise ValueError("; ".join(problems))
         return self
+
+    def _component_problems(self) -> list[str]:
+        slots = self.components.model_dump()
+        problems = []
+        if missing := [slot for slot in _REQUIRED_SLOTS if not slots[slot]]:
+            problems.append(f"components have no {', '.join(missing)}")
+        if blank := [slot for slot, names in slots.items() if any(not n.strip() for n in names)]:
+            problems.append(f"blank components in {', '.join(blank)}")
+        return problems
+
+    def _recipe_problems(self) -> list[str]:
+        """Every option is a distinct, linked recipe, and the count fits the mode."""
+        problems = []
+        if unknown := sorted(set(self.favorites) - set(self.pool_urls)):
+            problems.append(f"favorites not in the rotation pool: {', '.join(unknown)}")
+        new_urls = [recipe.url.strip() for recipe in self.new_recipes]
+        favorite_urls = {self.pool_urls.get(slug, "").strip() for slug in self.favorites} - {""}
+        if "" in new_urls:
+            problems.append("a new recipe has no URL")
+        if len(set(new_urls)) < len(new_urls) or favorite_urls & set(new_urls):
+            problems.append("recipe options repeat a recipe")
+        low, high = self.option_count
+        if not low <= len(set(self.favorites)) + len(self.new_recipes) <= high:
+            problems.append(f"need {low}-{high} different recipe options in all")
+        return problems
 
 
 def _draft_model(
@@ -104,7 +123,7 @@ def _draft_model(
     """A _Draft carrying this week's rules, so a draft that breaks them fails validation."""
 
     class WeekDraft(_Draft):
-        pool_slugs = frozenset(pool)
+        pool_urls = {slug: recipe.url for slug, recipe in pool.items()}
         option_count = _OPTIONS_BY_MODE[mode]
         kid_dinners = _KID_DINNERS_BY_CUSTODY[custody]
 
