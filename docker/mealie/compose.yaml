@@ -5,7 +5,8 @@
 # guard. The meal planner relies on that guard for recipe URLs that come from web search.
 #
 # Listens on 127.0.0.1 by default, so the LAN never sees it (or its default admin password).
-# After Tailscale (Phase 2), set MEALIE_BIND to this machine's Tailscale IP so the phone can reach it.
+# The phone reaches it through `tailscale serve --bg 9925` after Phase 2 (README.md), or set
+# MEALIE_BIND to this machine's Tailscale IP.
 services:
   mealie:
     image: ghcr.io/mealie-recipes/mealie:v3.28.0
