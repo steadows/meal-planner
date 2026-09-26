@@ -11,8 +11,10 @@ it through `meals/mealie_client.py`.
    password right away.
 3. Create a long-lived API token at `/user/profile/api-tokens`. Put it in the repo's `.env` as
    `MEALIE_TOKEN`, and set `MEALIE_URL=http://localhost:9925`.
-4. After Tailscale (Phase 2), start with `MEALIE_BASE_URL=http://<tailscale-hostname>:9925` so
-   links Mealie generates point at the right host.
+4. After Tailscale (Phase 2), start with `MEALIE_BIND=<tailscale-ip>` so the phone can reach it
+   (it listens on 127.0.0.1 only until then) and
+   `MEALIE_BASE_URL=http://<tailscale-hostname>:9925` so links Mealie generates point at the
+   right host.
 
 Check the client against it:
 `uv run pytest -m integration tests/test_mealie_client_integration.py`. Those tests skip when
@@ -37,8 +39,13 @@ tags in play.
 ## How the client uses Mealie
 
 - **Import:** `POST /api/recipes/create/url`. Mealie fetches the page server-side through its own
-  SSRF guard, and the client rejects local and private URLs before sending them.
+  SSRF guard, which resolves the host and blocks private addresses. Before sending, the client
+  also refuses non-http(s) URLs, private or reserved IP literals, single-label hosts and the
+  local-use names (`.localhost`, `.local`, `.internal`, `.home.arpa`). It does no DNS lookup, so
+  a public-looking name that resolves to a private address is left to Mealie's guard.
 - **Recipes:** ingredients a URL import leaves as plain text are split into quantity, unit and food
   by Mealie's parser (`/api/parser/ingredients`) when read. Nothing is written back to the recipe.
 - **Meal plan:** each planned recipe is a dinner entry on the cook day (the Sunday), marked
   "Planned by meal-planner". Re-planning replaces only those entries. Anything added by hand stays.
+  To clear a week's planned entries, call `set_meal_plan(week_start, [])`. Imported recipes are
+  ordinary Mealie recipes: delete unwanted ones in Mealie itself.
