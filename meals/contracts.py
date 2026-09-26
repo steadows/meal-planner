@@ -231,6 +231,12 @@ def describe_rejection(schema: type[BaseModel], exc: ValidationError) -> str:
     )
 
 
+class MealieUnavailable(Exception):
+    """Mealie couldn't answer: an HTTP error other than not-found, a network failure, or a response
+    that doesn't parse. The client raises it `from` the underlying error. Not a KeyError, so a caller
+    skipping a missing recipe doesn't swallow an outage by accident."""
+
+
 @runtime_checkable
 class MealieClient(Protocol):
     def import_url(self, url: str) -> str:
@@ -238,7 +244,8 @@ class MealieClient(Protocol):
         ...
 
     def get_recipe(self, slug: str) -> RecipeOption:
-        """The recipe, with `mealie_slug` set to `slug`. Raises KeyError for an unknown slug."""
+        """The recipe, with `mealie_slug` set to `slug`. Raises KeyError for an unknown slug, and
+        MealieUnavailable for any other failure."""
         ...
 
     def list_by_tag(self, tag: str) -> tuple[str, ...]:
