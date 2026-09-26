@@ -89,8 +89,10 @@ def run(
     Raises ClaudeRunnerError (with raw_output) on a non-zero exit, an is_error result, output
     that fails parsing or validation, or a timeout. A plain run retries once on anything except a
     timeout; a Chrome run is never retried, because it has side effects (a second run would
-    double the cart). On timeout, and on any other exception while claude runs (Ctrl-C included),
-    the whole process group is killed; that exception propagates as is, without a retry.
+    double the cart). On timeout, and on any other exception once claude has started (Ctrl-C
+    included), its process group is killed; that exception propagates as is, without a retry.
+    Known gaps: Ctrl-C inside `Popen()` itself, before it returns, can't reach the child; and on
+    macOS, if killpg is refused (zombie leader), only the leader is reaped.
     """
     command = _command(schema, chrome)
     attempts = 1 if chrome else MAX_ATTEMPTS

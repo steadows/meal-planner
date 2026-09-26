@@ -34,6 +34,12 @@ class FakePantry:
     the fake leaves `typical_interval_days` as given."""
 
     def __init__(self, items: Iterable[PantryItem] = ()) -> None:
+        items = tuple(items)
+        # The real schema can't hold these, so a test mustn't be able to build them.
+        if len({item.id for item in items}) != len(items):
+            raise ValueError("FakePantry: item ids must be unique")
+        if len({item.name.casefold() for item in items}) != len(items):
+            raise ValueError("FakePantry: item names must be unique under casefold")
         self._items: dict[int, PantryItem] = {item.id: item for item in items}
         self._purchases: frozenset[tuple[int, date]] = frozenset()
 
@@ -46,9 +52,10 @@ class FakePantry:
         return None if item is None else self._replace(item, {"status": status})
 
     def confirm_stocked(self, name: str, on: date, plenty: bool = False) -> PantryItem | None:
-        """Steve says an item is still stocked: status becomes `have`. "Still good" asks again a
-        week after `on`; `plenty` asks again one interval after `on` (a week if there's no
-        interval). Logs no purchase, and repeating it for the same `on` changes nothing. The real
+        """Steve says an item is still stocked: status becomes `have`, and the next ask moves to a
+        week after `on` ("still good") or one interval after it (`plenty`; a week if there's no
+        interval), unless the current ask date is already later: this only ever pushes the ask
+        back. Logs no purchase, and repeating it for the same `on` changes nothing. The real
         pantry may also lengthen the learned interval.
 
         Not on the `Pantry` Protocol yet: it joins in a one-line contracts PR once the real pantry
@@ -58,7 +65,10 @@ class FakePantry:
             return None
         interval = item.typical_interval_days
         wait = interval if plenty and interval is not None else STILL_GOOD_DAYS
-        return self._replace(item, {"status": "have", "next_ask_on": on + timedelta(days=wait)})
+        pushed = on + timedelta(days=wait)
+        current = _ask_date(item)
+        ask = pushed if current is None else max(current, pushed)
+        return self._replace(item, {"status": "have", "next_ask_on": ask})
 
     def log_purchase(
         self, name: str, on: date, qty: float | None = None, price_cents: int | None = None

@@ -235,9 +235,10 @@ class Pantry(Protocol):
     An item's *ask date* is `next_ask_on` when set; otherwise `last_purchased` plus
     ceil(9 * interval / 10) days (PLAN: ask at 90%) when both are known; otherwise it has none.
 
-    Every method taking a `name` matches it against item names and aliases after
-    `strip().casefold()`, and an exact name beats another item's alias. An unknown name returns
-    None and writes nothing.
+    Item names are unique under casefold, which is stricter than the schema's ASCII-only
+    `COLLATE NOCASE`, so implementations reject a duplicate on insert. Every method taking a
+    `name` matches it against item names and aliases after `strip().casefold()`, and an exact
+    name beats another item's alias. An unknown name returns None and writes nothing.
     """
 
     def staples_due(self, on: date) -> tuple[PantryItem, ...]:

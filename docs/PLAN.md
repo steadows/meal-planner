@@ -558,7 +558,7 @@ Every contract ships with a fake in `meals/fakes/`, so each lane can test agains
 ### Definition of done for every module
 
 - [ ] Unit tests pass against the fakes
-- [ ] No imports from other `meals` modules except `contracts`, `db`, `config`, `claude_runner` and `rollup` (pure math). Only the entry points (`bot/`, `jobs`, `mcp_tools`, `__main__`) import the real modules and wire them together. `import-linter` enforces this in the test run.
+- [ ] No imports from other `meals` modules except `contracts`, `db`, `config`, `claude_runner` and `rollup` (pure math). Only the entry points (`bot/`, `jobs`, `mcp_tools`, `__main__`, `seed_loader`) import the real modules and wire them together. `import-linter` enforces this in the test run.
 - [ ] Runs standalone with a local `pantry.sqlite` and `.env`
 - [ ] Claude prompts live in files under `meals/prompts/<lane>/`, not inline strings
 
