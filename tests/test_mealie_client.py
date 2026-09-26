@@ -264,6 +264,8 @@ def test_get_recipe_fills_gaps_for_a_hand_entered_recipe(
         pytest.param("PT1H30M", 90, id="iso-8601"),
         pytest.param("45", 45, id="bare-number-is-minutes"),
         pytest.param("about half an hour", None, id="unreadable"),
+        pytest.param(".5 hours", 30, id="leading-decimal-point"),
+        pytest.param("1/2 hour", None, id="fraction-is-unknown-not-2-hours"),
     ],
 )
 def test_get_recipe_reads_hands_on_minutes_from_free_text_prep_time(
@@ -370,6 +372,29 @@ def test_get_recipe_parses_a_text_only_line_as_it_reads_now_not_as_first_importe
 
     [parser_call] = [r for r in stub.requests if r.url.path == "/api/parser/ingredients"]
     assert json.loads(parser_call.content)["ingredients"] == ["2 cups rice"]
+
+
+@pytest.mark.parametrize(
+    ("quantity", "display", "qty"),
+    [
+        pytest.param(1, "1", 1, id="with-amount"),
+        pytest.param(0, "", None, id="no-amount-or-text"),
+    ],
+)
+def test_get_recipe_names_a_linked_recipe_line_after_that_recipe(
+    client: HttpMealieClient, stub: MealieStub, quantity: float, display: str, qty: float | None
+) -> None:
+    line = raw(display) | {
+        "quantity": quantity,
+        "originalText": None,
+        "referencedRecipe": {"id": recipe_json("homemade-sauce")["id"], "name": "Homemade sauce"},
+    }
+    stub.recipes["enchiladas"] = recipe_json("enchiladas", recipeIngredient=[line])
+
+    recipe = client.get_recipe("enchiladas")
+
+    assert recipe.ingredients == (Ingredient(name="Homemade sauce", qty=qty),)
+    assert not any(r.url.path == "/api/parser/ingredients" for r in stub.requests)
 
 
 def test_get_recipe_raises_key_error_for_an_unknown_slug(client: HttpMealieClient) -> None:
@@ -685,6 +710,44 @@ def test_from_settings_without_a_token_raises_naming_mealie_token() -> None:
 
     with pytest.raises(RuntimeError, match="MEALIE_TOKEN"):
         HttpMealieClient.from_settings(settings)
+
+
+# A real transport's error for an illegal header value quotes the whole header, token included,
+# so a token that isn't an RFC 6750 b64token must be refused before any header is built.
+@pytest.mark.parametrize(
+    "token",
+    [
+        pytest.param("tokABC\nDEF", id="newline"),
+        pytest.param("tokABC DEF", id="space"),
+        pytest.param("tokABC\x00DEF", id="nul"),
+    ],
+)
+def test_from_settings_refuses_a_malformed_token_without_echoing_it(token: str) -> None:
+    settings = Settings(mealie_url="http://mealie.test", mealie_token=SecretStr(token))
+
+    with pytest.raises(RuntimeError, match="MEALIE_TOKEN is malformed") as raised:
+        HttpMealieClient.from_settings(settings)
+
+    error = raised.value
+    shown = f"{error} {error.__cause__!r} {error.__context__!r}"
+    assert "tokABC" not in shown and "DEF" not in shown
+
+
+@pytest.mark.parametrize(
+    ("token", "sent"),
+    [
+        pytest.param("tok-123 \n", "tok-123", id="surrounding-whitespace-stripped"),
+        pytest.param("eyJhbGciOi.eyJzdWIi.sig-_x", "eyJhbGciOi.eyJzdWIi.sig-_x", id="jwt-shaped"),
+    ],
+)
+def test_from_settings_accepts_a_well_formed_token(stub: MealieStub, token: str, sent: str) -> None:
+    settings = Settings(mealie_url="http://mealie.test", mealie_token=SecretStr(token))
+    client = HttpMealieClient.from_settings(settings, transport=httpx.MockTransport(stub))
+    stub.recipes["fajitas"] = recipe_json("fajitas")
+
+    client.get_recipe("fajitas")
+
+    assert stub.requests[-1].headers["Authorization"] == f"Bearer {sent}"
 
 
 @pytest.mark.usefixtures("isolated_settings")
