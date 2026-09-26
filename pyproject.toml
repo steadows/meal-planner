@@ -5,7 +5,6 @@ description = "Meal planning assistant: pantry, Mealie, Telegram bot and Meijer 
 requires-python = ">=3.11"
 # One dependency per line, alphabetised. Lanes: add lines, don't edit existing ones.
 dependencies = [
-    "filelock>=4.0",
     "pydantic>=2.13",
     "pydantic-settings>=2.15",
 ]
@@ -16,6 +15,7 @@ dev = [
     "import-linter>=2.15",
     "mypy>=2.3",
     "pytest>=9.1",
+    "pytest-cov>=7.1",
     "ruff>=0.16",
 ]
 
@@ -32,6 +32,15 @@ addopts = "-m 'not integration'"
 markers = [
     "integration: hits a real service (Mealie, Telegram, Chrome/Meijer, claude -p); run with -m integration",
 ]
+
+# ── coverage ───────────────────────────────────────────────────────────────
+# /steadows-verify runs `pytest --cov --cov-report=term-missing` against the 80% bar; CI doesn't.
+# Lanes: add omit entries below; don't drop branch coverage or widen `source`.
+
+[tool.coverage.run]
+source = ["meals"]
+branch = true
+omit = ["meals/fakes/*"]
 
 # ── ruff ───────────────────────────────────────────────────────────────────
 # CI runs `ruff check .` and `ruff format --check .`. Lanes: add per-file ignores below; don't
@@ -68,15 +77,21 @@ warn_required_dynamic_aliases = true
 [tool.importlinter]
 root_package = "meals"
 
+# No production module imports a fake, including modules not listed in the layers below.
+# Tests live outside the package, so they aren't constrained.
+[[tool.importlinter.contracts]]
+name = "Fakes are test-only"
+type = "protected"
+protected_modules = ["meals.fakes"]
+allowed_importers = []
+
 # Higher layers may import lower ones, never the reverse. "|" = siblings may not import each other.
 # (name) = optional, so the contract holds before that lane's module exists.
-# fakes sits on top so no production module can import a fake; tests live outside the package.
 [[tool.importlinter.contracts]]
 name = "Module layering (PLAN.md, Definition of done)"
 type = "layers"
 containers = ["meals"]
 layers = [
-    "(fakes)",
     "(bot) | (jobs) | (mcp_tools) | (__main__)",
     "(pantry) | (mealie_client) | (search) | (planner) | (cart)",
     "(db) | (claude_runner) | (rollup)",

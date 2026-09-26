@@ -3,8 +3,11 @@
 Call it as `claude_runner.run(...)` (module attribute), so tests can swap in FakeClaudeRunner.run.
 """
 
+import fcntl
 import json
+import logging
 import os
+import re
 import signal
 import subprocess
 import tempfile
@@ -15,11 +18,12 @@ from pathlib import Path
 from string import Template
 from typing import Any, TypeVar, overload
 
-from filelock import FileLock, Timeout
 from pydantic import BaseModel, ValidationError
 
 from meals.config import get_settings
 from meals.contracts import ClaudeRunnerError
+
+logger = logging.getLogger(__name__)
 
 M = TypeVar("M", bound=BaseModel)
 
@@ -29,15 +33,31 @@ PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 # or CLAUDE_CODE_* (would attach it to a parent Claude Code session).
 ENV_ALLOWLIST = ("HOME", "PATH", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR")
 
-# Web only: no file tools, so a prompt-injected page can't read .env from disk.
+# Web only: no file tools, so a prompt-injected page can't read .env from disk. Chrome runs get
+# none of these: the logged-in Meijer session must never reach the open web.
 ALLOWED_TOOLS = ("WebSearch", "WebFetch")
 
 MAX_ATTEMPTS = 2
 _SLOT_POLL_S = 0.1
+_KILL_DRAIN_S = 5
+_JSON_FENCE = re.compile(r"\A\s*```(?:json)?[ \t]*\n(.*?)\n?```\s*\Z", re.DOTALL)
 
 
 class _TimedOut(Exception):
     pass
+
+
+class _PromptTemplate(Template):
+    """`$name` and `${name}` are placeholders; any other `$` (e.g. "$35") is left as written."""
+
+    pattern = r"""
+    \$(?:
+      (?P<escaped>\$) |
+      (?P<named>[_a-z][_a-z0-9]*) |
+      {(?P<braced>[_a-z][_a-z0-9]*)} |
+      (?P<invalid>(?!))
+    )
+    """  # type: ignore[assignment]  # Template compiles a str pattern in __init_subclass__
 
 
 @overload
@@ -53,41 +73,50 @@ def run(
     """Run `claude -p` and return validated output.
 
     With `schema`: the model's JSON schema goes to `--json-schema`, and the returned
-    `structured_output` is validated into a model instance. Without: `result` parsed as JSON.
+    `structured_output` is validated into a model instance. Without: `result` parsed as JSON
+    (a surrounding ```json fence is stripped).
 
-    The prompt goes on stdin. The child runs with `--safe-mode --tools WebSearch,WebFetch
-    --output-format json` (plus `--chrome` if asked), the ENV_ALLOWLIST env, and a fresh empty
-    temp dir as cwd. It holds one of settings.claude_max_concurrent cross-process slots
-    (settings.claude_lock_dir) for the whole run.
+    The prompt goes on stdin. The child runs with `--safe-mode --output-format json`, the
+    ENV_ALLOWLIST env, and a fresh empty temp dir as cwd. Plain runs get the ALLOWED_TOOLS,
+    pre-approved; `chrome=True` runs get `--chrome` and no built-in tools. The run holds one of
+    settings.claude_max_concurrent cross-process slots (settings.claude_lock_dir) throughout.
 
     Raises ClaudeRunnerError (with raw_output) on a non-zero exit, an is_error result, output
-    that fails parsing or validation, or a timeout. Everything except a timeout is retried once
-    (MAX_ATTEMPTS). On timeout the whole process group is killed.
+    that fails parsing or validation, or a timeout. A plain run retries once on anything except a
+    timeout; a Chrome run is never retried, because it has side effects (a second run would
+    double the cart). On timeout the whole process group is killed.
     """
     command = _command(schema, chrome)
-    with _slot():
+    attempts = 1 if chrome else MAX_ATTEMPTS
+    with _slot() as slot_fd:
         attempt = 1
         while True:
             try:
-                return _parse(*_run_once(command, prompt, timeout), schema)
+                return _parse(*_run_once(command, prompt, timeout, slot_fd), schema)
             except _TimedOut as exc:
+                logger.warning("claude timed out after %ss", timeout)
                 raise ClaudeRunnerError(f"claude timed out after {timeout}s", str(exc)) from None
-            except ClaudeRunnerError:
-                if attempt == MAX_ATTEMPTS:
+            except ClaudeRunnerError as exc:
+                if attempt >= attempts:
                     raise
+                logger.warning(
+                    "claude attempt %d/%d failed, retrying: %s", attempt, attempts, exc.reason
+                )
                 attempt += 1
 
 
 def load_prompt(lane: str, name: str, **variables: str) -> str:
-    """Read PROMPTS_DIR/<lane>/<name>.md and fill `$placeholders` (string.Template).
+    """Read PROMPTS_DIR/<lane>/<name>.md and fill `$placeholders`.
 
-    A missing variable raises KeyError, never a half-filled prompt.
+    A missing variable raises KeyError, never a half-filled prompt. A `$` not followed by a
+    placeholder name (e.g. "$35") is left as written.
     """
     template = (PROMPTS_DIR / lane / f"{name}.md").read_text(encoding="utf-8")
-    return Template(template).substitute(variables)
+    return _PromptTemplate(template).substitute(variables)
 
 
 def _command(schema: type[BaseModel] | None, chrome: bool) -> list[str]:
+    tools = "" if chrome else ",".join(ALLOWED_TOOLS)
     command = [
         get_settings().claude_bin,
         "-p",
@@ -95,12 +124,14 @@ def _command(schema: type[BaseModel] | None, chrome: bool) -> list[str]:
         "--output-format",
         "json",
         "--tools",
-        ",".join(ALLOWED_TOOLS),
+        tools,
     ]
-    if schema is not None:
-        command += ["--json-schema", json.dumps(schema.model_json_schema())]
     if chrome:
         command.append("--chrome")
+    else:
+        command += ["--allowedTools", tools]
+    if schema is not None:
+        command += ["--json-schema", json.dumps(schema.model_json_schema())]
     return command
 
 
@@ -109,34 +140,39 @@ def _child_env() -> dict[str, str]:
 
 
 @contextmanager
-def _slot() -> Iterator[None]:
-    """Hold one of claude_max_concurrent OS-level file locks, waiting until one is free.
+def _slot() -> Iterator[int]:
+    """Hold one of claude_max_concurrent `flock` slots, waiting until one is free; yield its fd.
 
-    OS locks are released by the kernel if the holder dies, so a crashed job can't leak a slot.
-    `fallback_to_soft=False`: fail loudly on a filesystem without flock rather than silently
-    switching to marker files that a crash would leave behind.
+    The fd is passed to each `claude` child, so the lock lives as long as the last process
+    holding it: a crashed caller can't free a slot while its orphaned claude still runs, and a
+    dead one never leaks it. Lock files are never unlinked. A filesystem without flock raises.
     """
     settings = get_settings()
     settings.claude_lock_dir.mkdir(parents=True, exist_ok=True)
-    locks = [
-        FileLock(settings.claude_lock_dir / f"claude-slot-{n}.lock", fallback_to_soft=False)
+    paths = [
+        settings.claude_lock_dir / f"claude-slot-{n}.lock"
         for n in range(settings.claude_max_concurrent)
     ]
     while True:
-        for lock in locks:
+        for path in paths:
+            fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
             try:
-                lock.acquire(blocking=False)
-            except Timeout:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                os.close(fd)
                 continue
+            except BaseException:
+                os.close(fd)
+                raise
             try:
-                yield
+                yield fd
             finally:
-                lock.release()
+                os.close(fd)  # no LOCK_UN: a still-running child keeps the slot
             return
         time.sleep(_SLOT_POLL_S)
 
 
-def _run_once(command: list[str], prompt: str, timeout: int) -> tuple[int, str, str]:
+def _run_once(command: list[str], prompt: str, timeout: int, slot_fd: int) -> tuple[int, str, str]:
     with tempfile.TemporaryDirectory(prefix="meals-claude-") as cwd:
         try:
             process = subprocess.Popen(
@@ -148,16 +184,36 @@ def _run_once(command: list[str], prompt: str, timeout: int) -> tuple[int, str, 
                 env=_child_env(),
                 text=True,
                 start_new_session=True,
+                pass_fds=(slot_fd,),
             )
         except OSError as exc:
             raise ClaudeRunnerError(f"could not start {command[0]!r}: {exc}") from exc
         try:
             stdout, stderr = process.communicate(input=prompt, timeout=timeout)
         except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
-            stdout, stderr = process.communicate()
-            raise _TimedOut(_raw(stdout, stderr)) from None
+            _kill_tree(process)
+            raise _TimedOut(_raw(*_drain(process))) from None
     return process.returncode, stdout, stderr
+
+
+def _kill_tree(process: subprocess.Popen[str]) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        # macOS refuses killpg (EPERM) when the group leader is an unreaped zombie.
+        process.kill()
+
+
+def _drain(process: subprocess.Popen[str]) -> tuple[str, str]:
+    """Collect what the killed child wrote, without waiting on a descendant that left its group."""
+    try:
+        return process.communicate(timeout=_KILL_DRAIN_S)
+    except subprocess.TimeoutExpired:
+        for pipe in (process.stdout, process.stderr):
+            if pipe is not None:
+                pipe.close()
+        process.wait()
+        return "", ""
 
 
 def _parse(returncode: int, stdout: str, stderr: str, schema: type[BaseModel] | None) -> Any:
@@ -179,9 +235,13 @@ def _parse(returncode: int, stdout: str, stderr: str, schema: type[BaseModel] | 
             return schema.model_validate(envelope["structured_output"])
         except ValidationError as exc:
             raise ClaudeRunnerError(f"output failed {schema.__name__} validation", raw) from exc
+    result = envelope.get("result")
+    if not isinstance(result, str):
+        raise ClaudeRunnerError("claude returned no result text", raw)
+    fenced = _JSON_FENCE.match(result)
     try:
-        return json.loads(envelope.get("result", ""))
-    except (json.JSONDecodeError, TypeError):
+        return json.loads(fenced.group(1) if fenced else result)
+    except json.JSONDecodeError:
         raise ClaudeRunnerError("claude result is not JSON", raw) from None
 
 

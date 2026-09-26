@@ -7,6 +7,7 @@ import pytest
 from pydantic import BaseModel, ValidationError
 
 from meals.contracts import (
+    CartItem,
     CartReport,
     ClaudeRunnerError,
     Components,
@@ -91,6 +92,52 @@ def test_cart_report_subtotal_is_non_negative_cents() -> None:
     )
     with pytest.raises(ValidationError):
         CartReport(added=(), substituted=(), missing=(), subtotal_cents=-1)
+
+
+# The cart lane opens meijer_url in the logged-in Chrome session: https on www.meijer.com only.
+MEIJER_URL_OWNERS: dict[type[BaseModel], dict[str, object]] = {
+    CartItem: {"name": "eggs", "qty": 1},
+    PantryItem: {"id": 1, "name": "eggs", "category": "perishable"},
+}
+
+
+@pytest.mark.parametrize("model", list(MEIJER_URL_OWNERS), ids=lambda m: m.__name__)
+@pytest.mark.parametrize("url", [None, "https://www.meijer.com/shopping/p/eggs/123.html"])
+def test_meijer_url_accepts_meijer_pages(model: type[BaseModel], url: str | None) -> None:
+    item = model.model_validate(MEIJER_URL_OWNERS[model] | {"meijer_url": url})
+
+    stored = item.model_dump()["meijer_url"]
+    assert (None if stored is None else str(stored)) == url
+
+
+@pytest.mark.parametrize("model", list(MEIJER_URL_OWNERS), ids=lambda m: m.__name__)
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://evil.example/",
+        "http://www.meijer.com/x",
+        "https://meijer.com.evil.example/x",
+    ],
+)
+def test_meijer_url_rejects_other_sites(model: type[BaseModel], url: str) -> None:
+    with pytest.raises(ValidationError, match="meijer_url"):
+        model.model_validate(MEIJER_URL_OWNERS[model] | {"meijer_url": url})
+
+
+def test_cart_item_qty_must_be_positive() -> None:
+    assert CartItem(name="eggs", qty=0.5).qty == 0.5
+    with pytest.raises(ValidationError, match="qty"):
+        CartItem(name="eggs", qty=0)
+
+
+def test_pantry_item_interval_is_positive_when_set() -> None:
+    """A zero-day interval would divide by zero in every due-date calculation."""
+    assert PantryItem(id=1, name="rice", category="staple").typical_interval_days is None
+    item = PantryItem(id=1, name="rice", category="staple", typical_interval_days=1)
+    assert item.typical_interval_days == 1
+    for days in (0, -7):
+        with pytest.raises(ValidationError, match="typical_interval_days"):
+            PantryItem(id=1, name="rice", category="staple", typical_interval_days=days)
 
 
 def test_claude_runner_error_keeps_raw_output() -> None:
@@ -188,6 +235,18 @@ def test_fake_pantry_flips_status_by_alias_case_insensitive(
 
     fake_pantry.flip_status("rice", "buy_next_time")
     assert "rice" in [i.name for i in fake_pantry.staples_due(today)]
+
+
+def test_fake_pantry_staples_due_ignores_non_staples_interval_data(
+    sample_pantry_items: tuple[PantryItem, ...], today: date
+) -> None:
+    # model_construct skips validation, so the perishable can carry a zero interval.
+    milk = PantryItem.model_construct(
+        id=7, name="milk", category="perishable", typical_interval_days=0, last_purchased=today
+    )
+    pantry = FakePantry((*sample_pantry_items, milk))
+
+    assert [i.name for i in pantry.staples_due(today)] == ["butter", "tahini", "olive oil"]
 
 
 def test_fake_pantry_matches_mixed_case_stored_names() -> None:

@@ -113,8 +113,7 @@ SETTINGS_ENV_KEYS = tuple(name.upper() for name in Settings.model_fields)
 
 
 def _clear_settings_cache() -> None:
-    # getattr: until get_settings is cached there is no cache to clear.
-    getattr(get_settings, "cache_clear", lambda: None)()
+    get_settings.cache_clear()
 
 
 @pytest.fixture

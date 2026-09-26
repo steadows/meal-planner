@@ -8,7 +8,9 @@ next to itself.
 """
 
 import json
+import logging
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -21,6 +23,7 @@ import pytest
 from pydantic import BaseModel
 
 from meals import claude_runner
+from meals.config import get_settings
 from meals.contracts import ClaudeRunnerError, Ingredient
 
 pytestmark = pytest.mark.usefixtures("isolated_settings")
@@ -30,7 +33,8 @@ PROMPT = 'Find three sheet-pan dinners.\nKeep the jalapeño mild and reply like 
 RUN_TIMEOUT = 30  # bounds a hang if the runner never closes the child's stdin
 
 # The fake `claude`. Behaviour N is used for call N; the last one repeats. With "grandchild", it
-# first starts a sleeper that inherits its stdout, the way claude's own tool subprocesses would.
+# first starts a sleeper that inherits its stdout, the way claude's own tool subprocesses would;
+# "escaped" puts that sleeper in its own session, out of reach of a process-group kill.
 FAKE_CLAUDE = """\
 import json, os, subprocess, sys, time
 from pathlib import Path
@@ -55,7 +59,8 @@ behaviour = behaviours[min(index, len(behaviours) - 1)]
 grandchild = None
 if behaviour.get("grandchild"):
     sleeper = f"import time; time.sleep({behaviour.get('sleep', 0)})"
-    grandchild = subprocess.Popen([sys.executable, "-c", sleeper]).pid
+    escaped = behaviour["grandchild"] == "escaped"
+    grandchild = subprocess.Popen([sys.executable, "-c", sleeper], start_new_session=escaped).pid
 record({
     "event": "start",
     "pid": os.getpid(),
@@ -70,11 +75,12 @@ record({
     "path": os.environ.get("PATH"),
 })
 time.sleep(behaviour.get("sleep", 0))
+# Before writing: an orphan whose reader is gone dies on the broken pipe.
+record({"event": "end", "pid": os.getpid(), "time": time.time()})
 sys.stdout.write(behaviour.get("stdout", ""))
 sys.stderr.write(behaviour.get("stderr", ""))
 sys.stdout.flush()
 sys.stderr.flush()
-record({"event": "end", "pid": os.getpid(), "time": time.time()})
 sys.exit(behaviour.get("exit", 0))
 """
 
@@ -129,7 +135,8 @@ def _flag_value(argv: list[str], flag: str) -> str | None:
     """The value of `--flag value` or `--flag=value`; None when the flag is absent."""
     for i, arg in enumerate(argv):
         if arg == flag:
-            return argv[i + 1] if i + 1 < len(argv) else ""
+            assert i + 1 < len(argv), f"{flag} is the last argument and has no value"
+            return argv[i + 1]
         if arg.startswith(f"{flag}="):
             return arg.removeprefix(f"{flag}=")
     return None
@@ -166,8 +173,16 @@ def test_argv_carries_the_required_flags(
     assert "-p" in argv or "--print" in argv
     assert "--safe-mode" in argv
     assert _flag_value(argv, "--output-format") == "json"
-    assert _flag_value(argv, "--tools") == "WebSearch,WebFetch"
     assert ("--chrome" in argv) is chrome
+    allowed = [_flag_value(argv, flag) for flag in ("--allowedTools", "--allowed-tools")]
+    if chrome:
+        # The logged-in Meijer session: no built-in tools at all, so no open web.
+        assert _flag_value(argv, "--tools") == ""
+        assert allowed == [None, None]
+    else:
+        # Pre-approved, so the run doesn't depend on ambient permission settings.
+        assert _flag_value(argv, "--tools") == "WebSearch,WebFetch"
+        assert "WebSearch,WebFetch" in allowed
     schema_arg = _flag_value(argv, "--json-schema")
     if schema is None:
         assert schema_arg is None
@@ -247,6 +262,12 @@ def test_schemaless_run_returns_the_parsed_result(fake_claude_home: Path) -> Non
     assert claude_runner.run(PROMPT, timeout=RUN_TIMEOUT) == {"answer": 4, "items": ["a"]}
 
 
+def test_schemaless_run_unwraps_a_json_code_fence(fake_claude_home: Path) -> None:
+    _script(fake_claude_home, {"stdout": _envelope(result='```json\n{"answer": 4}\n```')})
+
+    assert claude_runner.run(PROMPT, timeout=RUN_TIMEOUT) == {"answer": 4}
+
+
 # ── failures and the single retry ────────────────────────────────────────────
 
 # (schema, failing behaviour, markers of which raw_output must contain at least one).
@@ -315,11 +336,42 @@ def test_failure_then_success_returns_the_second_answer(fake_claude_home: Path) 
     assert len(_calls(fake_claude_home)) == 2
 
 
+def test_chrome_run_is_never_retried(fake_claude_home: Path) -> None:
+    """A Chrome run adds items to the real cart; running it again would double the cart."""
+    _script(fake_claude_home, NONZERO_EXIT, OK)
+
+    with pytest.raises(ClaudeRunnerError):
+        claude_runner.run(PROMPT, chrome=True, timeout=RUN_TIMEOUT)
+    assert len(_calls(fake_claude_home)) == 1
+
+
+def test_retry_logs_a_warning_with_the_failure_reason(
+    fake_claude_home: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    _script(fake_claude_home, NONZERO_EXIT)
+    caplog.set_level(logging.WARNING, logger="meals.claude_runner")
+
+    with pytest.raises(ClaudeRunnerError) as caught:
+        claude_runner.run(PROMPT, timeout=RUN_TIMEOUT)
+
+    # Both attempts fail the same way, so the retried failure's reason is the raised one's.
+    assert any(caught.value.reason in message for message in _warnings(caplog))
+
+
+def _warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "meals.claude_runner" and record.levelno == logging.WARNING
+    ]
+
+
 def test_timeout_raises_without_retry_and_kills_the_process_group(
-    fake_claude_home: Path,
+    fake_claude_home: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Killing only the child leaves its grandchild holding stdout, and the runner hangs on it."""
     _script(fake_claude_home, {"sleep": 20, "grandchild": True, **OK})
+    caplog.set_level(logging.WARNING, logger="meals.claude_runner")
     started = time.monotonic()
     try:
         with pytest.raises(ClaudeRunnerError):
@@ -333,10 +385,51 @@ def test_timeout_raises_without_retry_and_kills_the_process_group(
         while _alive(call["grandchild"]) and time.monotonic() < deadline:
             time.sleep(0.05)
         assert not _alive(call["grandchild"])
+        assert _warnings(caplog)
     finally:
         for call in _calls(fake_claude_home):
             _kill(call["pid"])
             _kill(call["grandchild"])
+
+
+def test_timeout_does_not_wait_for_a_grandchild_that_left_the_group(
+    fake_claude_home: Path,
+) -> None:
+    """A grandchild in its own session survives killpg and keeps stdout open."""
+    _script(fake_claude_home, {"sleep": 30, "grandchild": "escaped", **OK})
+    started = time.monotonic()
+    try:
+        with pytest.raises(ClaudeRunnerError):
+            claude_runner.run(PROMPT, timeout=1)
+
+        assert time.monotonic() - started < 20
+    finally:
+        for call in _calls(fake_claude_home):
+            _kill(call["pid"])
+            _kill(call["grandchild"])
+
+
+def test_timeout_falls_back_to_killing_the_child_when_killpg_is_refused(
+    fake_claude_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """macOS refuses killpg with EPERM when the group leader is an unreaped zombie."""
+
+    def refuse(pgid: int, sig: int) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr("meals.claude_runner.os.killpg", refuse)
+    _script(fake_claude_home, {"sleep": 20, **OK})
+    started = time.monotonic()
+    try:
+        with pytest.raises(ClaudeRunnerError):
+            claude_runner.run(PROMPT, timeout=1)
+
+        assert time.monotonic() - started < 10
+        (call,) = _calls(fake_claude_home)
+        assert not _alive(call["pid"])
+    finally:
+        for call in _calls(fake_claude_home):
+            _kill(call["pid"])
 
 
 # ── the cross-process slot cap ───────────────────────────────────────────────
@@ -407,26 +500,64 @@ def test_slot_cap_holds_across_processes(
     assert overlapped is overlap
 
 
+def _first_call(home: Path, holder: subprocess.Popen[str]) -> dict[str, Any]:
+    """Wait until the holder's claude has started."""
+    deadline = time.monotonic() + 30
+    while not _calls(home):
+        if holder.poll() is not None:
+            pytest.fail(f"slot holder exited early:\n{holder.communicate()[1]}")
+        assert time.monotonic() < deadline, "slot holder never started claude"
+        time.sleep(0.05)
+    return _calls(home)[0]
+
+
 def test_slot_held_by_a_killed_process_is_released(fake_claude_home: Path, tmp_path: Path) -> None:
     """Why the slots are OS locks: a SIGKILLed holder must not block the next run forever."""
     _script(fake_claude_home, {"sleep": 60, **OK}, OK)
     env = os.environ | {"CLAUDE_MAX_CONCURRENT": "1", "CLAUDE_LOCK_DIR": str(tmp_path / "locks")}
     holder = _start_driver(env)
     try:
-        deadline = time.monotonic() + 30
-        while not _calls(fake_claude_home):
-            if holder.poll() is not None:
-                pytest.fail(f"slot holder exited early:\n{holder.communicate()[1]}")
-            assert time.monotonic() < deadline, "slot holder never started claude"
-            time.sleep(0.05)
+        orphan = _first_call(fake_claude_home, holder)
         holder.kill()
         holder.wait()
-        _kill(_calls(fake_claude_home)[0]["pid"])
+        _kill(orphan["pid"])
 
         assert _finish(_start_driver(env), timeout=15) == {"ok": True}
     finally:
         holder.kill()
         holder.wait()
+        for call in _calls(fake_claude_home):
+            _kill(call["pid"])
+
+
+def test_slot_stays_held_while_a_killed_callers_claude_runs_on(
+    fake_claude_home: Path, tmp_path: Path
+) -> None:
+    """The caller dies but its claude doesn't: that claude still counts against the cap."""
+    _script(fake_claude_home, {"sleep": 2, **OK}, OK)
+    env = os.environ | {"CLAUDE_MAX_CONCURRENT": "1", "CLAUDE_LOCK_DIR": str(tmp_path / "locks")}
+    holder = _start_driver(env)
+    successor: subprocess.Popen[str] | None = None
+    try:
+        orphan = _first_call(fake_claude_home, holder)
+        holder.kill()
+        holder.wait()
+        successor = _start_driver(env)
+
+        assert _finish(successor, timeout=30) == {"ok": True}
+        deadline = time.monotonic() + 10
+        while not (
+            ends := [e for e in _events(fake_claude_home, "end") if e["pid"] == orphan["pid"]]
+        ):
+            assert time.monotonic() < deadline, "the orphaned claude never finished"
+            time.sleep(0.05)
+        (follower,) = [call for call in _calls(fake_claude_home) if call["pid"] != orphan["pid"]]
+        assert follower["time"] >= ends[0]["time"]
+    finally:
+        for driver in (holder, successor):
+            if driver is not None:
+                driver.kill()
+                driver.wait()
         for call in _calls(fake_claude_home):
             _kill(call["pid"])
 
@@ -458,6 +589,17 @@ def test_load_prompt_missing_variable_raises_key_error() -> None:
         claude_runner.load_prompt("planner", "weekly")
 
 
+def test_load_prompt_leaves_dollar_amounts_alone(prompts_dir: Path) -> None:
+    (prompts_dir / "cart").mkdir()
+    (prompts_dir / "cart" / "fill.md").write_text("A $35 minimum and a $4.95 fee. Shop for $kid.\n")
+
+    assert claude_runner.load_prompt("cart", "fill", kid="Miles") == (
+        "A $35 minimum and a $4.95 fee. Shop for Miles.\n"
+    )
+    with pytest.raises(KeyError, match="kid"):
+        claude_runner.load_prompt("cart", "fill")
+
+
 @pytest.mark.usefixtures("prompts_dir")
 def test_load_prompt_missing_file_raises_file_not_found() -> None:
     with pytest.raises(FileNotFoundError):
@@ -470,6 +612,8 @@ def test_load_prompt_missing_file_raises_file_not_found() -> None:
 @pytest.mark.integration
 def test_real_claude_returns_a_validated_ingredient() -> None:
     """Definition of done for the lane. Needs `claude /login`; run with -m integration."""
+    if shutil.which(get_settings().claude_bin) is None:
+        pytest.skip(f"{get_settings().claude_bin!r} is not installed")
     ingredient = claude_runner.run("Return the ingredient: 2 lb chicken thighs", schema=Ingredient)
 
     assert isinstance(ingredient, Ingredient)

@@ -1,10 +1,13 @@
 """SQLite connection and schema migrations (PLAN.md, Table schema). Only the contracts lane edits this file."""
 
+import logging
 import sqlite3
 import time
 from pathlib import Path
 
 from meals.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 BUSY_TIMEOUT_S = 5.0
 _WAL_RETRY_SLEEP_S = 0.05
@@ -15,11 +18,11 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
     (
         """CREATE TABLE pantry_item (
             id                     INTEGER PRIMARY KEY,
-            name                   TEXT NOT NULL UNIQUE,
+            name                   TEXT NOT NULL UNIQUE COLLATE NOCASE,
             aliases                TEXT,
             category               TEXT NOT NULL CHECK (category IN ('staple','perishable','fallback')),
             status                 TEXT NOT NULL DEFAULT 'have' CHECK (status IN ('have','buy_next_time')),
-            typical_interval_days  INTEGER,
+            typical_interval_days  INTEGER CHECK (typical_interval_days > 0),
             last_purchased         DATE,
             default_qty            REAL,
             default_unit           TEXT,
@@ -67,23 +70,41 @@ def _version(conn: sqlite3.Connection) -> int:
     return version
 
 
+def _check_version(conn: sqlite3.Connection) -> int:
+    version = _version(conn)
+    if version > len(MIGRATIONS):
+        raise sqlite3.DatabaseError(
+            f"pantry database is at schema v{version}, newer than this code's "
+            f"v{len(MIGRATIONS)}; update this checkout"
+        )
+    return version
+
+
 def migrate(conn: sqlite3.Connection) -> int:
     """Apply pending migrations atomically and return the resulting schema version.
 
     An up-to-date database returns without taking a lock. Otherwise it takes BEGIN IMMEDIATE and
     re-reads user_version inside the lock, so two processes starting at once apply each migration
-    exactly once; any open transaction on `conn` is committed first. A failing migration rolls
-    back entirely.
+    exactly once. A failing migration rolls back entirely. Raises sqlite3.DatabaseError for a
+    database newer than this code (old code must not write to a schema it doesn't know), and
+    sqlite3.ProgrammingError if a migration is pending while `conn` has an open transaction
+    (running it would commit the caller's writes).
     """
-    version = _version(conn)
-    if version >= len(MIGRATIONS):
+    version = _check_version(conn)
+    if version == len(MIGRATIONS):
         return version
+    if conn.in_transaction:
+        raise sqlite3.ProgrammingError(
+            "migrate() needs a connection without an open transaction; commit or roll back first"
+        )
     previous_isolation = conn.isolation_level
     conn.isolation_level = None  # we issue BEGIN/COMMIT ourselves; never executescript()
     try:
         conn.execute("BEGIN IMMEDIATE")
         try:
-            version = _version(conn)  # re-read under the lock: another process may have won
+            version = _check_version(conn)  # re-read under the lock: another process may have won
+            if version < len(MIGRATIONS):
+                logger.info("migrating pantry database from v%d to v%d", version, len(MIGRATIONS))
             for statements in MIGRATIONS[version:]:
                 for statement in statements:
                     conn.execute(statement)
@@ -91,7 +112,8 @@ def migrate(conn: sqlite3.Connection) -> int:
                 conn.execute(f"PRAGMA user_version = {len(MIGRATIONS)}")
             conn.execute("COMMIT")
         except BaseException:
-            conn.execute("ROLLBACK")
+            if conn.in_transaction:  # SQLite may already have ended it; don't mask the real error
+                conn.execute("ROLLBACK")
             raise
         return _version(conn)
     finally:

@@ -1,4 +1,5 @@
-"""Fakes for every shared contract. Test-only: the import-linter layering keeps production code out."""
+"""Fakes for every shared contract. Test-only: the "Fakes are test-only" import-linter contract keeps
+production code out."""
 
 from meals.fakes.claude import ClaudeCall, FakeClaudeRunner
 from meals.fakes.mealie import FakeMealieClient
