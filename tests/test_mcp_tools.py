@@ -67,11 +67,7 @@ CALLS = [
 ]
 CALL_IDS = [tool for tool, _ in CALLS]
 # The tools taking `on`, each with its other arguments.
-DATED = [
-    ("staples_due", {}),
-    ("log_purchase", {"name": "butter"}),
-    ("confirm_stocked", {"name": "butter"}),
-]
+DATED = [(tool, args) for tool, args in CALLS if "on" in TOOL_ARGS[tool]]
 DATED_IDS = [tool for tool, _ in DATED]
 
 # An item with a product map, for resolve_product.
