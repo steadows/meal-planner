@@ -391,6 +391,8 @@ To confirm before building:
 - [ ] Does it already call Claude, and if so through an API key or Claude Code?
 - [ ] Does it already handle voice notes?
 
+**Decided 2026-09-25: start fresh.** The agentic-OS bot isn't available to build against, and DinnerBot runs on Google Cloud with Gemini, so neither is reused. The new bot uses python-telegram-bot with polling on the home machine, calls Claude through `claude_runner`, and handles voice itself (Phase 4). DinnerBot's handler code is fair game to borrow from.
+
 ## Build plan
 
 The build is eight phases over about 12–15 hours, spread across three or four weekends. Each phase is useful on its own. Phase 0 matters most: it gives Steve a working week and the seed data every later phase uses.
