@@ -21,3 +21,6 @@ Design only, no code, so it doesn't wait on your code dependencies. Run `/steado
 - **Fixed, don't redesign:** `claude_runner`'s process limit, which is cross-process and owned by [[contracts]]. It's not on main yet; read `~/meal-planner-contracts/.context/seams/contracts-lane0.md` read-only, and ask [[contracts]] live.
 - **Ownership:** who builds the background-run piece (bot or wiring) is a decision for the ADR; raise it as a Stage 2 question.
 - Steve confirms the ADR. Once it's on main, resolve [[bot-runtime-design-waiting-on]].
+
+## Trap for `plan_state` (from [[mealie]], via [[pm]], 2026-09-26)
+A stored `WeekProposal` read back from `weekly_plan.components` must be validated with `context={contracts.TRUSTED: True}`. Real `get_recipe` options now carry `mealie_slug`, which is **default-deny** without that context (contracts.py:33-37). This is by design; it's only a trap if you forget the context. Pin it with a round-trip test that includes a slug.
