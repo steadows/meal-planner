@@ -70,6 +70,20 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
         # than deleting history, if duplicates already exist.
         "CREATE UNIQUE INDEX purchase_log_item_day ON purchase_log (item_id, purchased_on)",
     ),
+    (
+        # ADR-0001 (runtime model): one claim per scheduled job per week. plan_state owns every
+        # read and write. `outcome` is NULL while the job runs; `detail` is never rewritten once
+        # a result commits.
+        """CREATE TABLE job_run (
+            job          TEXT NOT NULL,
+            week_start   DATE NOT NULL,
+            started_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            finished_at  DATETIME,
+            outcome      TEXT CHECK (outcome IN ('done','failed','interrupted')),
+            detail       TEXT,
+            PRIMARY KEY (job, week_start)
+        )""",
+    ),
 )
 
 
