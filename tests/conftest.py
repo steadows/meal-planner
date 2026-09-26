@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from meals import claude_runner
 from meals.config import Settings, get_settings
 from meals.contracts import Ingredient, PantryItem, RecipeOption
 from meals.db import get_db
@@ -135,3 +136,24 @@ def db(tmp_path: Path) -> Iterator[sqlite3.Connection]:
     conn = get_db(tmp_path / "pantry.sqlite")
     yield conn
     conn.close()
+
+
+# ── search ───────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def prefs_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_settings: None) -> Path:
+    """A throwaway profile that Settings.prefs_file points at."""
+    path = tmp_path / "prefs.yaml"
+    path.write_text("likes: [chicken]\ndislikes: [quinoa, prefs-marker-7f3]\n", encoding="utf-8")
+    monkeypatch.setenv("PREFS_FILE", str(path))
+    return path
+
+
+@pytest.fixture
+def patched_claude(
+    fake_claude: FakeClaudeRunner, monkeypatch: pytest.MonkeyPatch
+) -> FakeClaudeRunner:
+    """`claude_runner.run` replaced by the fake, as claude_runner's docstring prescribes."""
+    monkeypatch.setattr(claude_runner, "run", fake_claude.run)
+    return fake_claude
