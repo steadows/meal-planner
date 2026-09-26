@@ -17,7 +17,7 @@ import signal
 import subprocess
 import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -441,6 +441,21 @@ def test_timeout_falls_back_to_killing_the_child_when_killpg_is_refused(
             _kill(call["pid"])
 
 
+def _interrupting(
+    communicate: Callable[..., tuple[str, str]], interrupt: BaseException
+) -> Callable[..., tuple[str, str]]:
+    """A Popen.communicate that lets claude start, then raises `interrupt` mid-run."""
+
+    def interrupted(
+        process: subprocess.Popen[str], input: str | None = None, timeout: float | None = None
+    ) -> tuple[str, str]:
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            communicate(process, input, timeout=1)  # claude starts, as in the timeout tests
+        raise interrupt
+
+    return interrupted
+
+
 @pytest.mark.parametrize(
     "interrupt",
     [KeyboardInterrupt("marker-ctrl-c"), RuntimeError("marker-error")],
@@ -456,15 +471,7 @@ def test_any_exception_mid_run_kills_the_process_group_and_propagates_unchanged(
     _script(fake_claude_home, {"sleep": 20, "grandchild": True, **OK}, OK)
     monkeypatch.setenv("CLAUDE_MAX_CONCURRENT", "1")
     communicate = subprocess.Popen.communicate
-
-    def interrupted(
-        process: subprocess.Popen[str], input: str | None = None, timeout: float | None = None
-    ) -> tuple[str, str]:
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            communicate(process, input, timeout=1)  # claude starts, as in the timeout tests
-        raise interrupt
-
-    monkeypatch.setattr(subprocess.Popen, "communicate", interrupted)
+    monkeypatch.setattr(subprocess.Popen, "communicate", _interrupting(communicate, interrupt))
     try:
         with pytest.raises(type(interrupt)) as caught:
             claude_runner.run(PROMPT, timeout=RUN_TIMEOUT)
@@ -499,15 +506,7 @@ def test_exception_mid_run_still_kills_the_child_when_killpg_is_refused(
     monkeypatch.setattr("meals.claude_runner.os.killpg", refuse)
     _script(fake_claude_home, {"sleep": 20, "grandchild": True, **OK})
     interrupt = KeyboardInterrupt("marker-ctrl-c")
-    communicate = subprocess.Popen.communicate
-
-    def interrupted(
-        process: subprocess.Popen[str], input: str | None = None, timeout: float | None = None
-    ) -> tuple[str, str]:
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            communicate(process, input, timeout=1)  # claude starts, as in the timeout tests
-        raise interrupt
-
+    interrupted = _interrupting(subprocess.Popen.communicate, interrupt)
     monkeypatch.setattr(subprocess.Popen, "communicate", interrupted)
     try:
         with pytest.raises(KeyboardInterrupt) as caught:

@@ -8,7 +8,15 @@ from collections.abc import Sequence
 from datetime import date
 from typing import Annotated, Literal, Protocol, TypeVar, runtime_checkable
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    ValidationInfo,
+    field_validator,
+)
 from pydantic.json_schema import SkipJsonSchema
 
 PlanMode = Literal["mix", "recipes", "components"]
@@ -24,9 +32,6 @@ MAX_PANTRY_QUESTIONS = 3
 # Validation-context key marking a payload as Claude's output (validate_claude_output). Fields only
 # trusted code may set refuse a value under it.
 UNTRUSTED = "untrusted"
-
-# The same allowlist the Mealie client enforces before a slug reaches a URL path.
-_MEALIE_SLUG = re.compile(r"[A-Za-z0-9_-]+")
 
 M = TypeVar("M", bound=BaseModel)
 
@@ -66,6 +71,10 @@ def _require_sunday(day: date) -> date:
 
 SundayDate = Annotated[date, AfterValidator(_require_sunday)]
 
+# The same allowlist the Mealie client enforces before a slug reaches a URL path. Pydantic's
+# regex engine anchors `$` at the very end, so "slug\n" doesn't match.
+MealieSlug = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]+$")]
+
 
 class Contract(BaseModel):
     """Frozen, and rejects unknown fields so Claude's structured output can't smuggle extras."""
@@ -92,18 +101,14 @@ class RecipeOption(Contract):
     steps: tuple[str, ...]
     # Hidden from Claude's schema; only the Mealie client sets it (get_recipe), so a pick can go on
     # the meal plan without re-importing, which would duplicate the recipe in Mealie.
-    mealie_slug: SkipJsonSchema[str | None] = None
+    mealie_slug: SkipJsonSchema[MealieSlug | None] = None
 
     @field_validator("mealie_slug")
     @classmethod
     def _trusted_mealie_slug(cls, slug: str | None, info: ValidationInfo) -> str | None:
-        if slug is None:
-            return None
-        if (info.context or {}).get(UNTRUSTED):
+        if slug is not None and (info.context or {}).get(UNTRUSTED):
             # An injected page could otherwise point a web find at an existing Mealie recipe.
             raise ValueError("mealie_slug is set by the Mealie client, never by Claude")
-        if not _MEALIE_SLUG.fullmatch(slug):
-            raise ValueError("mealie_slug must be ASCII letters, digits, '_' or '-'")
         return slug
 
 
