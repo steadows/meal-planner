@@ -12,9 +12,9 @@ import sqlite3
 import statistics
 from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from itertools import pairwise
-from typing import Any
+from typing import Any, NamedTuple
 
 from pydantic import Field
 
@@ -26,6 +26,10 @@ logger = logging.getLogger(__name__)
 # PLAN: ask about a staple once 90% of its interval has passed. Kept as a ratio of integers so
 # the due date is exact (0.9 isn't representable in binary floating point).
 ASK_AT_NUMERATOR, ASK_AT_DENOMINATOR = 9, 10
+# PLAN: after two purchases, the interval is learned from the gap between them (staples only).
+LEARN_AFTER_PURCHASES = 2
+# A sanity bound for a first-guess interval: ten years. Bigger values overflow date arithmetic.
+MAX_INTERVAL_DAYS = 3650
 
 
 class SeedItem(Contract):
@@ -35,11 +39,11 @@ class SeedItem(Contract):
     name: str = Field(min_length=1)
     category: PantryCategory
     aliases: tuple[str, ...] = ()
-    typical_interval_days: int | None = Field(default=None, gt=0)
+    typical_interval_days: int | None = Field(default=None, gt=0, le=MAX_INTERVAL_DAYS)
     last_purchased: date | None = Field(
         default=None, description="A real purchase date; blank if it was already in the house"
     )
-    default_qty: float | None = Field(default=None, gt=0)
+    default_qty: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     default_unit: str | None = None
     meijer_product_id: str | None = None
     meijer_url: MeijerUrl | None = None
@@ -49,15 +53,45 @@ class SeedItem(Contract):
     notes: str | None = None
 
 
+class _Existing(NamedTuple):
+    """What load_seed needs from a stored item, read without validating the whole row, so a row
+    that fails validation (say, a hand-edited URL) can still be repaired by re-running the seed."""
+
+    id: int
+    name: str
+    aliases: tuple[str, ...]
+    typical_interval_days: int | None
+
+
 class SeedResult(Contract):
     inserted: tuple[str, ...] = Field(description="New items, in seed order")
     updated: tuple[str, ...] = Field(description="Existing items, in seed order")
     untouched: tuple[str, ...] = Field(description="Items not in the seed, left as they were")
 
 
+def _as_day(on: date) -> date:
+    """A datetime is also a date; use its calendar day, as the schema stores DATE."""
+    return on.date() if isinstance(on, datetime) else on
+
+
 def _iso(day: date | None) -> str | None:
     """Dates go to SQLite as ISO text: sqlite3's default date adapter is deprecated."""
     return day.isoformat() if day is not None else None
+
+
+class PantryRowError(ValueError):
+    """A stored pantry row fails validation (say, a hand-edited URL that isn't meijer.com). Reads
+    fail closed; the message names the row and the fix, because it's what reaches Steve."""
+
+
+def _stored_aliases(row: sqlite3.Row) -> tuple[str, ...]:
+    """A row's aliases for load_seed's name check, tolerating a corrupt JSON cell (logged): the
+    seed rewrites aliases anyway, so this must not block the repair."""
+    try:
+        return tuple(json.loads(row["aliases"] or "[]"))
+    except (ValueError, TypeError):
+        logger.warning("pantry_item %s (%r) has unreadable aliases", row["id"], row["name"])
+        return ()
 
 
 def _to_item(row: sqlite3.Row) -> PantryItem:
@@ -67,13 +101,13 @@ def _to_item(row: sqlite3.Row) -> PantryItem:
     try:
         fields["aliases"] = tuple(json.loads(row["aliases"] or "[]"))
         return PantryItem.model_validate(fields)
-    except (ValueError, TypeError):
-        logger.error(
-            "pantry_item %s (%r) is invalid; re-run the seed loader to fix it",
-            row["id"],
-            row["name"],
+    except (ValueError, TypeError) as error:
+        message = (
+            f"pantry_item {row['id']} ({row['name']!r}) is invalid; "
+            f"re-run the seed loader with a corrected row to fix it. Details: {error}"
         )
-        raise
+        logger.error(message)
+        raise PantryRowError(message) from error
 
 
 def _ask_date(item: PantryItem) -> date | None:
@@ -107,7 +141,7 @@ def _is_due(item: PantryItem, on: date) -> bool:
 def _median_gap(dates: Sequence[date]) -> int | None:
     """PLAN: after two purchases the interval is the median gap between them. Takes distinct dates
     in order; rounds half up (10.5 → 11). None with fewer than two dates."""
-    if len(dates) < 2:
+    if len(dates) < LEARN_AFTER_PURCHASES:
         return None
     gaps = [(later - earlier).days for earlier, later in pairwise(dates)]
     return math.floor(statistics.median(gaps) + 0.5)
@@ -123,7 +157,7 @@ def _product_map(seed: SeedItem) -> dict[str, Any]:
     return {**columns, "aliases": json.dumps(list(seed.aliases))}
 
 
-def _namespace_clashes(seeds: Sequence[SeedItem], untouched: Iterable[PantryItem]) -> list[str]:
+def _namespace_clashes(seeds: Sequence[SeedItem], untouched: Iterable[_Existing]) -> list[str]:
     """Names and aliases (casefolded) claimed by two different items once the seed is applied."""
     claims = [(f"seed row {seed.name!r}", seed.name, seed.aliases) for seed in seeds]
     claims += [(f"existing item {item.name!r}", item.name, item.aliases) for item in untouched]
@@ -165,6 +199,7 @@ class SqlitePantry:
     def staples_due(self, on: date) -> tuple[PantryItem, ...]:
         """Staples to ask about on `on`, most overdue first (PLAN: flagged, or 90% of the interval
         since the last purchase). Capping how many to ask is the caller's job."""
+        on = _as_day(on)
         due = (
             item for item in self.list_items() if item.category == "staple" and _is_due(item, on)
         )
@@ -196,8 +231,13 @@ class SqlitePantry:
         """
         if qty is not None:
             require_positive(qty, "qty")
-        if price_cents is not None and price_cents < 0:
-            raise ValueError(f"price_cents can't be negative, got {price_cents!r}")
+        if price_cents is not None and (
+            isinstance(price_cents, bool) or not isinstance(price_cents, int) or price_cents < 0
+        ):
+            raise ValueError(
+                f"price_cents must be a whole, non-negative number, got {price_cents!r}"
+            )
+        on = _as_day(on)
         with self._write():
             item = self.get_item(name)
             if item is None:
@@ -250,7 +290,7 @@ class SqlitePantry:
         """
         seeds = tuple(items)
         with self._write():
-            existing = {name_key(item.name): item for item in self.list_items()}
+            existing = {name_key(row.name): row for row in self._existing_rows()}
             seed_keys = {name_key(seed.name) for seed in seeds}
             untouched = [item for key, item in existing.items() if key not in seed_keys]
             clashes = _namespace_clashes(seeds, untouched)
@@ -297,9 +337,12 @@ class SqlitePantry:
                 (cursor.lastrowid, seed.last_purchased.isoformat()),
             )
 
-    def _update_from_seed(self, item: PantryItem, seed: SeedItem) -> None:
+    def _update_from_seed(self, item: _Existing, seed: SeedItem) -> None:
         interval = item.typical_interval_days
-        learning_owns_it = _median_gap(self._purchase_dates(item.id)) is not None
+        learning_owns_it = (
+            seed.category == "staple"
+            and len(self._purchase_dates(item.id)) >= LEARN_AFTER_PURCHASES
+        )
         if seed.typical_interval_days is not None and not learning_owns_it:
             interval = seed.typical_interval_days
         columns = {**_product_map(seed), "typical_interval_days": interval}
@@ -307,6 +350,15 @@ class SqlitePantry:
         self._conn.execute(
             f"UPDATE pantry_item SET {assignments}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
             (*columns.values(), item.id),
+        )
+
+    def _existing_rows(self) -> tuple[_Existing, ...]:
+        rows = self._conn.execute(
+            "SELECT id, name, aliases, typical_interval_days FROM pantry_item ORDER BY id"
+        ).fetchall()
+        return tuple(
+            _Existing(row["id"], row["name"], _stored_aliases(row), row["typical_interval_days"])
+            for row in rows
         )
 
     def _purchase_dates(self, item_id: int) -> tuple[date, ...]:

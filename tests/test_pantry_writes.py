@@ -13,7 +13,7 @@ import re
 import sqlite3
 from collections.abc import Callable
 from contextlib import closing
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +21,7 @@ import pytest
 from pydantic import ValidationError
 
 from meals.contracts import PantryItem
-from meals.pantry import SeedItem, SeedResult, SqlitePantry
+from meals.pantry import PantryRowError, SeedItem, SeedResult, SqlitePantry
 
 Insert = Callable[[PantryItem], None]
 Rows = list[tuple[Any, ...]]
@@ -100,8 +100,29 @@ def test_logging_an_unknown_item_returns_none_and_writes_nothing(
 
 @pytest.mark.parametrize(
     ("qty", "price_cents"),
-    [(0, None), (-1.5, None), (math.nan, None), (math.inf, None), (-math.inf, None), (None, -1)],
-    ids=["zero qty", "negative qty", "nan qty", "inf qty", "-inf qty", "negative price"],
+    [
+        (0, None),
+        (-1.5, None),
+        (math.nan, None),
+        (math.inf, None),
+        (-math.inf, None),
+        (None, -1),
+        # review finding 4: a price is a whole number of cents, and a bool isn't one
+        (None, 4.99),
+        (None, True),
+        (None, False),
+    ],
+    ids=[
+        "zero qty",
+        "negative qty",
+        "nan qty",
+        "inf qty",
+        "-inf qty",
+        "negative price",
+        "fractional price",
+        "price True",
+        "price False",
+    ],
 )
 def test_a_bad_quantity_or_price_raises_and_writes_nothing(
     db: sqlite3.Connection, insert_item: Insert, qty: float | None, price_cents: int | None
@@ -138,6 +159,30 @@ def test_log_purchase_finds_the_item_by_name_or_alias_ignoring_case_and_spaces(
     assert logged is not None
     assert logged.name == "olive oil"
     assert [row[:2] for row in _log_rows(db)] == [(1, "2026-09-26")]
+
+
+def test_a_purchase_logged_with_a_datetime_is_stored_as_its_date(
+    db: sqlite3.Connection, insert_item: Insert
+) -> None:  # review finding 3
+    insert_item(_item(1, "rice", status="buy_next_time"))
+    logged = SqlitePantry(db).log_purchase("rice", datetime(2026, 9, 26, 10, 0))
+    assert logged == _item(1, "rice", last_purchased=ON)
+    stored = db.execute("SELECT last_purchased FROM pantry_item WHERE id = 1").fetchone()[0]
+    assert stored == "2026-09-26"
+    # A later time on the same day is the same (item, date), so it's a replay.
+    SqlitePantry(db).log_purchase("rice", datetime(2026, 9, 26, 18, 30))
+    assert [row[:2] for row in _log_rows(db)] == [(1, "2026-09-26")]
+
+
+def test_staples_due_on_a_datetime_matches_its_date(
+    db: sqlite3.Connection, insert_item: Insert, sample_pantry_items: tuple[PantryItem, ...]
+) -> None:  # review finding 3
+    for item in sample_pantry_items:
+        insert_item(item)
+    pantry = SqlitePantry(db)
+    due = pantry.staples_due(ON)
+    assert due
+    assert pantry.staples_due(datetime(2026, 9, 26, 10, 0)) == due
 
 
 # ── log_purchase: current stock vs history ───────────────────────────────────
@@ -412,6 +457,37 @@ def test_load_seed_inserts_new_items_with_every_field_and_logs_only_real_purchas
 # ── load_seed: updates ───────────────────────────────────────────────────────
 
 
+def test_load_seed_repairs_a_stored_url_that_fails_the_meijer_check(
+    db: sqlite3.Connection,
+) -> None:  # review finding 1: re-running the seed is how a bad product link gets fixed
+    db.execute(
+        "INSERT INTO pantry_item (name, category, meijer_url) VALUES (?, ?, ?)",
+        ("rice", "staple", "https://evil.example/rice"),
+    )
+    db.commit()
+    pantry = SqlitePantry(db)
+    with pytest.raises(PantryRowError):
+        pantry.list_items()  # reads still fail closed
+    fixed = "https://www.meijer.com/shopping/product/example-rice/100002.html"
+    result = pantry.load_seed([_seed("rice", meijer_url=fixed)])
+    assert result == SeedResult(inserted=(), updated=("rice",), untouched=())
+    assert pantry.list_items() == (_item(1, "rice", meijer_url=fixed),)
+
+
+def test_load_seed_runs_while_an_untouched_row_fails_the_meijer_check(
+    db: sqlite3.Connection,
+) -> None:  # review finding 1: load_seed must not need to validate every row to run
+    db.execute(
+        "INSERT INTO pantry_item (name, category, meijer_url) VALUES (?, ?, ?)",
+        ("tahini", "staple", "https://evil.example/tahini"),
+    )
+    db.commit()
+    result = SqlitePantry(db).load_seed([_seed("rice")])
+    assert result == SeedResult(inserted=("rice",), updated=(), untouched=("tahini",))
+    names = [row[0] for row in db.execute("SELECT name FROM pantry_item ORDER BY id")]
+    assert names == ["tahini", "rice"]
+
+
 def test_load_seed_rewrites_the_product_map_but_never_stock_or_history(
     db: sqlite3.Connection, insert_item: Insert
 ) -> None:  # [R13] [R8] [R16]
@@ -517,6 +593,31 @@ def test_a_seed_interval_replaces_the_guess_until_learning_takes_over(
     for offset in logged:
         _log(db, 1, _day(offset))
     SqlitePantry(db).load_seed([_seed("rice", typical_interval_days=seed_interval)])
+    assert _interval(db, 1) == interval
+
+
+@pytest.mark.parametrize(
+    ("category", "seed_category", "interval"),
+    [
+        ("fallback", "fallback", 21),
+        ("perishable", "perishable", 21),
+        ("staple", "fallback", 21),
+        ("fallback", "staple", 14),  # baseline-green: now a staple, so learning owns it
+    ],
+    ids=[
+        "fallback",
+        "perishable",
+        "staple re-seeded as a fallback",
+        "fallback re-seeded as a staple",
+    ],
+)
+def test_only_an_item_that_ends_up_a_staple_keeps_its_interval_after_two_purchases(
+    db: sqlite3.Connection, insert_item: Insert, category: str, seed_category: str, interval: int
+) -> None:  # review finding 2: only staples learn, and the category after the seed decides
+    insert_item(_item(1, "nuggets", category, typical_interval_days=14, last_purchased=_day(14)))
+    _log(db, 1, D0)
+    _log(db, 1, _day(14))
+    SqlitePantry(db).load_seed([_seed("nuggets", seed_category, typical_interval_days=21)])
     assert _interval(db, 1) == interval
 
 
@@ -681,9 +782,26 @@ def test_running_the_same_seed_twice_updates_everything_and_logs_nothing_new(
         {"meijer_url": "https://evil.example/olive-oil"},
         {"status": "have"},
         {"id": 1},
+        # review finding 6
+        {"typical_interval_days": 3651},
+        {"default_qty": math.inf},
+        {"default_qty": math.nan},  # baseline-green: gt=0 already rejects nan
     ],
-    ids=["qty 0", "non-meijer url", "status", "id"],
+    ids=["qty 0", "non-meijer url", "status", "id", "interval over 3650", "qty inf", "qty nan"],
 )
 def test_a_seed_item_rejects_bad_or_extra_fields(fields: dict[str, object]) -> None:
     with pytest.raises(ValidationError):
         SeedItem.model_validate({"name": "olive oil", "category": "staple", **fields})
+
+
+def test_a_seed_item_allows_an_interval_of_exactly_3650_days() -> None:
+    # review finding 6, the bound itself (baseline-green: there's no upper bound yet)
+    item = SeedItem(name="rice", category="staple", typical_interval_days=3650)
+    assert item.typical_interval_days == 3650
+
+
+def test_a_seed_item_carries_every_pantry_item_field_but_the_pantrys_own() -> None:
+    # review finding 5, a drift alarm (baseline-green). next_ask_on is contracts' pending field;
+    # whether the seed sets it is PR 2's decision.
+    owned_by_the_pantry = {"id", "status", "next_ask_on"}
+    assert set(SeedItem.model_fields) == set(PantryItem.model_fields) - owned_by_the_pantry

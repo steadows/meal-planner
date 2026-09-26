@@ -3,7 +3,6 @@ from collections.abc import Callable
 from datetime import date, timedelta
 
 import pytest
-from pydantic import ValidationError
 
 from meals.contracts import Pantry, PantryItem
 from meals.fakes import FakePantry
@@ -68,12 +67,17 @@ def test_list_items_round_trips_product_fields(db: sqlite3.Connection, insert_it
 
 
 def test_a_stored_non_meijer_url_fails_closed_on_read(db: sqlite3.Connection) -> None:
+    # Review finding 12: this text reaches Steve through the Saturday job's failure message, so it
+    # names the row (id and name) and the fix. Imported here so only this test is RED until then.
+    from meals.pantry import PantryRowError
+
     db.execute(
-        "INSERT INTO pantry_item (name, category, meijer_url) VALUES (?, ?, ?)",
-        ("rice", "staple", "https://evil.example/rice"),
+        "INSERT INTO pantry_item (id, name, category, meijer_url) VALUES (?, ?, ?, ?)",
+        (4127, "rice", "staple", "https://evil.example/grain"),
     )
     db.commit()
-    with pytest.raises(ValidationError):
+    assert issubclass(PantryRowError, ValueError)
+    with pytest.raises(PantryRowError, match=r"(?is)(?=.*\b4127\b)(?=.*\brice\b)(?=.*seed loader)"):
         SqlitePantry(db).list_items()
 
 
