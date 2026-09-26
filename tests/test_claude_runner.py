@@ -1,14 +1,16 @@
 """meals.claude_runner: the `claude -p` wrapper and prompt loading.
 
-Authority: the claude_runner.py docstrings and constants, and the seam maps (`run()` /
+Authority: the claude_runner.py docstrings and constants, the seam maps (`run()` /
 `load_prompt()`; contracts-3-followup: kill on any exception, `load_prompt` hardening,
-`validate_claude_output` and `RecipeOption.mealie_slug`). Unit tests drive a fake `claude`
-executable written into tmp_path. The runner hands the child an allowlisted env, so the fake
-can't be told through env where to write: it records each call to `calls.jsonl` and reads its
-scripted behaviours from `script.json`, both next to itself.
+`validate_claude_output` and `RecipeOption.mealie_slug`), and ADR-0001 (Orphaned Chrome child:
+`hold_fds`). Unit tests drive a fake `claude` executable written into tmp_path. The runner hands
+the child an allowlisted env, so the fake can't be told through env where to write: it records
+each call to `calls.jsonl` and reads its scripted behaviours from `script.json`, both next to
+itself.
 """
 
 import contextlib
+import fcntl
 import json
 import logging
 import os
@@ -54,6 +56,19 @@ def record(event):
         os.close(fd)
 
 
+def open_files():
+    # [st_dev, st_ino] of each fd above stderr: the files this process inherited.
+    files = []
+    for name in os.listdir("/dev/fd"):
+        try:
+            info = os.fstat(int(name))
+        except OSError:  # the fd listdir itself used, closed by now
+            continue
+        if int(name) > 2:
+            files.append([info.st_dev, info.st_ino])
+    return files
+
+
 started = time.time()
 earlier = log.read_text().splitlines() if log.exists() else []
 index = sum(json.loads(line)["event"] == "start" for line in earlier)
@@ -76,6 +91,7 @@ record({
     "env_keys": sorted(os.environ),
     "home": os.environ.get("HOME"),
     "path": os.environ.get("PATH"),
+    "open_files": open_files(),
 })
 if "stdout_early" in behaviour:
     sys.stdout.write(behaviour["stdout_early"])
@@ -431,7 +447,9 @@ def test_timeout_falls_back_to_killing_the_child_when_killpg_is_refused(
     started = time.monotonic()
     try:
         with pytest.raises(ClaudeRunnerError):
-            claude_runner.run(PROMPT, timeout=1)
+            # Not 1s: under load the fake can take that long to start, and a claude killed before
+            # it records its start leaves no call to check. Still well short of the 20s sleep.
+            claude_runner.run(PROMPT, timeout=3)
 
         assert time.monotonic() - started < 10
         (call,) = _calls(fake_claude_home)
@@ -626,10 +644,10 @@ DRIVER = (
 HOLD_SECONDS = 0.75
 
 
-def _start_driver(env: dict[str, str]) -> subprocess.Popen[str]:
+def _start_driver(env: dict[str, str], code: str = DRIVER, *args: str) -> subprocess.Popen[str]:
     """A separate Python process calling run(): the bot and cron are separate processes."""
     return subprocess.Popen(
-        [sys.executable, "-c", DRIVER],
+        [sys.executable, "-c", code, *args],
         env=env,
         cwd=ROOT,
         stdout=subprocess.PIPE,
@@ -743,6 +761,113 @@ def test_slot_stays_held_while_a_killed_callers_claude_runs_on(
             if driver is not None:
                 driver.kill()
                 driver.wait()
+        for call in _calls(fake_claude_home):
+            _kill(call["pid"])
+
+
+# ── hold_fds: caller-owned locks live as long as claude ──────────────────────
+
+# ADR-0001, Orphaned Chrome child: a cart fill passes the job lock and its Chrome lock.
+HOLD_LOCKS = ("job-cart_fill.lock", "chrome.lock")
+
+# A job process: takes its lock, then runs claude holding it. argv[1] is the lock file.
+HOLDING_DRIVER = (
+    "import fcntl, json, os, sys; from meals import claude_runner; "
+    "fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600); "
+    "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB); "
+    f"print(json.dumps(claude_runner.run('hi', timeout={RUN_TIMEOUT}, hold_fds=(fd,))))"
+)
+
+
+def _identity(path: Path) -> list[int]:
+    """The file as the fake records what it inherited: [st_dev, st_ino]."""
+    info = path.stat()
+    return [info.st_dev, info.st_ino]
+
+
+def _lock_is_free(path: Path) -> bool:
+    """Whether an exclusive flock on `path` can be taken right now. It's released at once."""
+    fd = os.open(path, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    finally:
+        os.close(fd)
+    return True
+
+
+@pytest.mark.parametrize(
+    ("chrome", "behaviours"),
+    [(False, (OK,)), (True, (OK,)), (False, (NONZERO_EXIT, OK))],
+    ids=["plain", "chrome", "plain_retry"],
+)
+def test_claude_inherits_every_hold_fd_as_well_as_its_slot(
+    fake_claude_home: Path,
+    tmp_path: Path,
+    chrome: bool,
+    behaviours: tuple[dict[str, object], ...],
+) -> None:
+    """ADR-0001: hold_fds is appended to the child's pass_fds, on every attempt. Checked by the
+    files the child has open, not by fd number: a dup'd fd would hold the lock just the same."""
+    _script(fake_claude_home, *behaviours)
+    locks = [tmp_path / name for name in HOLD_LOCKS]
+    fds: list[int] = []
+    try:
+        for path in locks:
+            fds.append(os.open(path, os.O_RDWR | os.O_CREAT, 0o600))
+        result = claude_runner.run(PROMPT, chrome=chrome, timeout=RUN_TIMEOUT, hold_fds=tuple(fds))
+    finally:
+        for fd in fds:
+            os.close(fd)
+
+    assert result == {"ok": True}
+    calls = _calls(fake_claude_home)
+    assert len(calls) == len(behaviours)
+    slots = [_identity(path) for path in (tmp_path / "locks").glob("claude-slot-*.lock")]
+    for call in calls:
+        inherited = call["open_files"]
+        assert [_identity(path) in inherited for path in locks] == [True, True]
+        assert any(slot in inherited for slot in slots), "claude no longer holds its slot"
+
+
+def test_a_closed_hold_fd_stops_claude_starting_rather_than_running_unlocked(
+    fake_claude_home: Path,
+) -> None:
+    """Seam map contracts-5: a bad fd is left to Popen, so it fails the start ("could not
+    start"). Dropping it instead would fill the cart without the lock it was meant to hold."""
+    closed = 999  # far above any fd run() opens for itself
+    with pytest.raises(OSError):
+        os.fstat(closed)  # precondition: nothing here has it open
+
+    with pytest.raises(ClaudeRunnerError, match="could not start"):
+        claude_runner.run(PROMPT, chrome=True, timeout=RUN_TIMEOUT, hold_fds=(closed,))
+    assert _calls(fake_claude_home) == []
+
+
+def test_a_hold_fd_lock_stays_held_while_a_killed_callers_claude_runs_on(
+    fake_claude_home: Path, tmp_path: Path
+) -> None:
+    """ADR-0001: "Both locks then live as long as the child". A job process SIGKILLed mid-run
+    must not free its lock while its claude runs on (a retry would double the cart), and the lock
+    frees once that claude exits. Unit level only: wiring's P4.4 test covers the real locks."""
+    _script(fake_claude_home, {"sleep": 60, **OK})
+    lock = tmp_path / "job-cart_fill.lock"
+    holder = _start_driver(dict(os.environ), HOLDING_DRIVER, str(lock))
+    try:
+        orphan = _first_call(fake_claude_home, holder)
+        holder.kill()
+        holder.wait()
+
+        assert not _lock_is_free(lock), "the caller's lock was freed while its claude ran on"
+        _kill(orphan["pid"])
+        deadline = time.monotonic() + 10
+        while not _lock_is_free(lock):
+            assert time.monotonic() < deadline, "the lock outlived the claude holding it"
+            time.sleep(0.05)
+    finally:
+        holder.kill()
+        holder.wait()
         for call in _calls(fake_claude_home):
             _kill(call["pid"])
 
@@ -944,7 +1069,8 @@ def test_validation_without_the_trusted_context_rejects_mealie_slug(
 
 def test_claude_output_revalidates_a_nested_instance_carrying_a_slug() -> None:
     """pydantic keeps a model instance as is by default, so one the Mealie client built (as
-    get_recipe does, with model_copy) must not carry its slug through Claude's output."""
+    get_recipe does, with model_validate under TRUSTED) must not carry its slug through Claude's
+    output."""
     from_mealie = RecipeOption.model_validate(RECIPE).model_copy(
         update={"mealie_slug": "sheet-pan-gnocchi"}
     )

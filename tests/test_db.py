@@ -1,8 +1,8 @@
 """meals.db: connection setup and schema migrations.
 
-Authority: the db.py docstrings, PLAN.md (Table schema; Runtime concurrency), and the seam map
-(`get_db()` / `migrate()` / `MIGRATIONS`). The expected schema below is transcribed by hand from
-PLAN.md, not read back from the code.
+Authority: the db.py docstrings, PLAN.md (Table schema; Runtime concurrency), the seam map
+(`get_db()` / `migrate()` / `MIGRATIONS`), and ADR-0001 (§`job_run`, migration 3). The expected
+schema below is transcribed by hand from PLAN.md and the ADR's DDL, not read back from the code.
 """
 
 import logging
@@ -70,6 +70,16 @@ PLAN_SCHEMA: dict[str, dict[str, Column]] = {
     },
 }
 
+# ADR-0001 §`job_run`: migration 3's table. PRIMARY KEY (job, week_start), in that order.
+JOB_RUN_SCHEMA: dict[str, Column] = {
+    "job": ("TEXT", 1, None, 1),
+    "week_start": ("DATE", 1, None, 2),
+    "started_at": ("DATETIME", 1, "CURRENT_TIMESTAMP", 0),
+    "finished_at": ("DATETIME", 0, None, 0),
+    "outcome": ("TEXT", 0, None, 0),
+    "detail": ("TEXT", 0, None, 0),
+}
+
 # The smallest valid row per table; tests override one column at a time.
 BASE_ROWS: dict[str, dict[str, object]] = {
     "pantry_item": {"name": "olive oil", "category": "staple"},
@@ -80,6 +90,7 @@ BASE_ROWS: dict[str, dict[str, object]] = {
         "rater": "steve",
         "rating": 1,
     },
+    "job_run": {"job": "cart_fill", "week_start": "2026-09-27"},
 }
 
 PROBE = ("CREATE TABLE probe (x INTEGER)", "INSERT INTO probe (x) VALUES (42)")
@@ -149,6 +160,29 @@ def test_migration_2_adds_next_ask_on_and_changes_nothing_else(
             assert actual == expected, table
 
 
+def test_migration_3_adds_job_run_and_changes_nothing_else(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0001 §`job_run` and Ownership → contracts: the ADR's DDL, no FK, and no other change
+    (no new columns, no weekly_plan change, no extra index)."""
+    monkeypatch.setattr(meals.db, "MIGRATIONS", meals.db.MIGRATIONS[:3])
+    expected_schema = PLAN_SCHEMA | {
+        "pantry_item": PLAN_SCHEMA["pantry_item"] | {"next_ask_on": ("DATE", 0, None, 0)},
+        "job_run": JOB_RUN_SCHEMA,
+    }
+
+    with _open(tmp_path) as conn:
+        assert _version(conn) == 3
+        assert _tables(conn) == set(expected_schema)
+        for table, expected in expected_schema.items():
+            info = conn.execute(f"PRAGMA table_info({table})").fetchall()
+            actual = {row[1]: (row[2].upper(), row[3], row[4], row[5]) for row in info}
+            assert actual == expected, table
+        assert conn.execute("PRAGMA foreign_key_list(job_run)").fetchall() == []
+        named = _column(conn, "SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")
+        assert set(named) == set(expected_schema) | {"purchase_log_item_day"}
+
+
 @pytest.mark.parametrize(
     ("table", "column"), [("pantry_item", "name"), ("weekly_plan", "week_start")]
 )
@@ -176,6 +210,8 @@ ACCEPTED = [
     *(("meal_rating", "rater", value) for value in ("steve", "miles")),
     *(("meal_rating", "rating", value) for value in (-1, 1)),
     *(("pantry_item", "typical_interval_days", value) for value in (None, 1, 70)),
+    # ADR-0001 §`job_run`: NULL while running.
+    *(("job_run", "outcome", value) for value in ("done", "failed", "interrupted", None)),
 ]
 
 REJECTED = [
@@ -187,6 +223,9 @@ REJECTED = [
     ("meal_rating", "rating", 2),
     ("pantry_item", "typical_interval_days", 0),
     ("pantry_item", "typical_interval_days", -7),
+    # Claim states from the ADR, not outcomes: "running" is NULL, and "finished" isn't an outcome.
+    ("job_run", "outcome", "running"),
+    ("job_run", "outcome", "finished"),
 ]
 
 
@@ -249,6 +288,38 @@ def test_purchase_log_holds_one_row_per_item_per_day(tmp_path: Path) -> None:
             (oil, "2026-09-27"),
             (tahini, "2026-09-20"),
         ]
+
+
+def test_job_run_holds_one_row_per_job_per_week(tmp_path: Path) -> None:
+    """ADR-0001 §`job_run`: PRIMARY KEY (job, week_start), so per job and week, not per job or per
+    week; a repeat is refused, not merged. `job` has no CHECK, and no FK asks for a weekly_plan row."""
+    with _open(tmp_path) as conn:
+        _insert(conn, "job_run", job="sat_propose", week_start="2026-09-27")
+        _insert(conn, "job_run", job="sat_propose", week_start="2026-10-04")
+        _insert(conn, "job_run", job="cart_fill", week_start="2026-09-27")
+        _insert(conn, "job_run", job="a_job_added_later", week_start="2026-09-27")
+
+        with pytest.raises(sqlite3.IntegrityError, match="UNIQUE"):
+            _insert(conn, "job_run", job="sat_propose", week_start="2026-09-27", outcome="failed")
+        rows = conn.execute("SELECT job, week_start, outcome FROM job_run ORDER BY job, week_start")
+        assert [tuple(row) for row in rows] == [
+            ("a_job_added_later", "2026-09-27", None),
+            ("cart_fill", "2026-09-27", None),
+            ("sat_propose", "2026-09-27", None),
+            ("sat_propose", "2026-10-04", None),
+        ]
+        assert _column(conn, "SELECT count(*) FROM weekly_plan") == [0]
+
+
+def test_a_new_job_run_row_is_running_with_started_at_filled_in(tmp_path: Path) -> None:
+    """ADR-0001 §`job_run`: started_at defaults to CURRENT_TIMESTAMP; outcome is NULL while running."""
+    with _open(tmp_path) as conn:
+        _insert(conn, "job_run")
+        (row,) = conn.execute("SELECT * FROM job_run").fetchall()
+
+    assert (row["job"], row["week_start"]) == ("cart_fill", "2026-09-27")
+    assert re.fullmatch(r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d", row["started_at"]), row["started_at"]
+    assert (row["finished_at"], row["outcome"], row["detail"]) == (None, None, None)
 
 
 # ── connection settings ──────────────────────────────────────────────────────
@@ -351,6 +422,28 @@ def test_migration_2_refuses_duplicate_purchases_and_leaves_v1_untouched(
             check, "SELECT name FROM pragma_table_info('pantry_item')"
         )
         assert check.execute("SELECT count(*) FROM purchase_log").fetchone()[0] == 2
+
+
+def test_migration_3_upgrades_a_v2_database_and_keeps_its_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0001: job_run is the next migration, applied to a live v2 database without touching
+    weekly_plan or the pantry."""
+    migrations = meals.db.MIGRATIONS
+    monkeypatch.setattr(meals.db, "MIGRATIONS", migrations[:2])
+    with _open(tmp_path) as v2:
+        _insert(v2, "pantry_item", next_ask_on="2026-10-03")
+        _insert(v2, "weekly_plan", status="approved")
+        v2.commit()
+
+    monkeypatch.setattr(meals.db, "MIGRATIONS", migrations[:3])
+    with _open(tmp_path) as conn:
+        assert _version(conn) == 3
+        items = conn.execute("SELECT name, category, next_ask_on FROM pantry_item")
+        assert [tuple(row) for row in items] == [("olive oil", "staple", "2026-10-03")]
+        plans = conn.execute("SELECT week_start, components, status FROM weekly_plan")
+        assert [tuple(row) for row in plans] == [("2026-09-27", "{}", "approved")]
+        assert _column(conn, "SELECT count(*) FROM job_run") == [0]
 
 
 def test_appended_migration_is_applied_once_in_order(

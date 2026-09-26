@@ -1,5 +1,6 @@
 import subprocess
 import sys
+import tomllib
 from collections.abc import Callable
 from datetime import date, timedelta
 from pathlib import Path
@@ -21,7 +22,7 @@ from meals.contracts import (
     RecipeOption,
     WeekProposal,
 )
-from meals.fakes import FakeClaudeRunner, FakeMealieClient, FakePantry
+from meals.fakes import ClaudeCall, FakeClaudeRunner, FakeMealieClient, FakePantry
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -32,6 +33,33 @@ def test_import_layering_contract_holds() -> None:
     lint_imports = Path(sys.executable).parent / "lint-imports"
     result = subprocess.run([lint_imports], cwd=PROJECT_ROOT, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+# ADR-0001, Ownership → contracts, item 3: top to bottom. `__main__` is the composition root.
+ADR_0001_LAYERS = [
+    "(__main__)",
+    "(bot) | (jobs) | (mcp_tools) | (seed_loader)",
+    "(pantry) | (mealie_client) | (search) | (planner) | (cart) | (background) | (plan_state)",
+    "(db) | (claude_runner) | (rollup)",
+    "contracts | (config)",
+]
+
+
+def _tier(layer: str) -> set[str]:
+    """A layer's members as written, "(x)" marking an optional one; sibling order is immaterial."""
+    return {member.strip() for member in layer.split("|")}
+
+
+def test_layers_contract_has_adr_0001s_tiers() -> None:
+    """lint-imports passes with the old tiers too (nothing imports across the new ones yet), so
+    the tiers themselves are pinned here."""
+    config = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    contracts = config["tool"]["importlinter"]["contracts"]
+    (layering,) = [c for c in contracts if c["name"].startswith("Module layering")]
+
+    assert [_tier(layer) for layer in layering["layers"]] == [
+        _tier(layer) for layer in ADR_0001_LAYERS
+    ]
 
 
 # ── models ───────────────────────────────────────────────────────────────────
@@ -186,6 +214,17 @@ def test_fake_claude_returns_queued_responses_in_order_and_records_calls() -> No
         ("first", False, 600),
         ("second", True, 30),
     ]
+
+
+def test_fake_claude_records_hold_fds_with_the_real_runs_default() -> None:
+    """ADR-0001: cart passes its locks as run(..., hold_fds=...), and its tests check they were
+    passed. ClaudeCall built without hold_fds, as before, gets the same default."""
+    fake = FakeClaudeRunner([{"a": 1}, {"a": 2}])
+    fake.run("fill the cart", chrome=True, hold_fds=(7, 9))
+    fake.run("find recipes")
+
+    assert [call.hold_fds for call in fake.calls] == [(7, 9), ()]
+    assert ClaudeCall("find recipes", None, False, 600).hold_fds == ()
 
 
 def test_fake_claude_validates_against_schema(sample_recipe: RecipeOption) -> None:
