@@ -49,6 +49,9 @@ _DURATION_PART = re.compile(
     re.IGNORECASE,
 )
 _UNIT_MINUTES = {"d": 24 * 60, "h": 60, "m": 1}
+# A DNS name as sent on the wire (IDNA already applied): anything else, such as an encoded space
+# around an IP ("%20127.0.0.1"), must not pass as an ordinary hostname.
+_HOSTNAME = re.compile(r"[a-z0-9-]+(?:\.[a-z0-9-]+)*", re.ASCII)
 # Hosts reserved for local networks (RFC 6761, 6762, 8375; ICANN .internal), besides single labels.
 _LOCAL_SUFFIXES = (".localhost", ".local", ".internal", ".home.arpa")
 
@@ -174,7 +177,7 @@ class HttpMealieClient:
         try:
             _require_public_url(url)
         except ValueError as exc:
-            logger.warning("refused to import %r: %s", url, exc)
+            logger.warning("refused to import %s: %s", _loggable(url), exc)
             raise
         try:
             response = self._http.post(
@@ -313,18 +316,30 @@ def _require_public_url(url: str) -> None:
     try:
         parsed = httpx.URL(url)
     except httpx.InvalidURL as exc:
-        raise ValueError(f"not a fetchable URL: {url!r}") from exc
+        raise ValueError("not a fetchable URL") from exc
     host = parsed.host.rstrip(".").lower()
     if parsed.scheme not in {"http", "https"} or not host or parsed.userinfo:
-        raise ValueError(f"only public http(s) URLs can be imported: {url!r}")
+        raise ValueError("only public http(s) URLs without credentials can be imported")
     ip = _ip_literal(host)
+    if ip is None and not _HOSTNAME.fullmatch(
+        parsed.raw_host.decode("ascii", "replace").rstrip(".").lower()
+    ):
+        raise ValueError("refusing a malformed host")
     if ip is not None:
         # is_global is True for most multicast and for some reserved IPv6 (::7f00:1, NAT64).
         local = ip.is_multicast or ip.is_reserved or not ip.is_global
     else:
         local = "." not in host or host.endswith(_LOCAL_SUFFIXES)  # single-label covers "localhost"
     if local:
-        raise ValueError(f"refusing a local or private address: {url!r}")
+        raise ValueError("refusing a local or private address")
+
+
+def _loggable(url: str) -> str:
+    """The URL without any user:password part, for logs. Guard errors never quote the URL."""
+    try:
+        return str(httpx.URL(url).copy_with(userinfo=b""))
+    except httpx.InvalidURL:
+        return "<unparseable URL>"
 
 
 def _ip_literal(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
