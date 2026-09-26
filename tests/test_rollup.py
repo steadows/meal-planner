@@ -38,13 +38,14 @@ def test_names_group_case_and_whitespace_insensitively_keeping_first_display_nam
     [
         ((1, "lbs"), (2, "pound"), 3.0, "lb"),
         ((1, "Tbsp"), (2, "tablespoons"), 3.0, "tbsp"),
-        ((1, "tbsp"), (2, "tsp"), 1.667, "tbsp"),
+        ((1, "tbsp"), (2, "tsp"), 1.666667, "tbsp"),
+        ((1, "dozen"), (6, None), 1.5, "dozen"),
         ((1, "cup"), (2, "fl oz"), 1.25, "cup"),
         ((1, "kg"), (200, "g"), 1.2, "kg"),
     ],
 )
 def test_units_convert_within_a_dimension(
-    first: tuple[float, str], second: tuple[float, str], qty: float, unit: str
+    first: tuple[float, str | None], second: tuple[float, str | None], qty: float, unit: str
 ) -> None:
     combined = combine([_ing("x", *first), _ing("x", *second)])
     assert combined == (_ing("x", qty, unit),)
@@ -104,8 +105,20 @@ def test_float_noise_is_rounded_away() -> None:
     assert combined == (_ing("milk", 0.3, "cup"),)
 
 
+def test_real_precision_survives_the_rounding() -> None:
+    combined = combine([_ing("flour", 1, "kg"), _ing("flour", 0.4, "g")])
+    assert combined == (_ing("flour", 1.0004, "kg"),)
+    assert packages_needed(combined[0], 1, "kg") == 2
+
+
 def test_empty_input_gives_empty_output() -> None:
     assert combine([]) == ()
+
+
+@pytest.mark.parametrize("qty", [0, -1, float("nan"), float("inf")])
+def test_combine_rejects_a_quantity_that_is_not_positive_and_finite(qty: float) -> None:
+    with pytest.raises(ValueError):
+        combine([_ing("rice", 1, "cup"), _ing("rice", qty, "cup")])
 
 
 # ── packages_needed: PLAN.md, Risks ("rounded up to buyable units") ──────────
@@ -120,6 +133,7 @@ def test_empty_input_gives_empty_output() -> None:
         (_ing("ground turkey", 16, "oz"), 1, "lb", 1),
         (_ing("garlic", 12, "clove"), 1, "head", 2),
         (_ing("eggs", 18), 12, None, 2),
+        (_ing("eggs", 18), 1, "dozen", 2),
         (_ing("olive oil", 0.1 + 0.2, "cup"), 0.3, "cup", 1),
     ],
 )
@@ -137,6 +151,9 @@ def test_packages_needed_is_none_when_not_convertible(need: Ingredient, pack_uni
     assert packages_needed(need, 1, pack_unit) is None
 
 
-def test_packages_needed_rejects_a_non_positive_pack() -> None:
+@pytest.mark.parametrize(("need_qty", "pack_qty"), [(1, 0), (1, float("nan")), (-1, 1), (0, 1)])
+def test_packages_needed_rejects_quantities_that_are_not_positive_and_finite(
+    need_qty: float, pack_qty: float
+) -> None:
     with pytest.raises(ValueError):
-        packages_needed(_ing("rice", 1, "lb"), 0, "lb")
+        packages_needed(_ing("rice", need_qty, "lb"), pack_qty, "lb")
