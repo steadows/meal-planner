@@ -253,6 +253,18 @@ def test_a_header_naming_a_column_twice_is_rejected(tmp_path: Path, text: str, c
     assert any(column in problem for problem in excinfo.value.problems), excinfo.value.problems
 
 
+UNCLOSED_HEADER_QUOTE = '"name,category\nrice,staple\n'
+
+
+def test_a_header_with_an_unclosed_quote_is_an_error_on_row_1(tmp_path: Path) -> None:
+    # ultrareview finding 2: reading the header raised a bare csv.Error
+    path = tmp_path / "seed.csv"
+    path.write_text(UNCLOSED_HEADER_QUOTE, encoding="utf-8")
+    with pytest.raises(SeedError) as excinfo:
+        read_seed_csv(path)
+    assert _row_numbers(excinfo.value.problems) == {1}
+
+
 @pytest.mark.parametrize("columns", [("name", "category"), COLUMNS], ids=["two columns", "all"])
 def test_only_name_and_category_are_needed_and_blank_cells_take_the_defaults(
     tmp_path: Path, columns: tuple[str, ...]
@@ -523,6 +535,17 @@ def test_main_reports_a_database_it_cant_open_and_exits_1(
     db_path = tmp_path / "cli.sqlite"
     db_path.write_bytes(b"not a database")
     assert main([str(FIXTURE), "--db", str(db_path)]) == 1
+    err = capsys.readouterr().err
+    assert err.strip()
+    assert "Traceback" not in err
+
+
+def test_main_reports_a_header_with_an_unclosed_quote_and_exits_1(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:  # ultrareview finding 2
+    csv_path = tmp_path / "seed.csv"
+    csv_path.write_text(UNCLOSED_HEADER_QUOTE, encoding="utf-8")
+    assert main([str(csv_path), "--db", str(tmp_path / "cli.sqlite")]) == 1
     err = capsys.readouterr().err
     assert err.strip()
     assert "Traceback" not in err

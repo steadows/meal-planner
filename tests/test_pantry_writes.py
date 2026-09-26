@@ -644,6 +644,38 @@ def test_only_an_item_that_ends_up_a_staple_keeps_its_interval_after_two_purchas
     assert _interval(db, 1) == interval
 
 
+@pytest.mark.parametrize(
+    ("category", "interval", "dates", "learned"),
+    [
+        ("perishable", None, (0, 14), 14),
+        ("fallback", 30, (0, 10), 10),
+        ("fallback", 30, (0, 10, 21), 11),  # gaps 10 and 11: the median rounds half up
+        ("perishable", None, (0,), 70),  # baseline-green: one date, so the seed's guess
+    ],
+    ids=["no interval yet", "stale guess", "half up", "one date: the seed's guess"],
+)
+def test_promoting_an_item_to_staple_learns_its_interval_from_its_purchases(
+    db: sqlite3.Connection,
+    insert_item: Insert,
+    category: str,
+    interval: int | None,
+    dates: tuple[int, ...],
+    learned: int,
+) -> None:  # ultrareview finding 1: learning never ran while it wasn't a staple
+    last = max(dates)
+    insert_item(
+        _item(1, "tortillas", category, typical_interval_days=interval, last_purchased=_day(last))
+    )
+    for offset in dates:
+        _log(db, 1, _day(offset))
+    pantry = SqlitePantry(db)
+    pantry.load_seed([_seed("tortillas", "staple", typical_interval_days=70)])
+    assert _interval(db, 1) == learned
+    # Due a full learned interval after the last purchase. Keeping the old interval (none, or a
+    # stale 30) or taking the seed's 70 would leave it unasked.
+    assert [item.name for item in pantry.staples_due(_day(last + learned))] == ["tortillas"]
+
+
 def test_seed_rows_match_existing_names_ignoring_case_and_never_by_alias(
     db: sqlite3.Connection, insert_item: Insert
 ) -> None:  # [R12] [R13]
