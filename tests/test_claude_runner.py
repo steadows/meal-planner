@@ -36,6 +36,10 @@ pytestmark = pytest.mark.usefixtures("isolated_settings")
 ROOT = Path(__file__).resolve().parent.parent
 PROMPT = 'Find three sheet-pan dinners.\nKeep the jalapeño mild and reply like {"ok": true}.'
 RUN_TIMEOUT = 30  # bounds a hang if the runner never closes the child's stdin
+# For a run the test kills on timeout. Not 1s: under load the fake can take that long to start,
+# and one killed before it records its start (or writes early output) leaves nothing to check.
+# Still well short of the fake's sleeps.
+START_TIMEOUT = 3
 
 # The fake `claude`. Behaviour N is used for call N; the last one repeats. With "grandchild", it
 # first starts a sleeper that inherits its stdout, the way claude's own tool subprocesses would;
@@ -397,9 +401,7 @@ def test_timeout_raises_without_retry_and_kills_the_process_group(
     started = time.monotonic()
     try:
         with pytest.raises(ClaudeRunnerError):
-            # Not 1s: under load the fake can take that long to start, and a claude killed before
-            # it records its start leaves no call to check. Still well short of the 20s sleep.
-            claude_runner.run(PROMPT, timeout=3)
+            claude_runner.run(PROMPT, timeout=START_TIMEOUT)
         elapsed = time.monotonic() - started
 
         assert elapsed < 10
@@ -426,9 +428,7 @@ def test_timeout_does_not_wait_for_a_grandchild_that_left_the_group(
     started = time.monotonic()
     try:
         with pytest.raises(ClaudeRunnerError) as caught:
-            # Not 1s: under load the fake can take that long to start and write its early output.
-            # Still well short of the 30s sleep.
-            claude_runner.run(PROMPT, timeout=3)
+            claude_runner.run(PROMPT, timeout=START_TIMEOUT)
 
         assert time.monotonic() - started < 20
         assert "marker-partial" in caught.value.raw_output
@@ -451,9 +451,7 @@ def test_timeout_falls_back_to_killing_the_child_when_killpg_is_refused(
     started = time.monotonic()
     try:
         with pytest.raises(ClaudeRunnerError):
-            # Not 1s: under load the fake can take that long to start, and a claude killed before
-            # it records its start leaves no call to check. Still well short of the 20s sleep.
-            claude_runner.run(PROMPT, timeout=3)
+            claude_runner.run(PROMPT, timeout=START_TIMEOUT)
 
         assert time.monotonic() - started < 10
         (call,) = _calls(fake_claude_home)
@@ -476,9 +474,8 @@ def _interrupting(
     ) -> tuple[str, str]:
         processes.append(process)
         with contextlib.suppress(subprocess.TimeoutExpired):
-            # claude starts, as in the timeout tests. Not 1s: under load the fake can take that
-            # long to start, and a claude killed before it records its start leaves no call.
-            communicate(process, input, timeout=3)
+            # claude starts, as in the timeout tests.
+            communicate(process, input, timeout=START_TIMEOUT)
         raise interrupt
 
     return interrupted
