@@ -26,3 +26,6 @@ build/
 
 # claude code local settings (per machine)
 .claude/settings.local.json
+
+# per-worktree agent scratch (seam maps, handoffs, verify markers)
+.context/
