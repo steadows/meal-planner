@@ -64,7 +64,7 @@ Pre-checked on 2026-09-25: none of these files existed, `~/.gitconfig` had no in
 - [ ] **`feat/contracts` resync to main**: the rebase-merge changed the SHAs. Contracts asked Steve.
 - [ ] **Tooling note:** in one run, a test-writer subagent's scratch command included `rm -f /dev/null`. It failed harmlessly (not root) and `/dev/null` is intact. Contracts queued a feedback draft.
 - [x] **After #9 merges:** [[bot-runtime-design-waiting-on]] resolved (by wiring); new edge [[bot-background-py-waiting-on]] added; PLAN edge plus the ADR-gate status in PR #14.
-- [~] **PLAN ticks:** Phase 4 done in PR #14 (prefs [x], /find [~]). Phase 3 (rollup quantities, no agentic-OS imports) goes after #12 merges.
+- [x] **PLAN ticks:** Phase 3 and Phase 4 are in PR #14 (awaiting merge).
 - [ ] **PLAN doc bumps (need Steve's OK):** Mealie v3.28.0; the Phase 2 phone path via `tailscale serve`.
 - [ ] **Queued for Steve:** the CLAUDE.md `seed_loader` entry-point word; `CLAUDE_LOCK_DIR` in `.env.example`; the `/steadows-verify` subagent naming fix. See `~/meal-planner-pm/.context/task-master-2026-09-26.md`.
 - [ ] **ADR-0001 deferred follow-ups (not v1):** a `python -m meals doctor` command (env, claude probe, launchd state, lock holders), and an outside heartbeat or uptime alert for "the Mac is down". File as backlog when Steve wants them.
