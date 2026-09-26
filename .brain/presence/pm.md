@@ -56,3 +56,6 @@ Pre-checked on 2026-09-25: none of these files existed, `~/.gitconfig` had no in
   - Prompt location: "next to module" (PLAN L557) vs `meals/prompts/<lane>/` (CLAUDE.md).
 - **Env not built yet:** no Mealie container (port 9925), no `.env`, no pyproject. Python 3.11+ is available via `uv`.
 - **Installed skill:** the global `~/.claude/skills/navigation-standards` is the ERD-customized copy. It references `docs/AUTONOMOUS_WORK.md`, `.brain/pm/punch-list.md` and "87 research notes", none of which exist here, and its whoami folder-name fallback isn't in this engine. `.brain/research/` doesn't exist yet.
+
+## Follow-ups (pm backlog)
+- [ ] **Chrome DevTools MCP for e2e testing** (Steve, 2026-09-25, "when we get a chance"). It isn't configured anywhere yet: there's no global MCP server and no `.mcp.json`. Plan: [[pm]] adds a committed project `.mcp.json` with the `chrome-devtools` server so every worktree gets it. Main users: [[wiring]] (end-to-end Saturday dry run, M4) and [[mealie]] (checking a meal plan renders in Mealie). **Hard rule:** e2e uses an isolated, throwaway Chrome profile, never Steve's logged-in Meijer profile. Same prompt-injection and no-checkout boundary as the cart lane. Research the current server package and flags before adding it.
