@@ -102,7 +102,8 @@ def _measure(name: str, unit: str | None) -> _Measure:
     return _Measure(f"unit:{canonical}", 1.0, canonical)
 
 
-def _require_positive(qty: float, what: str) -> None:
+def require_positive(qty: float, what: str) -> None:
+    """Raise ValueError unless `qty` is a positive, finite number. `what` names it in the message."""
     if not math.isfinite(qty) or qty <= 0:
         raise ValueError(f"{what} must be a positive, finite number, got {qty!r}")
 
@@ -149,7 +150,7 @@ def combine(ingredients: Iterable[Ingredient]) -> tuple[Ingredient, ...]:
     by_name: dict[str, list[Ingredient]] = {}
     for ingredient in ingredients:
         if ingredient.qty is not None:
-            _require_positive(ingredient.qty, f"quantity of {ingredient.name!r}")
+            require_positive(ingredient.qty, f"quantity of {ingredient.name!r}")
         by_name.setdefault(_key(ingredient.name), []).append(ingredient)
     return tuple(line for lines in by_name.values() for line in _combine_one(lines))
 
@@ -160,10 +161,10 @@ def packages_needed(need: Ingredient, pack_qty: float, pack_unit: str | None) ->
     None when `need` has no quantity or its unit can't be converted to the pack's. Raises
     ValueError for a quantity that isn't positive and finite.
     """
-    _require_positive(pack_qty, "pack_qty")
+    require_positive(pack_qty, "pack_qty")
     if need.qty is None:
         return None
-    _require_positive(need.qty, f"quantity of {need.name!r}")
+    require_positive(need.qty, f"quantity of {need.name!r}")
     have, pack = _measure(need.name, need.unit), _measure(need.name, pack_unit)
     if have.dimension != pack.dimension:
         return None
