@@ -234,9 +234,9 @@ class HttpMealieClient:
         entry each. Every slug is resolved before anything is written.
 
         Not safe to run concurrently for one week: two overlapping calls can leave the union of
-        their recipes. Callers serialize. This relies on the runtime model's single publisher
-        (wiring's ADR-0001, not yet confirmed: only `reconcile` publishes, under its job lock);
-        revisit if that changes."""
+        their recipes. Callers serialize: the runtime model (ADR-0001) has only `reconcile`
+        publish, under its job lock. A retried publish is safe, since reruns replace rather than
+        append."""
         wanted = tuple(self._fetch_recipe(slug).id for slug in dict.fromkeys(slugs))
         day = week_start.isoformat()
         entries = self._paged("/api/households/mealplans", {"start_date": day, "end_date": day})
