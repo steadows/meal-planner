@@ -27,3 +27,11 @@ Besides contracts, the bot lane waits on the runtime-model design that [[wiring]
 
 ## Security note from Lane 0 /steadows-verify (via [[pm]], 2026-09-26)
 `ClaudeRunnerError.raw_output` can contain fetched web-page text. It's untrusted: when surfacing an error to Steve in Telegram, send it as plain text (no `parse_mode`), truncated, and never render it as markdown or HTML.
+
+## Exactly-once for pantry replies is yours (from [[pantry]] PR 2, via [[pm]], 2026-09-26)
+A **replayed** "still good" that arrives after an "out of X" flip restores the item to `have`. Pantry treats "still good" as a state-setting command, not an idempotent no-op. Exactly-once delivery belongs to the bot: dedupe on Telegram `update_id` (persisted, so a restart doesn't replay) before dispatching any pantry intent. Pin it with a test that replays an update.
+
+## `background.py` contract notes (from [[wiring]] P1, via [[pm]], 2026-09-26)
+- `spawn_job` lets **`OSError` propagate**. The bot composes its own "couldn't start X" reply to Steve, and tests it.
+- The in-flight slot is freed when the worker thread actually ends, not at the 15-minute give-up (ADR "bounded by the in-flight cap").
+- `python-telegram-bot` arrives in `pyproject.toml` with wiring's P1 PR; take it from main rather than adding it yourself.
