@@ -28,7 +28,8 @@ in each lane's `.brain/presence/<lane>.md`.
 ## 1. How lanes are organized here
 
 One long-lived worktree and branch per lane (`~/meal-planner-<lane>`, `feat/<lane>`). The brain
-resolves your lane from the branch name, so don't work on other branches in a lane worktree. There
+resolves your lane from the branch name, so work on `feat/<lane>`; the one exception is a short-lived
+PR branch (§2 step 10). There
 is no issue tracker: status lives in PLAN.md's checkboxes and your presence note.
 
 **File ownership is in your presence note's `touches`.** The contracts lane alone edits
