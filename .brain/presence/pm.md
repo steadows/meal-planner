@@ -11,7 +11,7 @@ current_worktree: /Users/stevemeadows/meal-planner-pm
 current_branch: feat/pm
 current_ticket: none
 touches: [docs/PLAN.md, CLAUDE.md, .claude/settings.json, .gitignore, .github/, .brain/presence/, .brain/connections/, .brain/journal/]
-updated: 2026-09-26T15:01:27Z
+updated: 2026-09-26T15:24:23Z
 ---
 Coordination lane, not a build lane — owns no files under `meals/`. Job: periodic sweep of `.brain/` (presence notes, `connections/`, journal) to catch stalled lanes, unresolved `waiting-on` edges, and merge-order violations against the diagram in PLAN.md (`Concurrency lanes`); message a stuck lane; keep this note's `status` honest. Comms: live `SendMessage` between lanes (Steve, 2026-09-25) — do NOT arm a watcher on `dm/pm/pending`.
 
@@ -75,3 +75,8 @@ Pre-checked on 2026-09-25: none of these files existed, `~/.gitconfig` had no in
   - Deferred: duplicate-import detection (a re-import makes "Name (1)"); plan-entry ownership via a dedicated Mealie bot user.
   - LOW: the Mealie image is pinned by tag, not digest; double tag I/O.
   - Handoff: `~/meal-planner-mealie/.context/handoffs/HANDOFF-2026-09-26-lane-c-mealie.md`.
+- [ ] **Mealie error contract** ([[contracts-mealie-search-mealie-error-contract]]):
+  1. [[contracts]] adds `MealieUnavailable` to the `MealieClient` Protocol (it can ride with the ADR-gated PR or go on its own).
+  2. [[mealie]] wraps HTTP, transport and validation failures in it (separate PR; acked).
+  3. [[search]] skips on it in `_rotation_pool`, with a one-bad-favourite test.
+  pm pings each lane when the step before it lands.
