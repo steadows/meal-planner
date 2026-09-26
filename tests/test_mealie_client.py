@@ -266,6 +266,8 @@ def test_get_recipe_fills_gaps_for_a_hand_entered_recipe(
         pytest.param("about half an hour", None, id="unreadable"),
         pytest.param(".5 hours", 30, id="leading-decimal-point"),
         pytest.param("1/2 hour", None, id="fraction-is-unknown-not-2-hours"),
+        pytest.param("1 / 2 hour", None, id="spaced-fraction"),
+        pytest.param("1/2 hour 15 minutes", None, id="fraction-with-more-terms"),
     ],
 )
 def test_get_recipe_reads_hands_on_minutes_from_free_text_prep_time(
