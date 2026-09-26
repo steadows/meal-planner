@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ADR-0001 Options</title>
+<style>
+:root {
+  --bg: #111315; --panel: #1a1d20; --panel-2: #212529; --line: #2e3338;
+  --text: #e6e8ea; --muted: #9aa3ab; --accent: #6fb38a; --accent-soft: #1f3a2b;
+  --warn: #d9a441; --bad: #d46a6a; --good: #6fb38a;
+  --radius: 10px; --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+:root[data-theme="light"] {
+  --bg: #f6f7f8; --panel: #ffffff; --panel-2: #f0f2f4; --line: #d9dde1;
+  --text: #1b1f23; --muted: #5b646c; --accent: #2f7a50; --accent-soft: #e2f1e8;
+  --warn: #9a6a10; --bad: #a83a3a; --good: #2f7a50;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif; }
+main { max-width: 1180px; margin: 0 auto; padding: 28px 16px 80px; }
+h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.01em; }
+h2 { font-size: 16px; margin: 36px 0 12px; color: var(--muted); font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.06em; }
+p.lede { color: var(--muted); margin: 0 0 18px; max-width: 760px; }
+.top { display: flex; justify-content: space-between; gap: 12px; align-items: start; flex-wrap: wrap; }
+button { font: inherit; cursor: pointer; }
+.ghost { background: transparent; border: 1px solid var(--line); color: var(--muted);
+  border-radius: 8px; padding: 6px 10px; }
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; }
+.fact { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 12px 14px; font-size: 14px; }
+.fact b { display: block; margin-bottom: 2px; }
+.fact .src { color: var(--muted); font-size: 12px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 16px 16px 12px; text-align: left; color: inherit; position: relative;
+  transition: border-color .15s, box-shadow .15s; }
+.card:hover { border-color: var(--muted); }
+.card[aria-pressed="true"] { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.card h3 { margin: 0 0 2px; font-size: 17px; }
+.card .tag { display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: .05em;
+  text-transform: uppercase; color: var(--accent); background: var(--accent-soft);
+  padding: 2px 8px; border-radius: 99px; margin-bottom: 8px; }
+.card .one { color: var(--muted); margin: 0 0 10px; }
+.card h4 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+  margin: 14px 0 4px; }
+.card ul { margin: 0; padding-left: 18px; font-size: 14px; }
+.card li { margin: 2px 0; }
+code { font-family: var(--mono); font-size: 12.5px; background: var(--panel-2);
+  padding: 1px 5px; border-radius: 4px; }
+.select-row { margin-top: 14px; display: flex; justify-content: flex-end; }
+.pick { background: var(--panel-2); border: 1px solid var(--line); color: var(--text);
+  border-radius: 8px; padding: 7px 14px; font-weight: 600; }
+.card[aria-pressed="true"] .pick { background: var(--accent); color: #0d1410; border-color: var(--accent); }
+.flow { font-family: var(--mono); font-size: 12px; background: var(--panel-2); border-radius: 8px;
+  padding: 10px; white-space: pre; overflow-x: auto; margin: 6px 0 0; line-height: 1.45; }
+.tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); }
+table { width: 100%; border-collapse: collapse; font-size: 14px; min-width: 720px; }
+th, td { padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; text-align: left; }
+th { background: var(--panel-2); font-weight: 600; }
+td:first-child { color: var(--muted); font-weight: 600; white-space: nowrap; }
+tr:last-child td { border-bottom: 0; }
+.rec-col { background: color-mix(in srgb, var(--accent-soft) 55%, transparent); }
+.g { color: var(--good); } .w { color: var(--warn); } .b { color: var(--bad); }
+.callout { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--warn);
+  border-radius: var(--radius); padding: 12px 14px; margin-top: 12px; font-size: 14px; }
+.tokenbar { position: sticky; bottom: 0; margin-top: 28px; background: var(--panel);
+  border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px;
+  display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.tokenbar .tok { font-family: var(--mono); background: var(--panel-2); padding: 6px 10px;
+  border-radius: 6px; flex: 1; min-width: 200px; }
+.copy { background: var(--accent); color: #0d1410; border: 0; border-radius: 8px; padding: 8px 14px; font-weight: 700; }
+.copy:disabled { background: var(--panel-2); color: var(--muted); cursor: not-allowed; }
+.muted { color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <div class="top">
+    <div>
+      <h1>Runtime model: how the bot and the Saturday jobs run</h1>
+      <p class="lede">Three ways to run the always-on pieces on this Mac: the Telegram bot, the
+      "on it… here's your answer" background work, the Saturday/Sunday schedule, the one-Chrome-at-a-time
+      cart fill, and what happens after a restart.</p>
+      <p class="lede"><b>Record (2026-09-25): Steve selected Option B.</b> It became <code>docs/adr/ADR-0001-runtime-model.md</code>, which supersedes the details here: the debate added <code>reconcile</code> (five plists), and the <code>job_run</code> migration number is set at merge.</p>
+    </div>
+    <button class="ghost" id="theme" type="button">Light / dark</button>
+  </div>
+
+  <h2>What the research settled</h2>
+  <div class="facts">
+    <div class="fact"><b>macOS catches up on missed schedules</b>A launchd calendar job due while the Mac sleeps runs on wake; several missed intervals coalesce into one run. cron skips them. Powered-off time is not covered, so run once at startup too.
+      <div class="src">launchd.plist(5), StartCalendarInterval</div></div>
+    <div class="fact"><b>Claude works from a background job here</b>Tested on this Mac: a launchd one-shot ran <code>claude -p --safe-mode</code> with the key stripped, answered "ready", rc 0, 3 s.
+      <div class="src">local test, Claude Code 2.1.280; cf. #77213 (closed, not reproduced), #95689 (open, avoided by safe mode)</div></div>
+    <div class="fact"><b>The bot library's scheduler drops missed jobs</b>PTB JobQueue uses APScheduler with a 1-second misfire grace; a job due while down/asleep is skipped, and jobs aren't persisted across restarts.
+      <div class="src">PTB wiki "Making your bot persistent"; APScheduler 3.x defaults</div></div>
+    <div class="fact"><b>Other processes can send as the bot</b>Only two concurrent <code>getUpdates</code> pollers conflict (409). A job process can call <code>sendMessage</code> with the same token while the bot polls.
+      <div class="src">Bot API getUpdates; consistent community reports (inferred, not stated by Telegram)</div></div>
+    <div class="fact"><b>Graceful stop waits for in-bot tasks</b>PTB awaits <code>create_task</code> work on stop, but launchd SIGKILLs after <code>ExitTimeOut</code> (20 s default), so a 10-minute run inside the bot dies on a restart.
+      <div class="src">PTB Application docs v22.8; launchd.plist(5)</div></div>
+    <div class="fact"><b>Chrome runs in your logged-in session</b>Cart fills need Chrome open with the Meijer profile; a LaunchAgent (your GUI session) can reach it. Two profiles have the extension, so the cart spike must prove which one an unattended run drives.
+      <div class="src">code.claude.com/docs/en/chrome</div></div>
+  </div>
+
+  <h2>Options</h2>
+  <div class="cards" id="cards">
+
+    <button class="card" type="button" data-opt="A" aria-pressed="false">
+      <span class="tag">Simplest to stand up</span>
+      <h3>A. Everything inside the bot</h3>
+      <p class="one">One always-on process. The bot's own scheduler runs Saturday; all background work runs as tasks inside it.</p>
+      <h4>Components</h4>
+      <ul>
+        <li><b>1 LaunchAgent</b>: the bot, kept alive, wrapped in <code>caffeinate -i</code></li>
+        <li><code>meals/background.py</code> (wiring): reply "on it", run work in a thread, post the answer or a one-line error</li>
+        <li><code>jobs.py</code> (wiring): the four jobs, registered on PTB's JobQueue (America/Detroit)</li>
+        <li>Startup and wake "catch-up" check, because JobQueue skips missed jobs</li>
+        <li><code>job_run</code> table: marks each job/week started and finished (a contracts request)</li>
+      </ul>
+      <h4>Flow</h4>
+      <div class="flow">bot ─┬─ chat handlers ─► background task ─► claude_runner
+     ├─ JobQueue Sat 8/16, Sun 8 ─► jobs.* ─► Telegram
+     └─ on start/wake ─► catch-up check</div>
+      <h4>Failure modes</h4>
+      <ul>
+        <li class="b">Bot crash or restart stops the schedule and kills an in-flight cart fill</li>
+        <li class="w">Catch-up logic re-implements what launchd gives for free, and sleep/wake detection is fiddly</li>
+        <li class="g">Only one process to watch</li>
+      </ul>
+      <div class="select-row"><span class="pick">Select A</span></div>
+    </button>
+
+    <button class="card" type="button" data-opt="B" aria-pressed="false">
+      <span class="tag">Recommended</span>
+      <h3>B. Bot for chat, macOS for the schedule</h3>
+      <p class="one">The bot does conversation plus quick background work. Each scheduled or long job is its own short-lived command that macOS runs on time, or on wake if it missed.</p>
+      <h4>Components</h4>
+      <ul>
+        <li><b>Bot LaunchAgent</b>: kept alive, wrapped in <code>caffeinate -i</code> (replaces the keep-awake script)</li>
+        <li><code>meals/background.py</code> (wiring): chat-sized runs (<code>/find</code>, reply parsing) inside the bot</li>
+        <li><code>python -m meals job &lt;name&gt;</code> (wiring): <code>sat_propose</code>, <code>sat_nudge</code>, <code>sun_autoapprove</code>, <code>cart_fill</code>. Each takes its own lock, checks plan status and <code>job_run</code>, acts, and messages Telegram itself</li>
+        <li><b>3 calendar LaunchAgents</b>: Sat 8:00, Sat 16:00, Sun 8:00, each also runs at startup (every job is safe to rerun)</li>
+        <li>The bot starts <code>cart_fill</code> as a <b>separate process</b> when you approve, so a bot restart can't cut a fill in half</li>
+        <li>One-Chrome lock lives in <code>cart.py</code> (cart lane), as contracts already planned</li>
+        <li><code>job_run</code> table: marks each job/week started and finished (a contracts request)</li>
+      </ul>
+      <h4>Flow</h4>
+      <div class="flow">launchd Sat 8 ──► job sat_propose ─► planner ─► Telegram
+launchd Sat 16 ─► job sat_nudge (once, if unanswered)
+launchd Sun 8 ──► job sun_autoapprove ─► job cart_fill
+bot ─┬─ /find ─► in-bot background ─► reply when done
+     └─ "2 and 4" ─► approve ─► spawn job cart_fill ─► Chrome lock</div>
+      <h4>Failure modes</h4>
+      <ul>
+        <li class="g">Saturday still happens if the bot is down; missed-while-asleep jobs run on wake</li>
+        <li class="g">A crashed job doesn't touch the bot, and vice versa</li>
+        <li class="w">An in-bot <code>/find</code> is lost on restart ("I restarted, send that again")</li>
+        <li class="w">Four plist files to install (one <code>make install</code> script)</li>
+      </ul>
+      <div class="select-row"><span class="pick">Select B</span></div>
+    </button>
+
+    <button class="card" type="button" data-opt="C" aria-pressed="false">
+      <span class="tag">Most robust, most code</span>
+      <h3>C. Durable queue plus a worker</h3>
+      <p class="one">Every piece of background work becomes a row in a SQLite queue. A second always-on worker process runs the rows and posts the results.</p>
+      <h4>Components</h4>
+      <ul>
+        <li><b>2 LaunchAgents</b>: bot and worker, both kept alive</li>
+        <li><code>run</code> table (contracts migration): kind, args, reply-to, status queued, running, done, failed or interrupted</li>
+        <li>Bot only enqueues and says "on it"; worker claims rows, respects the Claude and Chrome limits, posts results</li>
+        <li>Worker checks the clock each minute to start the weekly jobs (no calendar plists)</li>
+        <li>On worker start: running rows become "interrupted", safe kinds requeue, and a cart fill asks you first</li>
+      </ul>
+      <h4>Flow</h4>
+      <div class="flow">bot ─► INSERT run(queued) ─► "on it"
+worker ─► claim ─► claude_runner / cart ─► Telegram
+worker clock ─► weekly jobs ─► INSERT run</div>
+      <h4>Failure modes</h4>
+      <ul>
+        <li class="g">Nothing is lost across restarts; a <code>/status</code> command can show the queue</li>
+        <li class="b">A queue, claiming and a polling loop: several times the code of B for a handful of runs a week</li>
+        <li class="w">Bigger contracts change, and the worker is a second always-on process to keep healthy</li>
+      </ul>
+      <div class="select-row"><span class="pick">Select C</span></div>
+    </button>
+  </div>
+
+  <h2>Side by side</h2>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th></th><th>A. All in the bot</th><th class="rec-col">B. Bot + macOS schedule ★</th><th>C. Queue + worker</th></tr></thead>
+      <tbody>
+        <tr><td>Complexity</td><td class="g">Lowest to start; grows with catch-up logic</td><td class="rec-col g">Low: small CLI + 4 plists</td><td class="b">Highest: queue, claims, polling</td></tr>
+        <tr><td>Missed schedule (asleep / off)</td><td class="w">Hand-rolled catch-up on start and wake</td><td class="rec-col g">launchd runs on wake; startup run covers power-off</td><td class="g">Worker clock catches up on start</td></tr>
+        <tr><td>Restart safety</td><td class="b">Restart kills schedule and in-flight cart fill</td><td class="rec-col g">Jobs independent of bot; only an in-bot <code>/find</code> is lost</td><td class="g">Nothing lost; interrupted work is visible</td></tr>
+        <tr><td>Testability</td><td class="w">Needs PTB JobQueue in tests</td><td class="rec-col g">Each job is a plain function; one command per job</td><td class="w">Queue semantics need their own tests</td></tr>
+        <tr><td>Cross-lane cost</td><td class="w"><code>job_run</code> table (contracts)</td><td class="rec-col w"><code>job_run</code> table (contracts)</td><td class="b"><code>run</code> table + worker ownership questions</td></tr>
+        <tr><td>Time to implement (wiring)</td><td>~2 hr</td><td class="rec-col">~2–3 hr</td><td>~5–6 hr</td></tr>
+        <tr><td>Rollback</td><td class="g">Unload one plist</td><td class="rec-col g">Unload plists; jobs can be run by hand</td><td class="w">Drain the queue first</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout"><b>Recommendation: B.</b> It lets macOS do what it already does well (on-time and
+  on-wake scheduling, restarts) and keeps the long, side-effecting cart fill out of the bot's process. It
+  costs one tiny command-line entry point and a few plist files, not a queue. <br><br>
+  <b>Needed from contracts under A or B:</b> a <code>job_run</code> table
+  (<code>job</code>, <code>week_start</code>, <code>started_at</code>, <code>finished_at</code>, <code>outcome</code>,
+  primary key <code>(job, week_start)</code>) in migration 1, <b>before contracts merges</b>. It's what makes
+  "nudge once", "don't double-fill the cart after a crash" and "retry cart" work. Adding it later means
+  a second migration.</div>
+
+  <div class="tokenbar">
+    <span class="muted">Your pick:</span>
+    <span class="tok" id="tok">select an option above</span>
+    <button class="copy" id="copy" type="button" disabled>Copy</button>
+  </div>
+</main>
+<script>
+(() => {
+  const root = document.documentElement;
+  const key = 'runtime-options-theme';
+  try { const t = localStorage.getItem(key); if (t) root.dataset.theme = t; } catch (e) {}
+  document.getElementById('theme').addEventListener('click', () => {
+    const next = root.dataset.theme === 'light' ? 'dark' : 'light';
+    root.dataset.theme = next;
+    try { localStorage.setItem(key, next); } catch (e) {}
+  });
+  const tok = document.getElementById('tok');
+  const copy = document.getElementById('copy');
+  document.querySelectorAll('.card').forEach(card => card.addEventListener('click', () => {
+    document.querySelectorAll('.card').forEach(c => c.setAttribute('aria-pressed', 'false'));
+    card.setAttribute('aria-pressed', 'true');
+    tok.textContent = 'SELECT option-' + card.dataset.opt;
+    copy.disabled = false; copy.textContent = 'Copy';
+  }));
+  copy.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(tok.textContent); copy.textContent = 'Copied'; }
+    catch (e) { copy.textContent = 'Select the text'; }
+  });
+})();
+</script>
+</body>
+</html>
