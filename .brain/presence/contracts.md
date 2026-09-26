@@ -21,3 +21,4 @@ Read PLAN.md → Shared contracts, Definition of done, and Rules (updated on `fe
 - `meals/fakes/` is now under the contracts-only lock alongside the four files.
 - Add an `import-linter` config (layers: entry points `bot`/`jobs`/`mcp_tools`/`__main__` > feature modules > `contracts`/`db`/`config`/`claude_runner`, plus independence between feature modules; `rollup` is allowed as pure math). Check the same-layer `|` syntax against the installed version.
 - `pyproject.toml` and `tests/conftest.py` are add-only for other lanes, so lay them out to make appending easy.
+- **Approved by Steve 2026-09-25:** `claude_runner` always strips ANTHROPIC_API_KEY and fails loudly without /login. New domain terms accepted as-is: `Ingredient`, `CartItem`, `PantryItem`, `ClaudeRunnerError`, `MealieClient`, `Pantry`. `.context/` is git-ignored on main (PR #2).
