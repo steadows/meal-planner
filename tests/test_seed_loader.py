@@ -23,19 +23,8 @@ from typing import Any
 import pytest
 
 from meals.db import get_db
-
-# RED until B2 lands: each test fails with this message instead of one collection error.
-try:
-    from meals.seed_loader import SeedError, main, read_seed_csv
-
-    from meals.pantry import SeedItem, SqlitePantry
-except ImportError as exc:
-    _MISSING: str | None = (
-        "meals.seed_loader must export read_seed_csv, main and SeedError, and meals.pantry "
-        f"SqlitePantry and SeedItem; see .context/seams/lane-b-pantry.md. ({exc})"
-    )
-else:
-    _MISSING = None
+from meals.pantry import SeedItem, SqlitePantry
+from meals.seed_loader import SeedError, main, read_seed_csv
 
 FIXTURE = Path(__file__).parent / "fixtures" / "seed_pantry.csv"
 FIXTURE_NAMES = (
@@ -65,12 +54,6 @@ COLUMNS = (
 )
 ON = date(2026, 9, 26)
 PRODUCT = "https://www.meijer.com/shopping/product"
-
-
-@pytest.fixture(autouse=True)
-def _b2_seams_exist() -> None:
-    if _MISSING is not None:
-        pytest.fail(_MISSING)
 
 
 def _seed(name: str, category: str = "staple", **fields: object) -> SeedItem:

@@ -21,17 +21,7 @@ import pytest
 from pydantic import ValidationError
 
 from meals.contracts import PantryItem
-
-# RED until B2 lands: each test fails with this message instead of one collection error.
-try:
-    from meals.pantry import SeedItem, SeedResult, SqlitePantry
-except ImportError as exc:
-    _MISSING: str | None = (
-        "meals.pantry must export SqlitePantry (with log_purchase and load_seed), SeedItem and "
-        f"SeedResult; see .context/seams/lane-b-pantry.md. ({exc})"
-    )
-else:
-    _MISSING = None
+from meals.pantry import SeedItem, SeedResult, SqlitePantry
 
 Insert = Callable[[PantryItem], None]
 Rows = list[tuple[Any, ...]]
@@ -42,12 +32,6 @@ OLD = "2000-01-01 00:00:00"  # an updated_at that no real write can leave behind
 URL_A = "https://www.meijer.com/shopping/product/example-olive-oil/100001.html"
 URL_B = "https://www.meijer.com/shopping/product/example-olive-oil-1l/200002.html"
 URL_C = "https://www.meijer.com/shopping/product/example-tortillas/100009.html"
-
-
-@pytest.fixture(autouse=True)
-def _b2_seams_exist() -> None:
-    if _MISSING is not None:
-        pytest.fail(_MISSING)
 
 
 def _day(offset: int) -> date:
