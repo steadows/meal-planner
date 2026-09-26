@@ -52,10 +52,6 @@ class FakePantry:
         return None if item is None else self._replace(item, {"status": status})
 
     def confirm_stocked(self, name: str, on: date, plenty: bool = False) -> PantryItem | None:
-        """Steve says an item is still stocked: status becomes `have`, and the next ask moves to a
-        week after `on` ("still good") or one interval after it (`plenty`; a week if there's no
-        interval), unless the current ask date is already later: this only ever pushes the ask
-        back. Logs no purchase, and repeating it for the same `on` changes nothing."""
         item = self._find(name)
         if item is None:
             return None

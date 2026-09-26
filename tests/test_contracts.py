@@ -209,12 +209,19 @@ def test_fakes_implement_protocols(fake_mealie: FakeMealieClient, fake_pantry: F
     assert isinstance(fake_pantry, Pantry)
 
 
-def test_pantry_protocol_has_confirm_stocked_as_the_fake_implements_it() -> None:
-    """bot's "still good" / "have plenty" replies and pantry's MCP tools call it through `Pantry`,
-    with the fake's (and SqlitePantry's) names, kinds, defaults and types."""
-    assert inspect.signature(Pantry.confirm_stocked, eval_str=True) == inspect.signature(
-        FakePantry.confirm_stocked, eval_str=True
-    )
+def _public_methods(cls: type) -> dict[str, inspect.Signature]:
+    return {
+        name: inspect.signature(member, eval_str=True)
+        for name, member in vars(cls).items()
+        if callable(member) and not name.startswith("_")
+    }
+
+
+def test_pantry_protocol_has_every_method_the_fake_has_with_the_same_signature() -> None:
+    """planner, bot and pantry's MCP tools call the pantry through `Pantry` (bot's "still good" /
+    "have plenty" replies through `confirm_stocked`), so a method only the fake has, or one whose
+    names, kinds, defaults or types differ, is a contract gap. isinstance checks names only."""
+    assert _public_methods(Pantry) == _public_methods(FakePantry)
 
 
 # ── FakeClaudeRunner ─────────────────────────────────────────────────────────
