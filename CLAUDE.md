@@ -30,3 +30,4 @@ Read this, then `docs/AUTONOMOUS_WORK.md` (how a lane runs its build loop: gates
 - GitHub account for this repo: `steadows` (scoped per folder; do not switch the global gh account).
 - Conventional commit messages (`feat:`, `fix:`, `docs:`, `chore:`, `test:`).
 - PR per lane into `main`. Announce with `brain announce "about to PR"` before opening it.
+- CI (`.github/workflows/ci.yml`) must pass before merging. Every agent acts as the repo admin, so never use `gh pr merge --admin` to get past a failing check. Fix the failure, or ask Steve.
