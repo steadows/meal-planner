@@ -14,8 +14,9 @@ it through `meals/mealie_client.py`.
 4. After Tailscale (Phase 2), start with `MEALIE_BASE_URL=http://<tailscale-hostname>:9925` so
    links Mealie generates point at the right host.
 
-Check the client against it: `uv run pytest -m integration tests/test_mealie_client.py`. Those
-tests skip when `MEALIE_TOKEN` is unset.
+Check the client against it:
+`uv run pytest -m integration tests/test_mealie_client_integration.py`. Those tests skip when
+`MEALIE_TOKEN` is unset.
 
 ## Tag conventions
 

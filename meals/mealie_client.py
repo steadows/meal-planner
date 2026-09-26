@@ -6,6 +6,7 @@ a `MealieClient`.
 """
 
 import ipaddress
+import itertools
 import re
 import socket
 from collections.abc import Iterator, Mapping, Sequence
@@ -15,7 +16,7 @@ from urllib.parse import urlsplit
 from uuid import UUID
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from meals.config import Settings, get_settings
 from meals.contracts import Ingredient, RecipeOption
@@ -26,8 +27,9 @@ BATCH_OK_TAG = "batch-ok"
 PLAN_ENTRY_MARKER = "Planned by meal-planner"
 PLAN_ENTRY_TYPE = "dinner"
 PAGE_SIZE = 100
-# Scrapes can be slow; a client-side timeout would orphan a recipe Mealie still finishes importing.
-MEALIE_TIMEOUT_S = 60.0
+MEALIE_TIMEOUT_S = 10.0
+# A scrape can be slow, and timing out early would orphan a recipe Mealie still finishes importing.
+MEALIE_IMPORT_TIMEOUT_S = 60.0
 # What Mealie's slugify produces. Slugs and tags go into URL paths, and some come from Claude's
 # output, so anything else is treated as unknown and never sent.
 _SLUG = re.compile(r"[A-Za-z0-9_-]+", re.ASCII)
@@ -94,9 +96,11 @@ class _PlanEntry(_Mealie):
 
 
 class _Page(_Mealie):
-    page: int
     total_pages: int
     items: tuple[dict[str, Any], ...]
+
+
+_SLUG_RESPONSE = TypeAdapter(str)
 
 
 class HttpMealieClient:
@@ -127,14 +131,12 @@ class HttpMealieClient:
         response = self._http.post(
             "/api/recipes/create/url",
             json={"url": url, "includeTags": False, "includeCategories": False},
+            timeout=MEALIE_IMPORT_TIMEOUT_S,
         )
         if response.status_code in _SCRAPE_FAILURES:
             raise ValueError(f"Mealie couldn't import {url} (HTTP {response.status_code})")
         response.raise_for_status()
-        slug = response.json()
-        if not isinstance(slug, str):
-            raise TypeError(f"Mealie returned {type(slug).__name__} as the new recipe's slug")
-        return slug
+        return _SLUG_RESPONSE.validate_json(response.content)
 
     def get_recipe(self, slug: str) -> RecipeOption:
         recipe = self._fetch_recipe(slug)
@@ -161,8 +163,10 @@ class HttpMealieClient:
             return ()
         response.raise_for_status()
         # Filter by the resolved id, so an unknown tag can never read as "no filter".
-        params = {"tags": _Tag.model_validate(response.json()).id, "orderBy": "slug"}
-        items = self._paged("/api/recipes", params | {"orderDirection": "asc"})
+        tag_id = _Tag.model_validate(response.json()).id
+        items = self._paged(
+            "/api/recipes", {"tags": tag_id, "orderBy": "slug", "orderDirection": "asc"}
+        )
         return tuple(_Slugged.model_validate(item).slug for item in items)
 
     def set_meal_plan(self, week_start: date, slugs: Sequence[str]) -> str:
@@ -221,15 +225,13 @@ class HttpMealieClient:
         return tuple(_Parsed.model_validate(item).ingredient for item in response.json())
 
     def _paged(self, path: str, params: Mapping[str, str]) -> Iterator[dict[str, Any]]:
-        page = 1
-        while True:
+        for page in itertools.count(1):
             response = self._http.get(path, params={**params, "page": page, "perPage": PAGE_SIZE})
             response.raise_for_status()
             body = _Page.model_validate(response.json())
             yield from body.items
             if page >= body.total_pages:
                 return
-            page += 1
 
 
 def _require_public_url(url: str) -> None:
@@ -248,7 +250,7 @@ def _require_public_url(url: str) -> None:
     if ip is not None:
         local = ip.is_multicast or not ip.is_global  # is_global is True for most multicast
     else:
-        local = host == "localhost" or host.endswith(".localhost") or "." not in host
+        local = "." not in host or host.endswith(".localhost")  # single-label covers "localhost"
     if local:
         raise ValueError(f"refusing a local or private address: {url!r}")
 
