@@ -1,7 +1,8 @@
 """SqlitePantry.confirm_stocked, the next_ask_on ask date and the seed's bootstrap reminder (B3).
 
-Authority: `.context/seams/lane-b-pantry.md`, "Revision 4 — PR 2 (B3)" [Rev4], which wins over the
-rest of that file; the `Pantry` Protocol docstrings in meals/contracts.py [Protocol]; and
+Authority: `.context/seams/lane-b-pantry.md`, "Revision 5" [Rev5] (no interval growth), which wins
+over "Revision 4 — PR 2 (B3)" [Rev4], which wins over the rest of that file; the `Pantry` Protocol
+docstrings in meals/contracts.py [Protocol]; and
 `FakePantry.confirm_stocked`, the reference behaviour Revision 4 defers to [Fake]. The B3 dispatch
 brief's items are cited as [A1]..[D]. Expected values are worked out by hand, never from the code.
 Setup writes rows straight to the tables (`insert_item`, `_log`), not through the code under test.
@@ -148,55 +149,43 @@ def test_confirming_moves_the_ask_date_to_the_later_of_the_current_one_and_the_p
     assert _column(db, "next_ask_on") == {"rice": str(ask)}
 
 
-# ── confirm_stocked: interval growth ([A5]) ───────────────────────────────────
+# ── confirm_stocked: the interval ([Rev5]) ────────────────────────────────────
+
+_PAST = {"typical_interval_days": 60, "last_purchased": _on(-100)}  # lasted 40 days past it
+_INSIDE = {"typical_interval_days": 60, "last_purchased": _on(-10)}  # 90% point is day 54
 
 
 @pytest.mark.parametrize(
-    ("bought_days_ago", "interval", "ask_in"),
+    ("fields", "plenty", "ask"),
     [
-        (100, 107, 7),  # lasted 100 days on a 60-day guess: 100 + 7
-        (54, 61, 7),  # one day past: 54 + 7 = 61
-        (53, 60, 7),  # 53 + 7 = 60, not more than the interval: kept
-        (10, 60, 44),  # well inside; the 90% point (day 54, 44 days out) is later than a week
+        # Revision 4 grew this one to 100 + 7 = 107.
+        (_PAST, False, _on(7)),
+        (_PAST, True, _on(60)),
+        (_INSIDE, False, _on(44)),
+        (_INSIDE, True, _on(60)),
+        ({**_PAST, "category": "fallback"}, False, _on(7)),
+        ({**_PAST, "category": "perishable"}, False, _on(7)),
+        ({"last_purchased": _on(-100)}, False, _on(7)),
     ],
-    ids=["grows to elapsed + 7", "grows by one", "equal: kept", "inside: kept"],
+    ids=[
+        "staple past its interval, still good",
+        "staple past its interval, plenty",
+        "staple inside its interval, still good",
+        "staple inside its interval, plenty",
+        "fallback, still good",
+        "perishable, still good",
+        "no interval, still good",
+    ],
 )
-def test_still_good_on_a_staple_grows_its_interval_to_the_days_it_has_lasted_plus_a_week(
-    db: sqlite3.Connection, insert_item: Insert, bought_days_ago: int, interval: int, ask_in: int
-) -> None:  # [A5]; [Rev4] "Interval growth"
-    bought = _on(-bought_days_ago)
-    insert_item(_item(1, "olive oil", typical_interval_days=60, last_purchased=bought))
-    expected = _item(
-        1,
-        "olive oil",
-        typical_interval_days=interval,
-        last_purchased=bought,
-        next_ask_on=_on(ask_in),
-    )
-    assert SqlitePantry(db).confirm_stocked("olive oil", ON) == expected
+def test_confirming_never_changes_the_interval(
+    db: sqlite3.Connection, insert_item: Insert, fields: dict[str, object], plenty: bool, ask: date
+) -> None:  # [Rev5] "`confirm_stocked` never touches `typical_interval_days`"
+    insert_item(_item(1, "olive oil", **fields))
+    expected = _item(1, "olive oil", **fields, next_ask_on=ask)
+    assert SqlitePantry(db).confirm_stocked("olive oil", ON, plenty=plenty) == expected
     assert SqlitePantry(db).get_item("olive oil") == expected
+    interval = fields.get("typical_interval_days")
     assert _column(db, "typical_interval_days") == {"olive oil": interval}
-
-
-@pytest.mark.parametrize(
-    ("category", "plenty", "wait"),
-    [("staple", True, 14), ("perishable", False, 7), ("fallback", False, 7)],
-    ids=["plenty on a staple", "still good on a perishable", "still good on a fallback"],
-)
-def test_only_still_good_on_a_staple_changes_the_interval(
-    db: sqlite3.Connection, insert_item: Insert, category: str, plenty: bool, wait: int
-) -> None:  # [A5]; [Rev4] "Plenty never touches the interval, and neither reply touches a
-    # non-staple's" (a fallback's would ratchet upward forever)
-    fields: dict[str, object] = {
-        "category": category,
-        "typical_interval_days": 14,
-        "last_purchased": _on(-100),  # elapsed + 7 = 107 if it wrongly grew
-    }
-    insert_item(_item(1, "nuggets", **fields))
-    expected = _item(1, "nuggets", **fields, next_ask_on=_on(wait))
-    assert SqlitePantry(db).confirm_stocked("nuggets", ON, plenty=plenty) == expected
-    assert SqlitePantry(db).get_item("nuggets") == expected
-    assert _column(db, "next_ask_on") == {"nuggets": str(_on(wait))}
 
 
 # ── confirm_stocked: replays, lookup, datetimes ([A6] [A7] [A8]) ──────────────
@@ -222,6 +211,20 @@ def test_confirming_twice_for_the_same_day_changes_nothing_the_second_time(
     assert pantry.confirm_stocked("olive oil", ON, plenty=plenty) == first
     assert SqlitePantry(db).get_item("olive oil") == first
     assert db.execute("SELECT COUNT(*) FROM purchase_log").fetchone()[0] == 0
+
+
+def test_plenty_and_still_good_replayed_in_turn_on_one_day_change_nothing_after_the_first(
+    db: sqlite3.Connection, insert_item: Insert
+) -> None:  # [Rev5] the replay that interval growth broke (Revision 1: replays must be safe)
+    insert_item(
+        _item(1, "olive oil", status="buy_next_time", **_PAST)  # interval 60, bought 100 days ago
+    )
+    # Plenty: one interval out. Still good (a week out) never pulls that earlier.
+    expected = _item(1, "olive oil", **_PAST, next_ask_on=_on(60))
+    pantry = SqlitePantry(db)
+    for call, plenty in enumerate((True, False, True, False), start=1):
+        assert pantry.confirm_stocked("olive oil", ON, plenty=plenty) == expected, f"call {call}"
+        assert SqlitePantry(db).get_item("olive oil") == expected, f"call {call}"
 
 
 @pytest.mark.parametrize("name", ["EVOO", "  Olive Oil "])
@@ -252,10 +255,10 @@ def test_confirming_with_a_datetime_uses_its_calendar_date(
     insert_item(_item(1, "olive oil", typical_interval_days=60, last_purchased=_on(-100)))
     confirmed = SqlitePantry(db).confirm_stocked("olive oil", datetime(2026, 3, 2, 23, 30))
     assert confirmed == _item(
-        1, "olive oil", typical_interval_days=107, last_purchased=_on(-100), next_ask_on=_on(7)
+        1, "olive oil", typical_interval_days=60, last_purchased=_on(-100), next_ask_on=_on(7)
     )
     stored = db.execute("SELECT next_ask_on, typical_interval_days FROM pantry_item").fetchone()
-    assert tuple(stored) == ("2026-03-09", 107)
+    assert tuple(stored) == ("2026-03-09", 60)  # 60: [Rev5], the interval is never changed
 
 
 # ── staples_due: the ask date honours next_ask_on ([B]) ───────────────────────
@@ -390,16 +393,16 @@ def test_the_seed_gives_each_owned_staple_without_a_purchase_date_a_reminder_at_
     insert_item(_item(5, "cumin", typical_interval_days=30))  # would qualify, but isn't in the seed
     insert_item(_item(6, "honey", typical_interval_days=30, last_purchased=_on(-10)))
     insert_item(_item(7, "cinnamon", typical_interval_days=40))
-    SqlitePantry(db).load_seed(
+    result = SqlitePantry(db).load_seed(
         [
             _seed("tortillas", typical_interval_days=60),  # promoted to staple
-            _seed("rice"),  # blank interval: keeps its 56
+            _seed("Rice"),  # blank interval: keeps its 56. Stored as "rice".
             _seed("paprika", typical_interval_days=30),  # already has a reminder
             _seed("tahini", "fallback", typical_interval_days=60),  # demoted
             _seed("honey", typical_interval_days=30),  # an existing staple with a purchase date
+            _seed("couscous", typical_interval_days=60),  # new, already in the house
             # The seed never sets an existing item's purchase date, so cinnamon stays undated.
             _seed("cinnamon", typical_interval_days=40, last_purchased=_on(-3)),
-            _seed("couscous", typical_interval_days=60),  # new, already in the house
             _seed("olive oil", typical_interval_days=70, last_purchased=_on(-10)),  # a real date
             _seed("salt"),  # no interval: no basis for a reminder
             _seed("eggs", "perishable", typical_interval_days=14),
@@ -421,6 +424,9 @@ def test_the_seed_gives_each_owned_staple_without_a_purchase_date_a_reminder_at_
         "eggs": None,
         "nuggets": None,
     }
+    # The load reports who got a first reminder: in seed order (not id order: cinnamon's id is
+    # older than couscous's), spelled as stored ("rice", not the seed's "Rice").
+    assert result.reminded == ("tortillas", "rice", "couscous", "cinnamon")
     # No purchase date is invented: honey keeps its own, olive oil's real one is stored and logged,
     # and cinnamon's seed date is neither stored nor logged.
     bought = {name: day for name, day in _column(db, "last_purchased").items() if day is not None}
@@ -436,7 +442,7 @@ def test_running_the_seed_again_on_a_later_day_never_moves_its_reminder(
 ) -> None:  # [D]; [Rev4] "A re-run never moves an existing reminder"
     seed = [_seed("couscous", typical_interval_days=60)]
     pantry = SqlitePantry(db)
-    pantry.load_seed(seed, ON)
+    assert pantry.load_seed(seed, ON).reminded == ("couscous",)
     assert _column(db, "next_ask_on") == {"couscous": str(_on(54))}
-    pantry.load_seed(seed, _on(30))
+    assert pantry.load_seed(seed, _on(30)).reminded == ()  # no first reminder this time
     assert _column(db, "next_ask_on") == {"couscous": str(_on(54))}

@@ -497,11 +497,15 @@ def test_main_loads_the_csv_prints_counts_and_names_and_exits_0(
         assert conn.execute("SELECT source FROM purchase_log").fetchall() == [("seed",)] * 6
 
 
-def test_main_loads_on_todays_date_so_an_owned_staple_gets_its_reminder(tmp_path: Path) -> None:
+def test_main_loads_on_todays_date_so_an_owned_staple_gets_its_reminder(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     # B3 brief D; seam map Revision 4: "`load_seed(items, on)` ... (the CLI passes `date.today()`)"
     db_path = tmp_path / "cli.sqlite"
     first_day = date.today()
     assert main([str(FIXTURE), "--db", str(db_path)]) == 0
+    # B3 review: one more line after the other three, in their format.
+    assert capsys.readouterr().out.splitlines()[3:] == ["first reminder set 1: couscous"]
     with closing(sqlite3.connect(db_path)) as conn:
         stored = conn.execute(
             "SELECT next_ask_on, last_purchased FROM pantry_item WHERE name = 'couscous'"
@@ -511,6 +515,9 @@ def test_main_loads_on_todays_date_so_an_owned_staple_gets_its_reminder(tmp_path
     reminders = {str(day + timedelta(days=54)) for day in (first_day, date.today())}
     assert stored[0] in reminders
     assert stored[1] is None
+    # Loading it again sets no first reminder: couscous already has one.
+    assert main([str(FIXTURE), "--db", str(db_path)]) == 0
+    assert capsys.readouterr().out.splitlines()[3:] == ["first reminder set 0"]
 
 
 def test_main_prints_every_bad_row_to_stderr_writes_nothing_and_exits_1(

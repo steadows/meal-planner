@@ -1,17 +1,15 @@
 """FakePantry and SqlitePantry agree on the same replies (task B3).
 
-Authority: `.context/seams/lane-b-pantry.md`, "Revision 4 — PR 2 (B3)", "Parity test". Revision 4
-makes the merged `FakePantry` the reference for `confirm_stocked`. The fake doesn't learn intervals,
-so `typical_interval_days` is left out of every comparison.
+Authority: `.context/seams/lane-b-pantry.md`, "Revision 4 — PR 2 (B3)", "Parity test", and
+"Revision 5", which drops "still good" interval growth. Revision 4 makes the merged `FakePantry`
+the reference for `confirm_stocked`.
 
-The script stays clear of the three places the two legitimately diverge, and so never compares
-across them:
-1. A staple's second distinct purchase date (the real pantry learns the median). `insert_item`
-   rows have no purchase-log history, so the script buys each item at most once.
-2. "Still good" on a staple with a `last_purchased`, then a purchase that clears `next_ask_on` (the
-   real pantry grew the interval). Olive oil gets "still good" and is never bought.
-3. "Plenty" after a "still good" that grew the interval (the real pantry pushes by the grown
-   interval). No item gets both replies.
+The two legitimately diverge in one place: a staple's second distinct purchase date, where the
+real pantry re-learns its interval as the median gap and the fake keeps it. The script avoids that
+rather than masking it. `insert_item` rows have no purchase-log history and the script buys each
+item at most once, so neither pantry ever changes an interval, and every item is compared whole,
+`typical_interval_days` included. With growth gone, the two `confirm_stocked`s are identical, so
+the script may buy a staple after "still good" (Revision 5).
 """
 
 from __future__ import annotations
@@ -55,9 +53,19 @@ DUE = {
     54: ["butter", "rice", "olive oil", "tahini"],
 }
 
-
-def _sans_interval(item: PantryItem | None) -> dict[str, object] | None:
-    return None if item is None else item.model_dump(exclude={"typical_interval_days"})
+# Then olive oil, postponed by "still good" above, is bought on day 7, the day it's asked about.
+# Its unchanged 70-day interval puts the next ask at 90% (63 days) after that: day 70. (A grown
+# interval, 72, would put it at day 72.)
+THEN: tuple[tuple[str, Step], ...] = (
+    (
+        "bought after still good",
+        lambda p, day: p.log_purchase("olive oil", day + timedelta(days=7)),
+    ),
+)
+DUE_THEN = {
+    69: ["butter", "rice", "tahini"],
+    70: ["butter", "rice", "tahini", "olive oil"],
+}
 
 
 def _names(items: Iterable[PantryItem]) -> list[str]:
@@ -74,11 +82,10 @@ def test_the_fake_and_the_real_pantry_agree_on_the_same_replies(
     for item in sample_pantry_items:
         insert_item(item)
     real = SqlitePantry(db)
-    for label, step in SCRIPT:
-        assert _sans_interval(step(real, today)) == _sans_interval(step(fake, today)), label
-    assert [_sans_interval(item) for item in SqlitePantry(db).list_items()] == [
-        _sans_interval(item) for item in fake.list_items()
-    ]
-    for days, names in DUE.items():
-        day = today + timedelta(days=days)
-        assert _names(real.staples_due(day)) == _names(fake.staples_due(day)) == names, day
+    for script, due in ((SCRIPT, DUE), (THEN, DUE_THEN)):
+        for label, step in script:
+            assert step(real, today) == step(fake, today), label
+        assert SqlitePantry(db).list_items() == fake.list_items()
+        for days, names in due.items():
+            day = today + timedelta(days=days)
+            assert _names(real.staples_due(day)) == _names(fake.staples_due(day)) == names, day

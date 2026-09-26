@@ -446,6 +446,21 @@ def test_a_purchase_that_fails_halfway_leaves_nothing_behind(
     assert _snapshot(db) == before
 
 
+def test_a_confirm_whose_update_fails_leaves_nothing_behind(
+    db: sqlite3.Connection, insert_item: Insert
+) -> None:  # seam map Revision 4: confirm_stocked runs under `_write`; rolls back only its own
+    insert_item(_item(1, "rice", status="buy_next_time", typical_interval_days=56))
+    db.execute(
+        "CREATE TRIGGER boom BEFORE UPDATE ON pantry_item BEGIN SELECT RAISE(ABORT, 'boom'); END"
+    )
+    db.commit()
+    before = _snapshot(db)
+    with pytest.raises(sqlite3.IntegrityError, match="boom"):
+        SqlitePantry(db).confirm_stocked("rice", ON)
+    assert not db.in_transaction
+    assert _snapshot(db) == before
+
+
 # ── load_seed: inserts ───────────────────────────────────────────────────────
 
 
@@ -468,7 +483,12 @@ def test_load_seed_inserts_new_items_with_every_field_and_logs_only_real_purchas
     )
     bare = _seed("couscous", typical_interval_days=60)
     result = SqlitePantry(db).load_seed([bare, full], ON)
-    assert result == SeedResult(inserted=("couscous", "olive oil"), updated=(), untouched=())
+    assert result == SeedResult(
+        inserted=("couscous", "olive oil"),
+        updated=(),
+        untouched=(),
+        reminded=("couscous",),  # B3: a staple with an interval and no purchase date
+    )
     items = {item.name: item for item in SqlitePantry(db).list_items()}
     assert items.keys() == {"olive oil", "couscous"}
     for seed in (full, bare):
