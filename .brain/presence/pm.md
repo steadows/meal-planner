@@ -3,7 +3,7 @@ type: presence
 agent: pm
 feature: "PM/coordination lane: sweeps the vault, unblocks waiting-on edges, tracks merge order against PLAN.md, files follow-ups — owns no meals/ code"
 status: active
-phase: "PRs 9-13 and 15 merged; PLAN PR 14 open (CI green). Next: ADR-gated contracts PR (after feat/contracts resync), mealie TRUSTED one-liner, wiring P1 background.py, then bot"
+phase: "PRs 9-15 merged; no open PRs. Next: ADR-gated contracts PR (after feat/contracts resync), mealie TRUSTED one-liner, wiring P1 background.py, then bot; cart waits on the Meijer spike"
 owns_branches: ["pm"]
 plan: docs/PLAN.md (Concurrency lanes, Coordination with agent-brain)
 tracker_epic: none
@@ -11,7 +11,7 @@ current_worktree: /Users/stevemeadows/meal-planner-pm
 current_branch: feat/pm
 current_ticket: none
 touches: [docs/PLAN.md, CLAUDE.md, .claude/settings.json, .gitignore, .github/, .brain/presence/, .brain/connections/, .brain/journal/]
-updated: 2026-09-26T14:59:40Z
+updated: 2026-09-26T15:01:27Z
 ---
 Coordination lane, not a build lane — owns no files under `meals/`. Job: periodic sweep of `.brain/` (presence notes, `connections/`, journal) to catch stalled lanes, unresolved `waiting-on` edges, and merge-order violations against the diagram in PLAN.md (`Concurrency lanes`); message a stuck lane; keep this note's `status` honest. Comms: live `SendMessage` between lanes (Steve, 2026-09-25) — do NOT arm a watcher on `dm/pm/pending`.
 
@@ -64,7 +64,7 @@ Pre-checked on 2026-09-25: none of these files existed, `~/.gitconfig` had no in
 - [ ] **`feat/contracts` resync to main**: the rebase-merge changed the SHAs. Contracts asked Steve.
 - [ ] **Tooling note:** in one run, a test-writer subagent's scratch command included `rm -f /dev/null`. It failed harmlessly (not root) and `/dev/null` is intact. Contracts queued a feedback draft.
 - [x] **After #9 merges:** [[bot-runtime-design-waiting-on]] resolved (by wiring); new edge [[bot-background-py-waiting-on]] added; PLAN edge plus the ADR-gate status in PR #14.
-- [x] **PLAN ticks:** Phase 3 and Phase 4 are in PR #14 (awaiting merge).
+- [x] **PLAN ticks:** Phase 3 and Phase 4 merged in PR 14 (df26a87).
 - [ ] **PLAN doc bumps (need Steve's OK):** Mealie v3.28.0; the Phase 2 phone path via `tailscale serve`.
 - [ ] **Queued for Steve:** the CLAUDE.md `seed_loader` entry-point word; `CLAUDE_LOCK_DIR` in `.env.example`; the `/steadows-verify` subagent naming fix. See `~/meal-planner-pm/.context/task-master-2026-09-26.md`.
 - [ ] **ADR-0001 deferred follow-ups (not v1):** a `python -m meals doctor` command (env, claude probe, launchd state, lock holders), and an outside heartbeat or uptime alert for "the Mac is down". File as backlog when Steve wants them.
