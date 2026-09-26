@@ -1,0 +1,9 @@
+name,category,aliases,interval_days,last_purchased,default_qty,default_unit,meijer_product_id,meijer_url,preferred_product_name,substitute_ok,for_miles,notes
+olive oil,staple,evoo;extra virgin olive oil,70,2026-07-11,1,bottle,100001,https://www.meijer.com/shopping/product/example-olive-oil/100001.html,Example Olive Oil 16.9 oz,yes,no,
+rice,staple,,56,2026-09-01,2,lb,100002,https://www.meijer.com/shopping/product/example-rice/100002.html,Example Long Grain Rice 2 lb,1,0,
+butter,staple,,21,2026-09-07,1,lb,100003,https://www.meijer.com/shopping/product/example-butter/100003.html,Example Salted Butter 1 lb,TRUE,false,
+tahini,staple,sesame paste,60,2026-07-28,1,jar,100004,https://www.meijer.com/shopping/product/example-tahini/100004.html,Example Tahini 16 oz,No,No,"stir first, it separates"
+couscous,staple,,60,,1,box,,,,,,already in the house
+siete taco shells,staple,taco shells,42,2026-08-26,1,box,100006,https://www.meijer.com/shopping/product/example-taco-shells/100006.html,Example Grain Free Taco Shells,0,yes,
+eggs,perishable,egg,,2026-09-20,1,dozen,100007,https://www.meijer.com/shopping/product/example-eggs/100007.html,Example Large Eggs 12 ct,,,
+chicken nuggets,fallback,nuggets,14,2026-08-01,1,bag,100008,https://www.meijer.com/shopping/product/example-nuggets/100008.html,Example Chicken Nuggets,yes,YES,freezer lane
