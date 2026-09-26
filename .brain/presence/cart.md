@@ -20,3 +20,6 @@ Lane F — highest risk. Before building, run the spike: `claude --chrome -p` ad
 
 ## ▶ Before any cart code (Steve, via [[pm]], 2026-09-25)
 Two gates, in order. (1) The week-one spike with Steve present: Steve's Chrome, the Meijer login and the extension; meijer.com only, never check out. (2) `/steadows-architect` on the cart path (Meijer in Chrome vs Instacart), with the spike's results as input. See [[cart-spike-design-waiting-on]] and PLAN.md → Architecture gates.
+
+## Runner behaviour the spike must test against (from [[contracts]], via [[pm]], 2026-09-26)
+`chrome=True` runs are **never retried**, since a retry would double the cart, and get **no built-in tools**, so the Meijer session can't reach the open web. They also inherit `--safe-mode` and the allowlisted env. So run the spike with the same flags `claude_runner` uses, not a bare `claude --chrome -p`. It has to confirm the Chrome tools still work with built-ins off and in safe mode. The timeout path is bounded (process-group kill, then at most ~5s draining output), so a slot is always freed within `timeout` + ~5s. `CartItem.meijer_url` must be an https meijer.com URL. Details: `~/meal-planner-contracts/.context/seams/contracts-lane0.md` → "Pre-PR review round (2026-09-26)".
