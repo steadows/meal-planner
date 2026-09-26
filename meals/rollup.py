@@ -13,7 +13,8 @@ from dataclasses import dataclass
 
 from meals.contracts import Ingredient
 
-ROUND_DIGITS = 3
+# Enough to hide float noise (0.1 + 0.2) without hiding a real excess that needs another pack.
+ROUND_DIGITS = 6
 _EPSILON = 1e-9
 
 # Factor to the dimension's base unit: grams for mass, millilitres for volume (US customary).
@@ -30,7 +31,10 @@ _VOLUME = {
     "quart": 192 * _TSP_ML,
     "gallon": 768 * _TSP_ML,
 }
-# Count units that only convert for one ingredient, keyed by casefolded ingredient name.
+# Units of a bare count (no unit = one each).
+_COUNT = {"dozen": 12.0}
+# Count units that only convert for one ingredient, keyed by casefolded ingredient name. A garlic
+# head varies (10-12 cloves); 10 is the conservative approximation.
 _PER_INGREDIENT = {"garlic": {"clove": 1.0, "head": 10.0}}
 
 # Canonical unit -> other spellings, after Mealie's en-US unit seed. "oz" is weight, as in Mealie.
@@ -59,6 +63,7 @@ _SPELLINGS: dict[str, tuple[str, ...]] = {
     "splash": ("splashes",),
     "pack": ("packs", "package", "packages"),
     "serving": ("servings",),
+    "dozen": ("dozens", "doz"),
 }
 _CANONICAL = {
     spelling: canonical
@@ -85,6 +90,8 @@ def _measure(name: str, unit: str | None) -> _Measure:
         return _Measure("count", 1.0, None)
     folded = unit.strip().casefold()
     canonical = _CANONICAL.get(folded, folded)
+    if canonical in _COUNT:
+        return _Measure("count", _COUNT[canonical], canonical)
     if canonical in _MASS:
         return _Measure("mass", _MASS[canonical], canonical)
     if canonical in _VOLUME:
@@ -93,6 +100,11 @@ def _measure(name: str, unit: str | None) -> _Measure:
     if canonical in per_ingredient:
         return _Measure(f"per:{_key(name)}", per_ingredient[canonical], canonical)
     return _Measure(f"unit:{canonical}", 1.0, canonical)
+
+
+def _require_positive(qty: float, what: str) -> None:
+    if not math.isfinite(qty) or qty <= 0:
+        raise ValueError(f"{what} must be a positive, finite number, got {qty!r}")
 
 
 def _join_notes(notes: Iterable[str]) -> str:
@@ -131,10 +143,13 @@ def combine(ingredients: Iterable[Ingredient]) -> tuple[Ingredient, ...]:
     Groups by name, ignoring case and surrounding whitespace, keeping the first-seen spelling.
     Within a name, lines that convert sum into the first-seen unit. Lines that don't stay
     separate. A line with no quantity ("to taste") is absorbed by a quantified line of the same
-    name, keeping its note. Totals are rounded to ROUND_DIGITS decimals.
+    name, keeping its note. Totals are rounded to ROUND_DIGITS decimals. Raises ValueError for a
+    quantity that isn't positive and finite.
     """
     by_name: dict[str, list[Ingredient]] = {}
     for ingredient in ingredients:
+        if ingredient.qty is not None:
+            _require_positive(ingredient.qty, f"quantity of {ingredient.name!r}")
         by_name.setdefault(_key(ingredient.name), []).append(ingredient)
     return tuple(line for lines in by_name.values() for line in _combine_one(lines))
 
@@ -142,12 +157,13 @@ def combine(ingredients: Iterable[Ingredient]) -> tuple[Ingredient, ...]:
 def packages_needed(need: Ingredient, pack_qty: float, pack_unit: str | None) -> int | None:
     """How many packs of `pack_qty` `pack_unit` cover `need`, rounded up (1.5 lb of 3 lb packs: 1).
 
-    None when `need` has no quantity or its unit can't be converted to the pack's.
+    None when `need` has no quantity or its unit can't be converted to the pack's. Raises
+    ValueError for a quantity that isn't positive and finite.
     """
-    if pack_qty <= 0:
-        raise ValueError("pack_qty must be positive")
+    _require_positive(pack_qty, "pack_qty")
     if need.qty is None:
         return None
+    _require_positive(need.qty, f"quantity of {need.name!r}")
     have, pack = _measure(need.name, need.unit), _measure(need.name, pack_unit)
     if have.dimension != pack.dimension:
         return None
