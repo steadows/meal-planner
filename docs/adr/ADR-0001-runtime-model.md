@@ -65,8 +65,9 @@ short-lived, rerun-safe command.**
   - from `approved` on, the narrowed plan (picked `recipe_options` only, swapped `components`, empty
     `pantry_questions`).
 
-  A new `job_run` table (contracts migration 2) records one claim per (job, week) for what status can't carry:
-  nudge once, never refill after a crash, retries, and redelivery. All transitions live in `meals/plan_state.py`.
+  A new `job_run` table (the next contracts migration, numbered at merge) records one claim per (job, week) for
+  what status can't carry: nudge once, never refill after a crash, retries, and redelivery. All transitions live
+  in `meals/plan_state.py`.
 - **Mealie:** the Mealie meal plan is published **after approval**, by `reconcile` (within the hour), never at
   proposal. `mealie_plan_ref IS NULL` on an approved-or-later week is the persisted "publication pending" marker,
   and the compare-and-set that sets the ref is the confirmation. Publication retries hourly, independently of the
@@ -150,7 +151,7 @@ but its cart never filled. Reply 'retry cart' if you still want it", and finish 
      the claim unfinished for Inspect.
    - If the failure message itself can't be sent, the claim also stays unfinished.
 
-   The runner kills its child's process group on any exception (contracts item 3), so neither the alarm nor
+   The runner kills its child's process group on any exception (a contracts fix already in flight, see Ownership), so neither the alarm nor
    SIGTERM can orphan a `claude` child.
 
 **Result preservation.** Once a job's result transaction commits, nothing rewrites that attempt's `detail`: not
@@ -240,7 +241,7 @@ is no queue, no outbox table, and no second always-on process.
      keeps step 3 waiting until it exits. A process check alone would miss it.
   4. Only then does it report "safe to switch code".
 
-  Then revert wiring's own PRs; jobs can still be run by hand. Migration 2 is never reverted: migrations are
+  Then revert wiring's own PRs; jobs can still be run by hand. The `job_run` migration is never reverted: migrations are
   append-only (db.py:15), and `get_db()` refuses a database newer than the code (db.py:73–79).
 - **A proposal whose window (Sat 20:00) closes during an outage is never sent, by design.** Sunday's message says
   so and reuses last week's plan. Telegram is the only alert channel; `data/logs/jobs.log` is the record.
@@ -252,8 +253,8 @@ is no queue, no outbox table, and no second always-on process.
   download but not install automatically, and keep the lid open.
 - **The `claude` binary is under nvm** (`~/.nvm/versions/node/v24.14.1/bin`). `install.sh` bakes the absolute PATH,
   so a Node upgrade breaks runs loudly (the catch-all message) until `install.sh` is rerun.
-- **The runner and the schema need changes** in a contracts follow-up PR before wiring code: four items (see
-  Ownership).
+- **The runner and the schema need changes** from contracts before wiring code: three items gated on this ADR, plus
+  one runner fix already in flight (see Ownership).
 
 ## Ownership
 
@@ -264,16 +265,18 @@ is no queue, no outbox table, and no second always-on process.
 
   `background.py` ships **first and early**, because bot depends on it. PLAN.md → Concurrency lanes must record
   that edge (a pm-lane edit).
-- **contracts** (one PR after #6, four items only):
-  1. Migration 2: `job_run` (DDL below). No new columns and no `weekly_plan` change.
+- **contracts** (one PR, gated on this ADR's confirmation, three items only):
+  1. The next migration (numbered at merge order): `job_run` (DDL below). No new columns and no `weekly_plan`
+     change.
   2. `hold_fds` on `claude_runner.run`.
-  3. `_run_once` kills the child's process group on any exception.
-  4. Layers contract: `"(__main__)"` > `"(bot) | (jobs) | (mcp_tools)"` > `"(pantry) | (mealie_client) | (search)
+  3. Layers contract: `"(__main__)"` > `"(bot) | (jobs) | (mcp_tools)"` > `"(pantry) | (mealie_client) | (search)
      | (planner) | (cart) | (background) | (plan_state)"` > `"(db) | (claude_runner) | (rollup)"` >
      `"contracts | (config)"`. `__main__` becomes the composition root; today (pyproject.toml:95) it's an
      independent sibling of bot and jobs, so it can't import either.
 
-  Separately, already under way: `RecipeOption.mealie_slug` (for search) and Sunday-only `week_start` validation.
+  Separately, already under way and not gated on this ADR: `_run_once` kills the child's process group on any
+  exception (contracts' follow-up PR), `RecipeOption.mealie_slug` (for search), and Sunday-only `week_start`
+  validation. This ADR relies on the first.
 - **bot:**
   - approval → `spawn_job('cart_fill', '--week', W)`
   - "retry cart" → `spawn_job('cart_fill', '--week', <latest interrupted/failed week>, '--retry')`
@@ -291,7 +294,7 @@ is no queue, no outbox table, and no second always-on process.
 - **mealie:** implement `set_meal_plan` as replace-the-week, so retries can't duplicate entries. This is consistent
   with the contract text (contracts.py:173–174), so no contracts change.
 
-### `job_run` (migration 2)
+### `job_run` (next contracts migration, numbered at merge)
 
 ```sql
 CREATE TABLE job_run (
@@ -380,7 +383,7 @@ post-debate check below.
   - `__main__` as composition root
   - in-bot in-flight cap
   - lifecycle acceptance test (P4.4)
-  - rejected: a rollback that reverts migration 2 (migrations are append-only)
+  - rejected: a rollback that reverts the `job_run` migration (migrations are append-only)
 - **Amendment:** no new `weekly_plan` column and no `attempts` column. `components` already holds the full
   proposal while `proposed`, as the search lane confirmed.
 - **Round 2** (4 findings, 7 resolved):

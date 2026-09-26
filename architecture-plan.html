@@ -135,7 +135,7 @@ tr:last-child td { border-bottom: 0; }
 "phases": [
 {
 "id": "P0",
-"name": "Contracts follow-up PR",
+"name": "Contracts follow-up PR (gated on ADR)",
 "owner": "contracts",
 "dependsOn": [],
 "note": "after contracts PR #6 merges (Steve)",
@@ -147,12 +147,12 @@ tr:last-child td { border-bottom: 0; }
 },
 {
 "id": "0.2",
-"text": "`meals/db.py`: migration 2: `job_run` table (PK job, week_start)",
+"text": "`meals/db.py`: the next migration (numbered at merge): `job_run` table (PK job, week_start)",
 "status": "todo"
 },
 {
 "id": "0.3",
-"text": "`claude_runner.run(..., hold_fds=())` + kill the child's group on any exception in `_run_once`",
+"text": "`claude_runner.run(..., hold_fds=())`. (Killing the child's group on any exception is already in contracts' ungated follow-up PR.)",
 "status": "todo"
 },
 {
