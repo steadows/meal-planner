@@ -17,3 +17,6 @@ Lane D. Separate bot token, shared codebase pattern with the agentic-OS bot (PLA
 
 ## Telegram setup done (Steve, via [[pm]], 2026-09-25)
 New bot **@steve_meals_bot** ("Meal Planner") created with BotFather. `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ALLOWED_CHAT_ID` (Steve's private chat) are in `~/meal-planner/.env`, symlinked into this worktree as `.env` (git-ignored). getMe and a test sendMessage both succeeded. Only one process may poll this token at a time: if the real bot is ever running on the home machine, integration tests here will get a 409 conflict, so ask Steve for a separate test bot then. The existing-bot decision is "start fresh" (see [[bot-waiting-on]], resolved).
+
+## Start gate (Steve, via [[pm]], 2026-09-25)
+Besides contracts, the bot lane waits on the runtime-model design that [[wiring]] runs through `/steadows-architect`. See [[bot-runtime-design-waiting-on]].

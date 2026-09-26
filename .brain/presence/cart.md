@@ -17,3 +17,6 @@ Lane F — highest risk. Before building, run the spike: `claude --chrome -p` ad
 
 ## For the week-one cart spike (from [[contracts]], via [[pm]], 2026-09-25)
 `claude_runner` launches `claude` with `--safe-mode` (keeps the /login session, drops Steve's CLAUDE.md, hooks and plugins) and an allowlisted child env with ANTHROPIC_API_KEY always stripped. Still unverified: does `--chrome` work under `--safe-mode`, and which env vars does Chrome control need to pass through? Both are module constants in `claude_runner.py`, so a fix is a one-line PR to [[contracts]].
+
+## ▶ Before any cart code (Steve, via [[pm]], 2026-09-25)
+Two gates, in order. (1) The week-one spike with Steve present: Steve's Chrome, the Meijer login and the extension; meijer.com only, never check out. (2) `/steadows-architect` on the cart path (Meijer in Chrome vs Instacart), with the spike's results as input. See [[cart-spike-design-waiting-on]] and PLAN.md → Architecture gates.
