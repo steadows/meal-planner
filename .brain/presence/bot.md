@@ -20,3 +20,7 @@ New bot **@steve_meals_bot** ("Meal Planner") created with BotFather. `TELEGRAM_
 
 ## Start gate (Steve, via [[pm]], 2026-09-25)
 Besides contracts, the bot lane waits on the runtime-model design that [[wiring]] runs through `/steadows-architect`. See [[bot-runtime-design-waiting-on]].
+
+## Open contract gaps you own (via [[pm]], 2026-09-26)
+- Typed per-kind `Intent` args (a discriminated union): propose them as a contracts PR when you build `intents.py`. See [[bot-contracts-intent-typed-args]].
+- "Still good" vs "have plenty": you need `Pantry.confirm_stocked` to tell pantry which one Steve meant. See [[bot-contracts-pantry-confirm-stocked]].
