@@ -208,12 +208,19 @@ def _drain(process: subprocess.Popen[str]) -> tuple[str, str]:
     """Collect what the killed child wrote, without waiting on a descendant that left its group."""
     try:
         return process.communicate(timeout=_KILL_DRAIN_S)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
         for pipe in (process.stdout, process.stderr):
             if pipe is not None:
                 pipe.close()
         process.wait()
-        return "", ""
+        return _text(exc.output), _text(exc.stderr)
+
+
+def _text(data: str | bytes | None) -> str:
+    """TimeoutExpired carries what was read so far, as bytes even in text mode."""
+    if isinstance(data, bytes):
+        return data.decode(errors="replace")
+    return data or ""
 
 
 def _parse(returncode: int, stdout: str, stderr: str, schema: type[BaseModel] | None) -> Any:

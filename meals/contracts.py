@@ -3,10 +3,10 @@
 Only the contracts lane edits this file. Other lanes request changes with a small PR.
 """
 
+import re
 from collections.abc import Sequence
 from datetime import date
 from typing import Annotated, Literal, Protocol, runtime_checkable
-from urllib.parse import urlsplit
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
@@ -21,11 +21,16 @@ PantryStatus = Literal["have", "buy_next_time"]
 MAX_PANTRY_QUESTIONS = 3
 
 
+# Matched against the raw string, not a parsed URL: Python's urlsplit and a browser disagree on
+# backslashes, userinfo and whitespace, and that gap would let another host through.
+_MEIJER_URL = re.compile(
+    r"\Ahttps://(?:[a-z0-9-]+\.)*meijer\.com(?::443)?(?:[/?#][^\s\\]*)?\Z", re.IGNORECASE
+)
+
+
 def _require_meijer_url(url: str) -> str:
     """The logged-in cart session may only open meijer.com (CLAUDE.md; PLAN.md, Risks)."""
-    parts = urlsplit(url)
-    host = (parts.hostname or "").lower()
-    if parts.scheme != "https" or not (host == "meijer.com" or host.endswith(".meijer.com")):
+    if not _MEIJER_URL.match(url):
         raise ValueError("must be an https URL on meijer.com")
     return url
 

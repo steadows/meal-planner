@@ -102,7 +102,15 @@ MEIJER_URL_OWNERS: dict[type[BaseModel], dict[str, object]] = {
 
 
 @pytest.mark.parametrize("model", list(MEIJER_URL_OWNERS), ids=lambda m: m.__name__)
-@pytest.mark.parametrize("url", [None, "https://www.meijer.com/shopping/p/eggs/123.html"])
+@pytest.mark.parametrize(
+    "url",
+    [
+        None,
+        "https://www.meijer.com/shopping/p/eggs/123.html",
+        "HTTPS://WWW.MEIJER.COM/p/1.html",
+        "https://meijer.com:443/x",
+    ],
+)
 def test_meijer_url_accepts_meijer_pages(model: type[BaseModel], url: str | None) -> None:
     item = model.model_validate(MEIJER_URL_OWNERS[model] | {"meijer_url": url})
 
@@ -117,6 +125,12 @@ def test_meijer_url_accepts_meijer_pages(model: type[BaseModel], url: str | None
         "https://evil.example/",
         "http://www.meijer.com/x",
         "https://meijer.com.evil.example/x",
+        # Python's urlsplit and a browser (WHATWG) disagree on these; reject anything ambiguous.
+        pytest.param("https://evil.example\\@meijer.com/", id="backslash-before-userinfo"),
+        pytest.param("https://user@www.meijer.com/x", id="userinfo"),
+        pytest.param("https://www.meijer.com/x y", id="whitespace"),
+        pytest.param("https://www.meijer.com\t@evil.example/", id="tab"),
+        pytest.param("https://www.meijer.com\\evil", id="backslash"),
     ],
 )
 def test_meijer_url_rejects_other_sites(model: type[BaseModel], url: str) -> None:
