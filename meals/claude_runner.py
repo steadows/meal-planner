@@ -40,6 +40,7 @@ ALLOWED_TOOLS = ("WebSearch", "WebFetch")
 MAX_ATTEMPTS = 2
 _SLOT_POLL_S = 0.1
 _KILL_DRAIN_S = 5
+_CLEANUP_ATTEMPTS = 3  # kill + reap attempts when Ctrl-C keeps landing during the cleanup
 _JSON_FENCE = re.compile(r"\A\s*```(?:json)?[ \t]*\n(.*?)\n?```\s*\Z", re.DOTALL)
 _PROMPT_PART = re.compile(
     r"[a-z0-9_-]+"
@@ -210,11 +211,27 @@ def _run_once(command: list[str], prompt: str, timeout: int, slot_fd: int) -> tu
             # Ctrl-C or any other error: start_new_session keeps the signal from reaching claude,
             # so it would run on (for a Chrome run, still filling the cart). Same as subprocess.run.
             logger.warning("claude run interrupted by %s; killing it", type(exc).__name__)
-            _kill_tree(process)
-            process.wait()
-            _close_pipes(process)
+            _terminate(process)
             raise
     return process.returncode, stdout, stderr
+
+
+def _terminate(process: subprocess.Popen[str]) -> None:
+    """Kill and reap claude and close its pipes, even if another Ctrl-C lands meanwhile.
+
+    CPython's Popen.wait() (bpo-25942) answers a Ctrl-C with a short grace wait, assuming the
+    child got the same ^C. claude runs in its own session, so it didn't: instead a repeated ^C
+    retries the kill (SIGKILL is idempotent), a bounded number of times. The caller then
+    re-raises its original exception; a ^C absorbed here isn't re-raised.
+    """
+    for _ in range(_CLEANUP_ATTEMPTS):
+        try:
+            _kill_tree(process)
+            process.wait()
+            break
+        except KeyboardInterrupt:
+            continue
+    _close_pipes(process)
 
 
 def _kill_tree(process: subprocess.Popen[str]) -> None:
