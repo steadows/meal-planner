@@ -20,7 +20,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from meals.config import Settings, get_settings
-from meals.contracts import Ingredient, RecipeOption
+from meals.contracts import TRUSTED, Ingredient, RecipeOption
 
 logger = logging.getLogger(__name__)
 
@@ -201,18 +201,24 @@ class HttpMealieClient:
     def get_recipe(self, slug: str) -> RecipeOption:
         recipe = self._fetch_recipe(slug)
         seconds = recipe.prep_time_seconds
-        return RecipeOption(
-            name=recipe.name or slug,
-            url=recipe.org_url or "",
-            source=_source(recipe.org_url),
-            hands_on_min=_minutes(recipe.prep_time) if seconds is None else seconds // 60,
-            servings=_servings(recipe),
-            batch_ok=any(tag.slug == BATCH_OK_TAG for tag in recipe.tags or ()),
-            fit_note="",
-            ingredients=self._ingredients(recipe.recipe_ingredient),
-            steps=tuple(
-                step.text for step in recipe.recipe_instructions or () if step.text.strip()
-            ),
+        # Trusted code: only the client may set mealie_slug (contracts.TRUSTED). Validating, not
+        # model_copy, so the slug charset is checked too.
+        return RecipeOption.model_validate(
+            {
+                "name": recipe.name or slug,
+                "url": recipe.org_url or "",
+                "source": _source(recipe.org_url),
+                "hands_on_min": _minutes(recipe.prep_time) if seconds is None else seconds // 60,
+                "servings": _servings(recipe),
+                "batch_ok": any(tag.slug == BATCH_OK_TAG for tag in recipe.tags or ()),
+                "fit_note": "",
+                "ingredients": self._ingredients(recipe.recipe_ingredient),
+                "steps": tuple(
+                    step.text for step in recipe.recipe_instructions or () if step.text.strip()
+                ),
+                "mealie_slug": slug,
+            },
+            context={TRUSTED: True},
         )
 
     def list_by_tag(self, tag: str) -> tuple[str, ...]:
