@@ -3,7 +3,7 @@ type: presence
 agent: contracts
 feature: "Shared contracts: config, db schema + migrations, pydantic contracts, claude_runner, fakes"
 status: active
-phase: PR #6 open (https://github.com/steadows/meal-planner/pull/6); post-PR /steadows-ultrareview running; merge is Steve's
+phase: PR #6 CLEAN — all ultrareview findings converged (7a8717c), CI green on #7; awaiting Steve's merge (then status: done)
 owns_branches: ["contracts"]
 plan: docs/PLAN.md (Implementation plan, Concurrency lanes)
 tracker_epic: none
