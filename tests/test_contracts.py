@@ -262,8 +262,8 @@ def test_mealie_unavailable_is_not_caught_as_a_missing_recipe() -> None:
 def test_fake_mealie_can_fail_one_recipe_among_good_ones(
     sample_recipe: RecipeOption, stored: bool
 ) -> None:
-    """One broken rotation favourite fails on its own; the rest still load (search's
-    _rotation_pool skips it). It fails whether or not the fake holds a recipe for it."""
+    """One broken rotation favourite fails on its own while the rest still load: the case search's
+    _rotation_pool is to skip. It fails whether or not the fake holds a recipe for it."""
     recipes = {"good": sample_recipe} | ({"broken": sample_recipe} if stored else {})
     mealie = FakeMealieClient(
         recipes=recipes, tags={"rotation": ("good", "broken")}, unavailable=("broken",)

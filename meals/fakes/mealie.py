@@ -1,5 +1,5 @@
 import re
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from datetime import date
 
 from pydantic import TypeAdapter, ValidationError
@@ -32,7 +32,7 @@ class FakeMealieClient:
         recipes: Mapping[str, RecipeOption] | None = None,
         tags: Mapping[str, Sequence[str]] | None = None,
         importable: Mapping[str, RecipeOption] | None = None,
-        unavailable: Collection[str] = (),
+        unavailable: tuple[str, ...] = (),
     ) -> None:
         self.recipes: dict[str, RecipeOption] = {
             _require_slug(slug): recipe for slug, recipe in (recipes or {}).items()

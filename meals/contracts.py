@@ -232,9 +232,11 @@ def describe_rejection(schema: type[BaseModel], exc: ValidationError) -> str:
 
 
 class MealieUnavailable(Exception):
-    """Mealie couldn't answer: an HTTP error other than not-found, a network failure, or a response
-    that doesn't parse. The client raises it `from` the underlying error. Not a KeyError, so a caller
-    skipping a missing recipe doesn't swallow an outage by accident."""
+    """Mealie couldn't answer: an HTTP error other than a 404 for the recipe itself (that's KeyError),
+    a network failure, or a response that doesn't parse. The client raises it `from` the underlying
+    error, with a message safe to log (no token). It can mean one recipe Mealie can't serve or Mealie
+    being down, and a caller can't tell which, so one that skips a failing recipe should still fail
+    loudly when every call fails. Not a KeyError, so skipping missing recipes doesn't swallow it."""
 
 
 @runtime_checkable

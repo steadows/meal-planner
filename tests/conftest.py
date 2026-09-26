@@ -145,8 +145,9 @@ def db(tmp_path: Path) -> Iterator[sqlite3.Connection]:
 
 @pytest.fixture
 def live_claude() -> None:
-    """Skips the test unless MEALS_LIVE_CLAUDE=1. A live test calls the real `claude -p` and spends
-    Claude usage, so `-m integration` alone never does. Use `@pytest.mark.usefixtures("live_claude")`."""
+    """Skips the test unless MEALS_LIVE_CLAUDE=1. A test that calls the real `claude -p` spends
+    Claude usage, so it opts in with `@pytest.mark.usefixtures("live_claude")`, and then
+    `-m integration` alone skips it."""
     if os.environ.get("MEALS_LIVE_CLAUDE") != "1":
         pytest.skip("calls the real claude -p and spends usage; set MEALS_LIVE_CLAUDE=1 to run it")
 

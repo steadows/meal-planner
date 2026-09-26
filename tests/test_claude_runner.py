@@ -983,7 +983,7 @@ def test_trusted_validation_rejects_a_mealie_slug_outside_the_sink_allowlist(slu
         )
 
 
-# ── integration: the real `claude` ───────────────────────────────────────────
+# ── the live-claude gate (tests/conftest.py `live_claude`) ───────────────────
 
 
 @pytest.mark.parametrize("value", [None, "", "0", "true"])
@@ -1003,7 +1003,13 @@ def test_live_claude_tests_run_with_meals_live_claude_1(
     monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
 ) -> None:
     monkeypatch.setenv("MEALS_LIVE_CLAUDE", "1")
-    request.getfixturevalue("live_claude")
+    try:
+        request.getfixturevalue("live_claude")
+    except pytest.skip.Exception:
+        pytest.fail("live_claude skipped with MEALS_LIVE_CLAUDE=1")
+
+
+# ── integration: the real `claude` ───────────────────────────────────────────
 
 
 @pytest.mark.integration
