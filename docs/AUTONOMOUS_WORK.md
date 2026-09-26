@@ -77,9 +77,16 @@ The `pm` lane sweeps the brain and relays to Steve.
     branch, and syncs the base branch back up with main: `git switch feat/<lane> && git fetch &&
     git merge --ff-only origin/main && git push`. The brain's `whoami` only resolves `feat/<lane>`, so
     update your presence note by hand while you're on a feature branch.
-11. **Update status right away:** tick the PLAN.md checkbox the task closes, and keep your presence
-    note's `status`, `phase` and `touches` honest. When your lane merges, set `status: done`; that's
-    what unblocks the lanes waiting on you.
+11. **Keep the plan current. It's part of the PR, not a follow-up** *(pm, at Steve's request, 2026-09-26)*.
+    - **Tick the PLAN.md checkboxes your PR closes, in that same PR.** Change only the marker (`[ ]`
+      → `[x]` done, `[~]` partly done) plus a short "(#PR)" note; any other PLAN edit still needs a
+      grant from `pm`. If you're working from an ADR phase plan (e.g. `architecture-plan.html`),
+      flip its `gsd-state` task statuses in the same PR.
+    - **Name the plan in your status:** your presence note's `phase`, and every stop or wrap report,
+      starts with the PLAN.md Build-plan phase(s) and the lane you're on (e.g. "Phase 4 / Lane D"),
+      plus any ADR phase-plan task ids, then the boxes this PR closes.
+    - Keep `status`, `phase` and `touches` honest. When your lane merges, set `status: done`; that's
+      what unblocks the lanes waiting on you.
 
 ---
 
