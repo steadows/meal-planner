@@ -74,6 +74,9 @@ record({
     "home": os.environ.get("HOME"),
     "path": os.environ.get("PATH"),
 })
+if "stdout_early" in behaviour:
+    sys.stdout.write(behaviour["stdout_early"])
+    sys.stdout.flush()
 time.sleep(behaviour.get("sleep", 0))
 # Before writing: an orphan whose reader is gone dies on the broken pipe.
 record({"event": "end", "pid": os.getpid(), "time": time.time()})
@@ -395,14 +398,17 @@ def test_timeout_raises_without_retry_and_kills_the_process_group(
 def test_timeout_does_not_wait_for_a_grandchild_that_left_the_group(
     fake_claude_home: Path,
 ) -> None:
-    """A grandchild in its own session survives killpg and keeps stdout open."""
-    _script(fake_claude_home, {"sleep": 30, "grandchild": "escaped", **OK})
+    """A grandchild in its own session survives killpg and keeps stdout open. What the child
+    wrote before the timeout must still reach raw_output."""
+    behaviour = {"sleep": 30, "grandchild": "escaped", "stdout_early": "marker-partial", **OK}
+    _script(fake_claude_home, behaviour)
     started = time.monotonic()
     try:
-        with pytest.raises(ClaudeRunnerError):
+        with pytest.raises(ClaudeRunnerError) as caught:
             claude_runner.run(PROMPT, timeout=1)
 
         assert time.monotonic() - started < 20
+        assert "marker-partial" in caught.value.raw_output
     finally:
         for call in _calls(fake_claude_home):
             _kill(call["pid"])
