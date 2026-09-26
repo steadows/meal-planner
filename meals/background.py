@@ -97,9 +97,14 @@ async def _reply(message: Message, text: str) -> None:
 
     Empty text is still sent, so Telegram rejects it and the caller's error path reports it.
     """
-    size = MessageLimit.MAX_TEXT_LENGTH
-    for chunk in [text[i : i + size] for i in range(0, len(text), size)] or [text]:
+    for chunk in split_message(text):
         await message.reply_text(chunk, parse_mode=None)
+
+
+def split_message(text: str) -> list[str]:
+    """`text` in chunks within Telegram's message limit. Empty text stays one (empty) chunk."""
+    size = MessageLimit.MAX_TEXT_LENGTH
+    return [text[i : i + size] for i in range(0, len(text), size)] or [text]
 
 
 def _release(_future: object = None) -> None:

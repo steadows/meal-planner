@@ -241,24 +241,24 @@ tr:last-child td { border-bottom: 0; }
 },
 {
 "id": "2.2",
-"text": "RED via `test-writer` + ONE `spec-watchdog`: the ADR's Integration Test Points for plan_state and jobs (window edges incl. DST, inspect-before-decide, no finish before delivery, result preservation under Telegram exhaustion and SIGTERM, reconcile midnight + expiry, Mealie retry, first week, busy-lock messages)",
-"status": "todo",
+"text": "RED via `test-writer` + ONE `spec-watchdog`: the ADR's Integration Test Points for plan_state and jobs (window edges incl. DST, inspect-before-decide, no finish before delivery, result preservation under Telegram exhaustion and SIGTERM, reconcile midnight + expiry, Mealie retry, first week, busy-lock messages). Done 2026-09-26: 192 tests (tw-p2) + one spec-watchdog pass (fix-then-freeze; 8 repairs, 8855768)",
+"status": "done",
 "gate": true
 },
 {
 "id": "2.3",
-"text": "`meals/plan_state.py`: `transition() -> bool`, `claim() -> Claim`, frozen `JobRun`, rowcount asserted on every write",
-"status": "todo"
+"text": "`meals/plan_state.py`: `transition() -> bool`, `claim() -> Claim`, frozen `JobRun`, rowcount asserted on every write. Done 2026-09-26",
+"status": "done"
 },
 {
 "id": "2.4",
-"text": "`meals/jobs.py`: lock → inspect → decide → claim → act → finish → always-report for the five jobs; catch-all; per-job `signal.alarm`; SIGTERM → exception",
-"status": "todo"
+"text": "`meals/jobs.py`: lock → inspect → decide → claim → act → finish → always-report for the five jobs; catch-all; per-job `signal.alarm`; SIGTERM → exception. Done 2026-09-26 (flat 45-min alarm per D9)",
+"status": "done"
 },
 {
 "id": "2.5",
-"text": "`meals/__main__.py`: `job <name> [--now] [--week] [--retry]`, composing the merged modules; `cart_fill` refuses until cart merges. (`bot` moved to 4.1, seam map D1)",
-"status": "todo"
+"text": "`meals/__main__.py`: `job <name> [--now] [--week] [--retry]`, composing the merged modules; `cart_fill` refuses until cart merges. (`bot` moved to 4.1, seam map D1). Done 2026-09-26",
+"status": "done"
 },
 {
 "id": "2.6",
