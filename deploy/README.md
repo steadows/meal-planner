@@ -123,5 +123,13 @@ job's lock and, for a cart fill, the Chrome lock.
    - Empty the cart only when the message itself asks you to: "The cart fill stopped partway …
      Empty it in the Meijer app, then reply 'retry cart'." Do that, then reply "retry cart".
    - A bare "job cart_fill failed: …" without that request doesn't say whether the cart filled.
-     Keep the cart and wait: if the fill had finished, `reconcile` resends its cart report within
-     the hour.
+     Keep the cart. If the fill had finished, the next `reconcile` usually resends its cart
+     report, but not for a week that started more than six days ago. If no report comes within
+     the hour, check the week's status before emptying anything:
+
+     ```sh
+     sqlite3 data/pantry.sqlite "SELECT status FROM weekly_plan WHERE week_start = '<YYYY-MM-DD>'"
+     ```
+
+     `cart_filled` or `ordered` means the fill finished: keep the cart. `approved` means it didn't
+     record a result: empty the cart, then reply "retry cart".
