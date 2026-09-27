@@ -24,9 +24,6 @@ import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import TypeVar
-
-T = TypeVar("T")
 
 PATTERN = "meals (bot|job)"
 POLL_S = 2.0
@@ -37,10 +34,14 @@ PATTERN_ENV = "MEALS_DRAIN_PATTERN"
 
 def meals_processes() -> list[str]:
     """Return `<pid> <command>` for each running `meals bot` or `meals job` process but this one."""
+    pids = _meals_pids()
+    return _describe(pids) or pids  # a pid ps no longer shows has just exited
+
+
+def _meals_pids() -> list[str]:
     pattern = os.environ.get(PATTERN_ENV, PATTERN)
     found = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True, check=False)
-    pids = [pid for pid in found.stdout.split() if int(pid) != os.getpid()]
-    return _describe(pids) or pids  # a pid ps no longer shows has just exited
+    return [pid for pid in found.stdout.split() if int(pid) != os.getpid()]
 
 
 def busy_locks(lock_dir: Path) -> list[Path]:
@@ -80,28 +81,23 @@ def _say(line: str) -> None:
 
 
 def drain(lock_dir: Path, *, poll_s: float = POLL_S, out: Callable[[str], None] = _say) -> None:
-    """Return once no `meals` process is running and every lock in `lock_dir` is free."""
-    _wait(meals_processes, lambda procs: ["waiting for: " + p for p in procs], poll_s, out)
-    _wait(
-        lambda: busy_locks(lock_dir),
-        lambda locks: [f"waiting for lock {p.name}: {_held_by(p)}" for p in locks],
-        poll_s,
-        out,
-    )
+    """Return once no `meals` process is running and every lock in `lock_dir` is free.
 
-
-def _wait(
-    poll: Callable[[], list[T]],
-    describe: Callable[[list[T]], list[str]],
-    poll_s: float,
-    out: Callable[[str], None],
-) -> None:
-    shown: list[T] | None = None
-    while items := poll():
-        if items != shown:  # say it once per change, not on every poll
-            for line in describe(items):
-                out(line)
-            shown = items
+    Each phase says what it waits on when that changes, not on every poll.
+    """
+    shown_pids: list[str] = []
+    while pids := _meals_pids():
+        if pids != shown_pids:
+            for process in _describe(pids) or pids:
+                out(f"waiting for: {process}")
+            shown_pids = pids
+        time.sleep(poll_s)
+    shown_locks: list[Path] = []
+    while locks := busy_locks(lock_dir):
+        if locks != shown_locks:
+            for path in locks:
+                out(f"waiting for lock {path.name}: {_held_by(path)}")
+            shown_locks = locks
         time.sleep(poll_s)
 
 
