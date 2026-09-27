@@ -490,10 +490,10 @@ This estimate assumes the agentic OS bot scaffolding already exists. Without it,
 
 ### Phase 5: weekly planning job (about 2–3 hours)
 
-- [~] Add a Saturday 8 am job to the home-machine scheduler. Feed Claude the last three weeks of plans, Mealie recipes by tag, `staples_due()`, the fallback items, and this week's custody pattern. (#26)
+- [~] Add a Saturday 8 am job to the home-machine scheduler. Feed Claude the last three weeks of plans, Mealie recipes by tag, `staples_due()`, the fallback items, and this week's custody pattern. (#26, #29)
 - [x] Output is JSON: 4–5 recipe options from Mealie or the web, proteins, grains, veg trays, sauces, two lunch builds, kid-night coverage, and up to three pantry questions. Save it as a proposed `weekly_plan` and create the Mealie meal-plan entries. (`planner.propose`, #10.)
 - [~] Send the Telegram message and parse the reply into recipe picks, swaps and pantry answers. (#26)
-- [~] Nudge at 4 pm Saturday if there's no reply. Reuse last week's plan Sunday at 8 am if there's still no reply. (#26)
+- [~] Nudge at 4 pm Saturday if there's no reply. Reuse last week's plan Sunday at 8 am if there's still no reply. (#26, #29)
 
 ### Phase 6: cart fill (about 3–4 hours, mostly testing)
 
