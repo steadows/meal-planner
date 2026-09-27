@@ -8,8 +8,10 @@ blocks: []
 files: [meals/contracts.py]
 discovered: 2026-09-26T03:24:11Z
 resolved: null
-updated: 2026-09-26T21:04:01Z
+updated: 2026-09-27T00:22:08Z
 ---
+**Status (contracts, 2026-09-26 ~20:18 EDT): the Protocol line is on main** (#24, merged c289c5b). This note's original close condition is met. It stays at `watch` because it carries the F2 joint-PR plan and Steve's rulings below. **Close it when the joint F2 PR merges.**
+
 **Open contract gap (from the [[contracts]] Codex sweep, routed by [[pm]]).** The `Pantry` Protocol has no "still good, ask later" operation. PLAN.md (Pantry rules) distinguishes two replies to a pantry question: "still good" pushes the next ask back a week and lengthens the learned estimate, and "we have plenty" pushes it back one interval. `flip_status(name, 'have')` can't express either, so [[bot]] can't tell [[pantry]] which one Steve meant.
 
 **Proposal from [[contracts]], for pantry and bot to confirm or amend:** `Pantry.confirm_stocked(name, on: date, plenty: bool = False) -> PantryItem | None`. The postponement maths stays inside `pantry.py`.
@@ -64,3 +66,18 @@ If both land in one contracts PR, fine. Otherwise whichever merges first is 2.
    - Else if `current` came from `next_ask_on`, it's unchanged.
    - Else (the 90% point ≥ pushed, tie included), `next_ask_on` stays NULL.
    - Status is always `have`. A same-`on` replay is a no-op.
+
+**Steve's rulings, relayed by [[pm]], received by [[pantry]] 2026-09-26 20:14 EDT:**
+1. "Still good" does NOT grow the interval. Seam map Revision 5 stands, and [[pm]] rewords PLAN:223.
+2. **An F2 amendment: "have plenty" never asks sooner than "still good".** The push has a one-week floor: `pushed = on + max(interval, 7)` when `plenty` (and `on + 7` with no interval), then the same F2 rule. If `current` is None or `pushed > current`, then `next_ask_on = pushed`. Otherwise, if `current` came from `next_ask_on`, leave it unchanged. Otherwise leave it NULL (a tie included).
+   - [[contracts]] puts this in the fake half. [[pantry]] mirrors it in 2b: `_postponed_ask`, with tw RED rows for an interval under 7 days plus plenty.
+   - Delete `_PantryTools` in 2b once #24 is on main.
+
+**Steve's rulings for the joint F2 PR (via [[pm]], 2026-09-26 ~20:10 EDT):**
+- "Have plenty" must never ask sooner than "still good": floor it at a week. `pushed = on + (max(interval, 7) if plenty and interval is not None else 7)`, and the next ask is `max(current, pushed)` under the F2 rule: write `next_ask_on` only when the push strictly wins, or when the ask already came from `next_ask_on`. [[contracts]] does the fake half, and [[pantry]] mirrors it on the real side.
+- "Still good" does NOT grow the interval (current behaviour stays). [[pm]] rewords PLAN.md:223 in a docs PR.
+
+**The Protocol line is on main** (#24, c289c5b, 2026-09-26 20:16 EDT). Pantry PR 3 (#25, 511fdad) also merged, still using its `_PantryTools` stand-in.
+- The note stays `watch` for the one remaining item, the **F2 joint PR**: [[contracts]]' `feat/contracts-f2-ask-date` (the fake half, the plenty floor, and the datetime/strip parity fixes), with pantry's 2b stacked on it.
+- 2b also swaps `_PantryTools` for `Pantry`.
+- Resolve the note when that PR merges.
