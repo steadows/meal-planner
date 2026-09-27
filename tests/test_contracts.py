@@ -3,7 +3,7 @@ import subprocess
 import sys
 import tomllib
 from collections.abc import Callable
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -487,6 +487,16 @@ def test_fake_pantry_matching_casefolds() -> None:
     assert item.id == 1
 
 
+def test_fake_pantry_matching_ignores_spaces_around_stored_names_and_aliases() -> None:
+    pantry = FakePantry(
+        (PantryItem(id=1, name=" olive oil ", aliases=(" EVOO ",), category="staple"),)
+    )
+    for query in ("olive oil", "evoo"):
+        item = pantry.get_item(query)
+        assert item is not None, query
+        assert item.id == 1
+
+
 # Every by-name method, so none of them drifts to its own matching rule.
 BY_NAME: dict[str, Callable[[FakePantry, str, date], PantryItem | None]] = {
     "get_item": lambda pantry, name, on: pantry.get_item(name),
@@ -543,10 +553,15 @@ def test_fake_pantry_still_good_asks_again_in_a_week(today: date) -> None:
     assert pantry.confirm_stocked("butter", today) == item  # a replay changes nothing
 
 
-@pytest.mark.parametrize(("interval", "wait"), [(42, 42), (None, 7)])
-def test_fake_pantry_plenty_pushes_the_ask_back_one_interval(
+@pytest.mark.parametrize(
+    ("interval", "wait"),
+    [(42, 42), (None, 7), (3, 7)],
+    ids=["one interval", "no interval: a week", "short interval: still a week"],
+)
+def test_fake_pantry_plenty_pushes_the_ask_back_one_interval_but_at_least_a_week(
     interval: int | None, wait: int, today: date
 ) -> None:
+    """Steve, 2026-09-26: "have plenty" never asks sooner than "still good"."""
     pantry = FakePantry((_staple(1, "rice", typical_interval_days=interval),))
 
     item = pantry.confirm_stocked("rice", today, plenty=True)
@@ -557,14 +572,68 @@ def test_fake_pantry_plenty_pushes_the_ask_back_one_interval(
 
 
 def test_fake_pantry_still_good_never_pulls_the_ask_earlier(today: date) -> None:
-    """PLAN: "still good" pushes the next ask back. Volunteered early, it must not bring it forward."""
+    """PLAN: "still good" pushes the next ask back. Volunteered early, it must not bring it forward.
+    The 90% point it leaves in place stays computed (not stored), so it still follows the interval."""
     last = today - _days(10)
-    pantry = FakePantry((_staple(1, "olive oil", typical_interval_days=70, last_purchased=last),))
+    pantry = FakePantry(
+        (
+            _staple(
+                1,
+                "olive oil",
+                status="buy_next_time",
+                typical_interval_days=70,
+                last_purchased=last,
+            ),
+        )
+    )
 
     item = pantry.confirm_stocked("olive oil", today)
 
     assert item is not None
-    assert item.next_ask_on == last + _days(63)  # the 90% point, not today + 7
+    assert (item.status, item.next_ask_on) == ("have", None)
+    assert pantry.get_item("olive oil") == item
+    assert _due(pantry, last + _days(62)) == []
+    assert _due(pantry, last + _days(63)) == ["olive oil"]  # the 90% point, not today + 7
+
+
+@pytest.mark.parametrize(
+    ("plenty", "interval", "bought", "ask"),
+    [
+        (False, 10, -2, None),  # ties its 90% point (day 7): nothing to move
+        (True, 20, 30, None),  # a stale "plenty" (`on` before the last purchase) loses to day 48
+        (True, 56, -20, 56),  # plenty beats the 90% point (day 31)
+    ],
+    ids=["still good ties", "stale plenty loses", "plenty wins"],
+)
+def test_fake_pantry_confirming_stores_the_push_only_when_it_is_later(
+    plenty: bool, interval: int, bought: int, ask: int | None, today: date
+) -> None:
+    pantry = FakePantry(
+        (_staple(1, "rice", typical_interval_days=interval, last_purchased=today + _days(bought)),)
+    )
+
+    item = pantry.confirm_stocked("rice", today, plenty=plenty)
+
+    assert item is not None
+    assert item.next_ask_on == (None if ask is None else today + _days(ask))
+    assert pantry.get_item("rice") == item
+    assert pantry.confirm_stocked("rice", today, plenty=plenty) == item  # a replay changes nothing
+
+
+def test_fake_pantry_takes_a_datetime_as_its_calendar_day(today: date) -> None:
+    """SqlitePantry does too: the schema stores DATE."""
+    late = datetime.combine(today, time(23, 30))
+    pantry = FakePantry(
+        (_staple(1, "rice", typical_interval_days=56), _staple(2, "butter", next_ask_on=today))
+    )
+
+    assert _due(pantry, late) == ["butter"]
+    confirmed = pantry.confirm_stocked("rice", late)
+    bought = pantry.log_purchase("butter", late)
+
+    assert confirmed is not None and bought is not None
+    assert type(confirmed.next_ask_on) is date and confirmed.next_ask_on == today + _days(7)
+    assert type(bought.last_purchased) is date and bought.last_purchased == today
 
 
 @pytest.mark.parametrize("plenty", [False, True], ids=["still_good", "plenty"])
@@ -632,7 +701,8 @@ def test_fake_pantry_back_dated_purchase_only_adds_history(today: date) -> None:
 def test_fake_pantry_duplicate_purchase_makes_no_writes(today: date) -> None:
     pantry = FakePantry((_staple(1, "rice", typical_interval_days=56),))
     pantry.log_purchase("rice", today)
-    postponed = pantry.confirm_stocked("rice", today)
+    postponed = pantry.confirm_stocked("rice", today, plenty=True)
+    assert postponed is not None and postponed.next_ask_on == today + _days(56)
 
     # A replayed "ordered" message for the same day must not clear the postponement.
     assert pantry.log_purchase("RICE", today) == postponed
