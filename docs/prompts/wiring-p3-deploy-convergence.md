@@ -62,3 +62,23 @@ For pass 2, answer only:
 
 Same rules as above: single agent, no git/uv/pytest/python/scripts, findings only. End with **CLOSED** or
 **NOT CLOSED**.
+
+## Pass 3 (after convergence 2)
+
+Convergence 2 (`.context/reviews/p3-convergence-2.md`) closed the pass-1 regression. It found that the README sent
+every `approved` week to "retry cart", although a week more than six days old, or one whose claim is still
+unfinished, can't be retried at once.
+
+The repair is docs-only, the last commit on the branch. It's pre-written, with the pass-1 repair, at
+`.context/reviews/p3-convergence-2-repairs.patch`. The README no longer promises the retry works. It says the reply
+explains why a week can't be retried:
+- more than six days old: no refill;
+- never settled: a second "retry cart" after its interrupted notice.
+
+For pass 3, answer only:
+- Is that regression CLOSED?
+- Is the new sentence true per `meals/jobs.py`: Inspect's handling of an unfinished claim on `--retry`,
+  `_retry_refusal`, and the six-day limit?
+
+Report a new regression only with a concrete sequence in which following the README loses a filled cart, doubles
+a cart, or states something the code contradicts. Same rules as above. End with **CLOSED** or **NOT CLOSED**.
