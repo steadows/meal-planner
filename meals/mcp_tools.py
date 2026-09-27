@@ -29,7 +29,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, closing, contextmanager
 from datetime import date, timedelta
-from typing import Annotated, Protocol
+from typing import Annotated
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
@@ -49,13 +49,7 @@ Qty = Annotated[StrictFloat, Field(gt=0, allow_inf_nan=False)]
 PriceCents = Annotated[StrictInt, Field(ge=0)]
 
 
-class _PantryTools(Pantry, Protocol):
-    """`Pantry` plus `confirm_stocked`, until contracts adds it to the Protocol."""
-
-    def confirm_stocked(self, name: str, on: date, plenty: bool = False) -> PantryItem | None: ...
-
-
-OpenPantry = Callable[[], AbstractContextManager[_PantryTools]]
+OpenPantry = Callable[[], AbstractContextManager[Pantry]]
 
 
 @contextmanager
@@ -74,7 +68,7 @@ def open_real_pantry() -> Iterator[SqlitePantry]:
 
 
 @contextmanager
-def _opened(open_pantry: OpenPantry) -> Iterator[_PantryTools]:
+def _opened(open_pantry: OpenPantry) -> Iterator[Pantry]:
     """One pantry for one call. A PantryRowError names the bad row and its fix, so it reaches
     Claude; anything else stays opaque."""
     with open_pantry() as pantry:
@@ -145,8 +139,9 @@ def build_server(open_pantry: OpenPantry, today: Callable[[], date] = date.today
 
     @server.tool()
     def confirm_stocked(name: str, on: date, plenty: StrictBool = False) -> PantryItem:
-        """Steve says the item is still good: don't ask again for a week, or for a full interval
-        when `plenty` is true ("we have plenty"). `on` is the date of his message."""
+        """Steve says the item is still good: don't ask again for a week, or for one interval,
+        never less than a week, when `plenty` is true ("we have plenty"). If the next ask is
+        already later than that, it stands. `on` is the date of his message."""
         day = _check_on(on, today())
         with _opened(open_pantry) as pantry:
             return _found(pantry.confirm_stocked(name, day, plenty), name)

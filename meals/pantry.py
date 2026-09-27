@@ -134,15 +134,18 @@ def _ask_date(item: PantryItem) -> date | None:
     return _ninety_percent_point(item.last_purchased, item.typical_interval_days)
 
 
-def _postponed_ask(item: PantryItem, on: date, plenty: bool) -> date:
-    """ "Still good" asks again a week after `on`; "plenty" one interval after it (a week with no
-    interval). Never earlier than the item's current ask date, so a replay or a stale reply
-    can't pull an ask forward."""
-    interval = item.typical_interval_days
-    wait = interval if plenty and interval is not None else STILL_GOOD_DAYS
+def _postponed_ask(item: PantryItem, on: date, plenty: bool) -> date | None:
+    """The `next_ask_on` to store. "Still good" pushes the ask to a week after `on`; "plenty" one
+    interval after it, never less than a week. The push is stored only when it's later than the
+    current ask date (or there is none), so a replay or a stale reply can't pull an ask forward.
+    Otherwise the stored value stands: a `next_ask_on` is kept, and a 90% point stays computed
+    (None), so it keeps following the interval."""
+    wait = STILL_GOOD_DAYS
+    if plenty and item.typical_interval_days is not None:
+        wait = max(item.typical_interval_days, STILL_GOOD_DAYS)
     pushed = on + timedelta(days=wait)
     current = _ask_date(item)
-    return pushed if current is None else max(current, pushed)
+    return pushed if current is None or pushed > current else item.next_ask_on
 
 
 def _due_sort_key(item: PantryItem, on: date) -> tuple[bool, bool, int, str]:
@@ -261,23 +264,27 @@ class SqlitePantry:
         """Steve says the item called `name` (or carrying it as an alias) is still stocked on `on`:
         "still good", or "have plenty" (`plenty`).
 
-        Status becomes 'have', and the next ask moves to a week after `on` (still good) or one
-        interval after it (plenty; a week with no interval), unless the current ask date is already
-        later: this never pulls an ask earlier. Never changes the interval: a longer-lasting item
-        lengthens it through the gap its next purchase records. Logs no purchase, and repeating
-        any mix of these replies for the same `on` changes nothing. Returns the updated item, or
-        None if unknown.
+        Status becomes 'have'. The push is a week after `on` (still good) or one interval after it
+        (plenty; a week with no interval), never less than a week. When the push is later than the
+        ask date, or there is none, it becomes `next_ask_on`. Otherwise the ask date stands as
+        stored: a `next_ask_on` is kept, and a 90% point stays computed (`next_ask_on` stays
+        NULL), so it keeps following the interval, which a later purchase can shorten. The call
+        itself never pulls an ask earlier. Never changes the interval: a longer-lasting item
+        lengthens it through the gap its next purchase records. Logs no purchase.
+
+        Repeating any mix of these replies for the same `on` changes nothing while nothing else
+        has written the item; one after a purchase can set the ask again. A datetime `on` counts
+        as `on.date()`, its day in its own timezone. Returns the updated item, or None if unknown.
         """
         on = _as_day(on)
         with self._write():
             item = self.get_item(name)
             if item is None:
                 return None
-            ask = _postponed_ask(item, on, plenty)
             self._conn.execute(
                 "UPDATE pantry_item SET status = 'have', next_ask_on = ?, "
                 "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (ask.isoformat(), item.id),
+                (_iso(_postponed_ask(item, on, plenty)), item.id),
             )
             updated = self._reread(item.id)  # before COMMIT, so no other writer's change leaks in
         logger.info(
@@ -285,7 +292,7 @@ class SqlitePantry:
             item.name,
             "plenty" if plenty else "still good",
             on,
-            ask,
+            _ask_date(updated),
         )
         return updated
 
