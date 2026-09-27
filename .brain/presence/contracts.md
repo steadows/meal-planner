@@ -2,15 +2,15 @@
 type: presence
 agent: contracts
 feature: "Shared contracts: config, db schema + migrations, pydantic contracts, claude_runner, fakes"
-status: idle
-phase: "Lane 0 (contracts), supporting Phase 3 / Lane B: #24 (confirm_stocked on the Pantry Protocol) MERGED 2026-09-26 as c289c5b; base feat/contracts = main c289c5b. Next session: F2 joint PR. Contracts cuts feat/contracts-f2-ask-date from main with the fake half (plus Steve's plenty floor, datetime coercion, _find strip), then pantry stacks 2b on it and opens the single PR"
+status: active
+phase: "Lane 0 (contracts), supporting Phase 3 / Lane B: F2 fake half PUSHED, feat/contracts-f2-ask-date @ 3abb7f9 (seams, RED, GREEN, /simplify, code review + Codex sweep all done). pantry stacks 2b (feat/pantry-f2-ask-date) and opens the single joint PR; one ultra fleet; contracts converges findings in its own files"
 owns_branches: ["contracts"]
 plan: docs/PLAN.md (Implementation plan, Concurrency lanes)
 tracker_epic: none
 current_worktree: /Users/stevemeadows/meal-planner-contracts
-current_branch: feat/contracts
+current_branch: feat/contracts-f2-ask-date
 current_ticket: none
-touches: [.brain/connections/bot-contracts-pantry-confirm-stocked.md, .brain/journal/2026-09-26.md, .brain/presence/contracts.md, .brain/presence/pantry.md, .brain/presence/wiring.md, architecture-plan.html, docs/PLAN.md, docs/prompts/pantry-pr3-adversarial-review.md, docs/prompts/pantry-pr3-ultrareview.md, docs/prompts/wiring-p2-jobs-adversarial-review.md, docs/prompts/wiring-p2-jobs-convergence.md, docs/prompts/wiring-p2-jobs-ultrareview.md, meals/__main__.py, meals/background.py, meals/contracts.py, meals/fakes/pantry.py, meals/jobs.py, meals/mcp_tools.py, meals/plan_state.py, pyproject.toml, tests/test_contracts.py, tests/test_jobs_cart.py, tests/test_jobs_send.py, tests/test_jobs_weekend.py, tests/test_main.py, tests/test_mcp_tools.py, tests/test_plan_state.py, uv.lock]
+touches: [meals/fakes/pantry.py, meals/contracts.py, tests/test_contracts.py]
 updated: 2026-09-27T00:48:14Z
 ---
 Lane 0 — everything else builds on this. Deliver the database schema from PLAN.md (Pantry rules → Table schema), the pydantic models (WeekProposal, RecipeOption, Intent, CartList, CartReport), `claude_runner.run()` wrapping `claude -p` / `claude --chrome -p` with timeouts and JSON validation, and a fake for every contract in `meals/fakes/`. Done when fakes pass and one real `claude -p` call returns valid JSON. Merge first; then set status: done to unblock [[contracts-pantry-waiting-on]], [[contracts-mealie-waiting-on]], [[contracts-search-waiting-on]], [[bot-contracts-waiting-on]] and [[cart-contracts-waiting-on]]. Sole owner of the contracts rule: [[bot-cart-contracts-mealie-pantry-search-wiring-shared-rule]].
@@ -27,3 +27,4 @@ Read PLAN.md → Shared contracts, Definition of done, and Rules (updated on `fe
 ## Backlog from pantry PR #25 (via [[pm]], 2026-09-26)
 - A `claude_runner` **"pantry-run" shape** (MCP pantry tools only; no web, Chrome or file tools). The bot lane will ask for it when it mounts the tools.
 - Pre-existing: `pantry_item.typical_interval_days` has **no upper CHECK** in `db.py`, so a hand-edited huge value overflows the date maths. Your call: add a bound in a future migration, or leave it to the pantry read-side validation.
+- **pyproject:** add `deploy` to mypy `files` (and consider coverage `source`) so CI checks `deploy/drain.py`, which today is checked only by hand in verify. That's a modify, not an add, so it's contracts' change (via [[pm]], from [[wiring]] P3).

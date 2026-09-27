@@ -3,15 +3,15 @@ type: presence
 agent: wiring
 feature: "Scheduled jobs and end-to-end: sat_propose, sat_nudge, sun_autoapprove, cart_fill, entry point"
 status: active
-phase: "Phase 5 / Lane G, ADR P2 2.1–2.7 MERGED (PR #26 = c0e41f8, 2026-09-27T00:19Z, on Steve's go). PLAN Phase 5 boxes 1, 3, 4 [~] (#26). Next: P3 launchd deploy on feat/wiring-p3, held until Steve says go. P1 merged earlier (#20)."
+phase: "Phase 5 / Lane G, ADR P3 3.1–3.6 (launchd deploy) DONE in PR #29, awaiting Steve's merge go: all gates closed (ultrareview converged, verify READY), plan P3 6/6. Nothing activated (P4.8). P2 merged (#26); P1 merged (#20)."
 owns_branches: ["wiring"]
 plan: docs/PLAN.md (Implementation plan, Concurrency lanes)
 tracker_epic: none
 current_worktree: /Users/stevemeadows/meal-planner-wiring
-current_branch: feat/wiring
+current_branch: feat/wiring-p3
 current_ticket: none
-touches: [.brain/connections/bot-contracts-pantry-confirm-stocked.md, .brain/journal/2026-09-26.md, .brain/presence/contracts.md, .brain/presence/pantry.md, .brain/presence/wiring.md, architecture-plan.html, docs/PLAN.md, docs/prompts/pantry-pr3-adversarial-review.md, docs/prompts/pantry-pr3-ultrareview.md, docs/prompts/wiring-p2-jobs-adversarial-review.md, docs/prompts/wiring-p2-jobs-convergence.md, docs/prompts/wiring-p2-jobs-ultrareview.md, meals/__main__.py, meals/background.py, meals/contracts.py, meals/fakes/pantry.py, meals/jobs.py, meals/mcp_tools.py, meals/plan_state.py, pyproject.toml, tests/test_contracts.py, tests/test_jobs_cart.py, tests/test_jobs_send.py, tests/test_jobs_weekend.py, tests/test_main.py, tests/test_mcp_tools.py, tests/test_plan_state.py, uv.lock]
-updated: 2026-09-27T00:48:17Z
+touches: [deploy/, tests/test_deploy.py, architecture-plan.html, docs/PLAN.md]
+updated: 2026-09-27T03:41:43Z
 ---
 Lane G — last. Jobs keyed on weekly_plan.status so every job is safe to rerun; one Chrome session at a time via a lock; bot never blocks (background subprocesses); max two concurrent claude processes. Done when a full Saturday dry run works end to end (M4). Waits on [[pantry-wiring-waiting-on]], [[mealie-wiring-waiting-on]], [[search-wiring-waiting-on]] and [[bot-wiring-waiting-on]].
 
@@ -35,3 +35,6 @@ A stored `WeekProposal` read back from `weekly_plan.components` must be validate
 
 ## For P4.4 (from [[contracts]] #21, via [[pm]], 2026-09-26)
 `hold_fds` inheritance by claude's **own descendants** is tested only one level deep (claude → one grandchild). If P4's integration or acceptance tests rely on a deeper process tree holding the lock, add that case there.
+
+## Backlog (from P3, via [[pm]], 2026-09-26)
+- **The 6-day edge (LOW):** reconcile rescans only weeks started within 6 days (`RECONCILE_DAYS`), while "retry cart" accepts a week up to 6 days old. A retry at the edge can leave an undelivered report or an unsettled claim; nothing is lost or doubled. The fix is to widen reconcile's scan by a day or cap retry at 5 days. Next wiring PR.
