@@ -38,3 +38,27 @@ at HEAD is `deploy/README.md`.
 - U1: CLOSED or OPEN, with evidence (file:line).
 - Any regression: file, line, severity, sequence, fix.
 - End with **CLOSED** or **NOT CLOSED**, and list the files you read.
+
+## Pass 2 (after convergence 1)
+
+Convergence 1 (`.context/reviews/p3-convergence-1.md`) closed U1. It found one regression: the README promised
+that `reconcile` resends a finished fill's cart report within the hour, which is false for a week that started
+more than six days ago (`RECONCILE_DAYS`).
+
+The repair is commit after 1254cad, docs-only. Both README commits are pre-written at
+`.context/reviews/p3-convergence-1-repairs.patch`. The README now:
+- makes redelivery conditional;
+- if no report comes, says to check `weekly_plan.status` with `sqlite3`: `cart_filled`/`ordered` keeps the cart,
+  and `approved` means empty it and reply "retry cart".
+
+For pass 2, answer only:
+- Is the regression CLOSED?
+- Is the status check correct per `meals/plan_state.py` and `meals/jobs.py`:
+  - which status a committed fill records (`record_cart`);
+  - what `approved` implies about the cart;
+  - whether "retry cart" then works for that week (`_retry_refusal`, the six-day limit);
+  - whether `data/pantry.sqlite` is the database `get_db` opens by default?
+- Did it introduce a new regression? Show it with a concrete sequence.
+
+Same rules as above: single agent, no git/uv/pytest/python/scripts, findings only. End with **CLOSED** or
+**NOT CLOSED**.
