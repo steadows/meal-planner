@@ -29,7 +29,7 @@ import subprocess
 import sys
 import uuid
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import FrameType, ModuleType
 from typing import Any
@@ -62,8 +62,9 @@ needs_plutil = pytest.mark.skipif(
 )
 
 # The fake launchctl (RED list, Instruments). It logs each call's argv tab-separated, one call per
-# line. `print gui/<uid>/<label>` exits 0 only for a label listed in FAKE_LAUNCHCTL_LOADED, and 113
-# (launchctl's "not loaded") otherwise; `bootout` exits FAKE_LAUNCHCTL_BOOTOUT_EXIT (default 0).
+# line. `print gui/<uid>/<label>` exits 0 only for a label listed in FAKE_LAUNCHCTL_LOADED, and
+# FAKE_LAUNCHCTL_PRINT_EXIT otherwise (default 113, launchctl's "not loaded"; D17); `bootout`
+# exits FAKE_LAUNCHCTL_BOOTOUT_EXIT (default 0).
 LAUNCHCTL = r"""#!/bin/bash
 (IFS=$'\t'; printf '%s\n' "$*") >> "$FAKE_LAUNCHCTL_LOG"
 case "$1" in
@@ -71,7 +72,7 @@ case "$1" in
     for label in ${FAKE_LAUNCHCTL_LOADED:-}; do
       [ "$label" = "${2##*/}" ] && exit 0
     done
-    exit 113 ;;
+    exit "${FAKE_LAUNCHCTL_PRINT_EXIT:-113}" ;;
   bootout) exit "${FAKE_LAUNCHCTL_BOOTOUT_EXIT:-0}" ;;
 esac
 exit 0
@@ -133,8 +134,9 @@ class Sandbox:
     def launch_agents(self) -> Path:
         return self.home / "Library" / "LaunchAgents"
 
-    def run(self, script: str, *args: str, **env: str) -> tuple[int, str]:
-        """Run deploy/<script> in its own process group; return (exit code, stdout + stderr)."""
+    def run(self, script: str, *args: str, relative: bool = False, **env: str) -> tuple[int, str]:
+        """Run deploy/<script> in its own process group; return (exit code, stdout + stderr).
+        `relative` runs it as `deploy/<script>` from ROOT, the way Steve types it."""
         path = self.root / "deploy" / script
         if not os.access(path, os.X_OK):
             pytest.fail(
@@ -142,8 +144,8 @@ class Sandbox:
                 pytrace=False,
             )
         proc = subprocess.Popen(
-            [str(path), *args],
-            cwd=self.cwd,
+            [f"deploy/{script}" if relative else str(path), *args],
+            cwd=self.root if relative else self.cwd,
             env=self.env | env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -421,8 +423,21 @@ def test_install_refuses_a_zone_other_than_detroit(sandbox: Sandbox, tmp_path: P
     assert sandbox.calls() == []
 
 
+def test_install_refuses_a_zone_it_cannot_read(sandbox: Sandbox, tmp_path: Path) -> None:
+    zone = tmp_path / "localtime-file"
+    zone.write_text("TZif")  # a regular file, not a symlink: readlink has nothing to give (D21)
+    code, out = sandbox.run("install.sh", "--dry-run", MEALS_LOCALTIME=str(zone))
+    assert code == 1, out
+    assert "can't read the time zone from" in out, out
+    assert str(zone) in out, "the refusal should name the path it tried"
+    assert sandbox.rendered() == {}
+
+
+@pytest.mark.parametrize("as_function", [False, True], ids=["absent", "only-a-shell-function"])
 @pytest.mark.parametrize("tool", ["uv", "claude"])
-def test_install_refuses_without_uv_or_claude_on_path(sandbox: Sandbox, tool: str) -> None:
+def test_install_refuses_without_uv_or_claude_on_path(
+    sandbox: Sandbox, tool: str, as_function: bool
+) -> None:
     assert UV is not None
     if tool == "claude":
         (sandbox.bin / "claude").unlink()
@@ -431,11 +446,22 @@ def test_install_refuses_without_uv_or_claude_on_path(sandbox: Sandbox, tool: st
         path = f"{sandbox.bin}:{SYSTEM_PATH}"
     if shutil.which(tool, path=path) is not None:
         pytest.skip(f"{tool} is installed next to uv or in a system dir on this machine")
+    if as_function:  # D19: `command -v` prints a bare name for an exported function
+        sandbox = replace(sandbox, env=sandbox.env | {f"BASH_FUNC_{tool}%%": "() {  :; }"})
     code, out = sandbox.run("install.sh", "--dry-run", PATH=path)
     assert code == 1, out
     assert f"run this from a shell where {tool} is on path" in out.lower(), out
     assert sandbox.rendered() == {}
     assert sandbox.calls() == []
+
+
+def test_install_refuses_a_claude_found_through_a_relative_path_dir(sandbox: Sandbox) -> None:
+    # D19: `../bin` means nothing to launchd, so a result that isn't absolute is never baked.
+    assert UV is not None
+    path = f"../bin:{os.path.dirname(UV)}:{SYSTEM_PATH}"  # the script runs from sandbox.cwd
+    code, out = sandbox.run("install.sh", "--dry-run", PATH=path)
+    assert code != 0, out
+    assert sandbox.rendered() == {}
 
 
 @pytest.mark.parametrize("args", [(), ("--bogus",)], ids=["no-args", "unknown-arg"])
@@ -458,6 +484,8 @@ def test_install_refuses_a_root_that_would_corrupt_the_render(tmp_path: Path, ch
     box = _make_sandbox(tmp_path, root=tmp_path / f"a{char}b")
     code, out = box.run("install.sh", "--dry-run")
     assert code == 1, out
+    assert "unsupported character" in out, out
+    assert box.rendered() == {}
 
 
 @needs_plutil
@@ -542,6 +570,7 @@ def test_activate_installs_nothing_when_a_bootout_fails(sandbox: Sandbox) -> Non
 
 
 def test_uninstall_boots_out_only_what_is_loaded_and_removes_plists(sandbox: Sandbox) -> None:
+    (sandbox.root / ".git").mkdir()  # the main checkout: .git is a directory there (D14)
     for label in LABELS[:-1]:  # reconcile's plist is already gone: `rm -f` must not mind
         (sandbox.launch_agents / f"{label}.plist").write_bytes(b"<plist/>")
     other = sandbox.launch_agents / "com.example.other.plist"
@@ -557,6 +586,16 @@ def test_uninstall_boots_out_only_what_is_loaded_and_removes_plists(sandbox: San
     assert not any("com.example.other" in arg for call in calls for arg in call)
     assert [p.name for p in sandbox.launch_agents.iterdir()] == ["com.example.other.plist"]
     assert other.read_bytes() == b"other"
+    # D18: one line per agent.
+    for label in ("local.meals.bot", "local.meals.sat_nudge"):
+        assert f"stopped {label}" in out, out
+    for label in (
+        "local.meals.sat_propose",
+        "local.meals.sun_autoapprove",
+        "local.meals.reconcile",
+    ):
+        assert f"{label} was not loaded" in out, out
+        assert f"stopped {label}" not in out
     assert SAFE in _last_line(out), out
 
 
@@ -592,6 +631,101 @@ def test_uninstall_waits_for_a_lock_in_data_locks(sandbox: Sandbox, spawn: Spawn
     assert code == 0, out
     assert _lockable(locks / "chrome.lock"), "uninstall reported safe while chrome.lock was held"
     assert SAFE in _last_line(out), out
+
+
+def test_uninstall_ignores_a_uv_that_is_only_a_shell_function(sandbox: Sandbox) -> None:
+    # D19: a function named uv would "run" the drain as a no-op, and uninstall would say safe.
+    path = f"{sandbox.bin}:{SYSTEM_PATH}"
+    if shutil.which("uv", path=path) is not None:
+        pytest.skip("uv is installed in a system dir on this machine")
+    with_function = replace(sandbox, env=sandbox.env | {"BASH_FUNC_uv%%": "() {  :; }"})
+    code, out = with_function.run("uninstall.sh", PATH=path)
+    assert code != 0, out
+    assert SAFE not in out
+
+
+def test_uninstall_stops_when_pgrep_fails(sandbox: Sandbox) -> None:
+    # D15: pgrep exits 2 on a pattern it can't compile, and that isn't "no processes".
+    code, out = sandbox.run("uninstall.sh", MEALS_DRAIN_PATTERN=f"{sandbox.tag} (bot|job")
+    assert code != 0, out
+    assert SAFE not in out
+
+
+def test_uninstall_stops_when_launchctl_print_fails_another_way(sandbox: Sandbox) -> None:
+    # D17: only 113 means "not loaded"; 125 is another user's domain on this Mac.
+    code, out = sandbox.run("uninstall.sh", FAKE_LAUNCHCTL_PRINT_EXIT="125")
+    assert code != 0, out
+    assert "125" in out, "the refusal should name the exit code"
+    assert SAFE not in out
+
+
+# ── refusals before any launchctl call, and running relatively (D14, D17, D20) ──
+
+ACTIVATE_OR_UNINSTALL = [
+    pytest.param(("install.sh", "--activate"), marks=needs_plutil, id="activate"),
+    pytest.param(("uninstall.sh",), id="uninstall"),
+]
+# `id -u` prints 0; anything else goes to the real id. D17's EUID check is only visible to a test
+# through `id -u`: bash's own $EUID can't be faked without being root.
+FAKE_ROOT_ID = '#!/bin/sh\n[ "$1" = -u ] && { echo 0; exit 0; }\nexec /usr/bin/id "$@"\n'
+
+
+@pytest.mark.parametrize("argv", ACTIVATE_OR_UNINSTALL)
+def test_a_linked_worktree_never_touches_the_agents(
+    sandbox: Sandbox, argv: tuple[str, ...]
+) -> None:
+    # D14: the labels are global, so a lane worktree would stop or repoint production's agents.
+    (sandbox.root / ".git").write_text("gitdir: /elsewhere/.git/worktrees/lane\n")
+    for label in LABELS:
+        (sandbox.launch_agents / f"{label}.plist").write_bytes(b"<plist/>")
+    code, out = sandbox.run(*argv, FAKE_LAUNCHCTL_LOADED=" ".join(LABELS))
+    assert code != 0, out
+    assert "worktree" in out.lower(), out
+    assert sandbox.calls() == []
+    installed = {p.name: p.read_bytes() for p in sandbox.launch_agents.iterdir()}
+    assert installed == {name: b"<plist/>" for name in PLIST_NAMES}, "nothing removed or copied"
+    assert SAFE not in out
+
+
+@needs_plutil
+def test_a_linked_worktree_may_still_dry_run(sandbox: Sandbox) -> None:
+    (sandbox.root / ".git").write_text("gitdir: /elsewhere/.git/worktrees/lane\n")
+    code, out = sandbox.run("install.sh", "--dry-run")
+    assert code == 0, out
+    assert sorted(sandbox.rendered()) == PLIST_NAMES
+
+
+@pytest.mark.parametrize("argv", ACTIVATE_OR_UNINSTALL)
+def test_scripts_refuse_to_run_as_root(sandbox: Sandbox, argv: tuple[str, ...]) -> None:
+    (sandbox.bin / "id").write_text(FAKE_ROOT_ID)
+    (sandbox.bin / "id").chmod(0o755)
+    code, out = sandbox.run(*argv, FAKE_LAUNCHCTL_LOADED=" ".join(LABELS))
+    assert code != 0, out
+    assert sandbox.calls() == [], "D17: refuse EUID 0 before any launchctl call"
+    assert SAFE not in out
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        pytest.param(("install.sh", "--dry-run"), marks=needs_plutil, id="install"),
+        pytest.param(("uninstall.sh",), id="uninstall"),
+    ],
+)
+def test_scripts_run_relatively_with_cdpath_set(
+    sandbox: Sandbox, tmp_path: Path, argv: tuple[str, ...]
+) -> None:
+    # D20: with CDPATH set, `cd deploy` goes to the first CDPATH dir holding a `deploy`, and
+    # prints it into the command substitution.
+    decoy = tmp_path / "decoy"
+    (decoy / "deploy").mkdir(parents=True)
+    code, out = sandbox.run(*argv, relative=True, CDPATH=str(decoy))
+    assert code == 0, out
+    assert list((decoy / "deploy").iterdir()) == []
+    if argv[0] == "install.sh":
+        assert sorted(sandbox.rendered()) == PLIST_NAMES
+    else:
+        assert SAFE in _last_line(out), out
 
 
 # ── deploy/drain.py (RED list 7-8; D11) ──────────────────────────────────────
@@ -836,6 +970,48 @@ def test_main_takes_exactly_one_lock_dir(drain_py: ModuleType, tmp_path: Path) -
         assert drain_py.main([str(tmp_path / "locks")]) == 0
 
 
+def test_drain_fails_when_pgrep_fails(
+    drain_py: ModuleType,
+    tag: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # D15: pgrep exits 2 on a pattern it can't compile, and that isn't "no processes".
+    monkeypatch.setenv("MEALS_DRAIN_PATTERN", f"{tag} (bot|job")
+    spec = drain_py.__spec__
+    assert spec is not None and spec.loader is not None
+    spec.loader.exec_module(drain_py)  # again: the pattern may be read at import or at each call
+    with _deadline(30):
+        assert _exit_status(drain_py.main, [str(tmp_path / "locks")]) == 1
+    assert capsys.readouterr().err.startswith("drain.py:")
+    with _deadline(30), pytest.raises(Exception) as raised:
+        drain_py.drain(tmp_path / "locks", poll_s=0.05, out=lambda line: None)
+    assert not isinstance(raised.value, TimeoutError), "drain waited instead of failing"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root lists a dir it has no read permission on")
+def test_an_unreadable_lock_dir_is_not_drained(
+    drain_py: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # D16: a listing that fails isn't an empty one (Path.glob swallows the error in 3.11).
+    locks = tmp_path / "locks"
+    locks.mkdir()
+    (locks / "job-cart_fill.lock").touch()
+    locks.chmod(0o300)  # search but not list
+    try:
+        with pytest.raises(PermissionError):
+            drain_py.busy_locks(locks)
+        with _deadline(30), pytest.raises(Exception) as raised:
+            drain_py.drain(locks, poll_s=0.05, out=lambda line: None)
+        assert not isinstance(raised.value, TimeoutError), "drain waited instead of failing"
+        with _deadline(30):
+            assert _exit_status(drain_py.main, [str(locks)]) == 1
+        assert capsys.readouterr().err.startswith("drain.py:")
+    finally:
+        locks.chmod(0o700)
+
+
 # ── README.md (RED list 9; D12) ──────────────────────────────────────────────
 
 STUCK_RUN_STEPS = (
@@ -877,6 +1053,9 @@ def test_readme_has_the_stuck_run_section_the_stale_alert_points_to() -> None:
     for step in STUCK_RUN_STEPS:
         assert step in text, f"the Stuck run section doesn't mention {step!r}"
     assert "never delete" in text.lower()
+    # Codex C3: empty the cart only if the fill stopped partway, never after a cart report.
+    assert "partway" in text.lower(), "emptying the cart must depend on the fill stopping partway"
+    assert "cart report" in text.lower()
 
 
 def test_readme_covers_install_uninstall_and_logs() -> None:
