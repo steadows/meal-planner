@@ -551,7 +551,7 @@ tests/
 | `Intent` | kind (pick, swap, custody, pantry\_flip, add\_item, find, save, rate, mode), args | bot, pantry, planner |
 | `CartList` / `CartReport` | week\_start (a Sunday), items with qty, unit, meijer\_url, preferred\_name / added\[\], substituted\[\], missing\[\], subtotal | cart, bot |
 | `mealie_client` interface | `import_url()`, `get_recipe()`, `list_by_tag()`, `set_meal_plan()` | search, planner, cart |
-| `pantry` interface | `staples_due()`, `flip_status()`, `log_purchase()`, `get_item()`, `list_items()`; `confirm_stocked()` ("still good" / "have plenty") joins once pantry implements it | planner, bot, cart |
+| `pantry` interface | `staples_due()`, `flip_status()`, `confirm_stocked()` ("still good" / "have plenty"), `log_purchase()`, `get_item()`, `list_items()` | planner, bot, cart |
 
 Every contract ships with a fake in `meals/fakes/`, so each lane can test against the fakes before the real pieces exist. The `mealie_client` and `pantry` interfaces are `typing.Protocol` classes in `contracts.py`. `mealie_client.py` and `pantry.py` implement them, and the modules that use them take an implementation as an argument instead of importing it.
 
