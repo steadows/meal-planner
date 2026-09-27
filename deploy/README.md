@@ -132,4 +132,6 @@ job's lock and, for a cart fill, the Chrome lock.
      ```
 
      `cart_filled` or `ordered` means the fill finished: keep the cart. `approved` means it didn't
-     record a result: empty the cart, then reply "retry cart".
+     record a result, so the cart may hold some items: empty it, then reply "retry cart". The reply
+     says if the week can't be retried: a week more than six days old can't be refilled, and a run
+     that was never settled may need a second "retry cart" once its interrupted notice arrives.
