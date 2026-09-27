@@ -32,7 +32,7 @@ def _due_order(item: PantryItem, on: date) -> tuple[bool, bool, int, str]:
     """Flagged first (no ask date last among them), then most days past the ask date, then name."""
     ask = _ask_date(item)
     days_past = 0 if ask is None else (on - ask).days
-    return (item.status != "buy_next_time", ask is None, -days_past, item.name.casefold())
+    return (item.status != "buy_next_time", ask is None, -days_past, name_key(item.name))
 
 
 class FakePantry:
@@ -44,8 +44,8 @@ class FakePantry:
         # The real schema can't hold these, so a test mustn't be able to build them.
         if len({item.id for item in items}) != len(items):
             raise ValueError("FakePantry: item ids must be unique")
-        if len({item.name.casefold() for item in items}) != len(items):
-            raise ValueError("FakePantry: item names must be unique under casefold")
+        if len({name_key(item.name) for item in items}) != len(items):
+            raise ValueError("FakePantry: item names must be unique after strip and casefold")
         self._items: dict[int, PantryItem] = {item.id: item for item in items}
         self._purchases: frozenset[tuple[int, date]] = frozenset()
 

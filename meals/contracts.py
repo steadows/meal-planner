@@ -268,11 +268,11 @@ class Pantry(Protocol):
     An item's *ask date* is `next_ask_on` when set; otherwise `last_purchased` plus
     ceil(9 * interval / 10) days (PLAN: ask at 90%) when both are known; otherwise it has none.
 
-    Item names are unique under casefold, which is stricter than the schema's ASCII-only
-    `COLLATE NOCASE`, so implementations reject a duplicate on insert. Every method taking a
-    `name` compares it with item names and aliases, both sides after `strip().casefold()`, and an
-    exact name beats another item's alias. An unknown name returns None and writes nothing. A
-    datetime `on` counts as its calendar day.
+    Item names are unique after `strip().casefold()`, which is stricter than the schema's
+    ASCII-only `COLLATE NOCASE`, so implementations reject a duplicate on insert. Every method
+    taking a `name` compares it with item names and aliases the same way, and an exact name beats
+    another item's alias. An unknown name returns None and writes nothing. A datetime `on` counts
+    as `on.date()`, its day in its own timezone: pass the local day, not a UTC timestamp.
     """
 
     def staples_due(self, on: date) -> tuple[PantryItem, ...]:
@@ -288,15 +288,16 @@ class Pantry(Protocol):
     def confirm_stocked(self, name: str, on: date, plenty: bool = False) -> PantryItem | None:
         """Steve says the item is still stocked on `on`: "still good", or "have plenty" (`plenty`).
         Status becomes `have`. The push is a week after `on` (still good) or one interval after it
-        (plenty), never less than a week. When the push is later than the ask date, or there is
-        none, it becomes `next_ask_on`. Otherwise the ask date stands as stored: a `next_ask_on`
-        is kept, and a 90% point stays computed (`next_ask_on` stays None), so it still follows
-        the interval. This never pulls an ask earlier. Logs no purchase and never changes the
-        interval. Returns the updated item.
+        (plenty; a week with no interval), never less than a week. When the push is later than the
+        ask date, or there is none, it becomes `next_ask_on`. Otherwise the ask date stands as
+        stored: a `next_ask_on` is kept, and a 90% point stays computed (`next_ask_on` stays
+        None), so it keeps following the interval, which a later purchase can shorten. The call
+        itself never pulls an ask earlier. Logs no purchase and never changes the interval.
+        Returns the updated item.
 
         Repeating a reply for the same `on` changes nothing only while nothing else has written
         the item: a redelivered "still good" after an "out of X" flip sets `have` again, and one
-        after a purchase sets the ask again. Callers dedupe replies (e.g. on the Telegram
+        after a purchase can set the ask again. Callers dedupe replies (e.g. on the Telegram
         update_id) before calling."""
         ...
 

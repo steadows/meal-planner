@@ -468,9 +468,18 @@ def test_fake_pantry_staples_due_order(today: date) -> None:
             _staple(4, "honey", status="buy_next_time"),
             _staple(5, "butter", status="buy_next_time", next_ask_on=today + _days(14)),
             _staple(6, "oats", status="buy_next_time", next_ask_on=today - _days(1)),
+            _staple(7, " cumin", next_ask_on=today - _days(2)),  # names compare after strip
         )
     )
-    assert _due(pantry, today) == ["oats", "butter", "honey", "salt", "allspice", "Zaatar"]
+    assert _due(pantry, today) == [
+        "oats",
+        "butter",
+        "honey",
+        "salt",
+        "allspice",
+        " cumin",
+        "Zaatar",
+    ]
 
 
 def test_fake_pantry_gets_items_by_name_or_alias(fake_pantry: FakePantry) -> None:
@@ -608,14 +617,26 @@ def test_fake_pantry_still_good_never_pulls_the_ask_earlier(today: date) -> None
 def test_fake_pantry_confirming_stores_the_push_only_when_it_is_later(
     plenty: bool, interval: int, bought: int, ask: int | None, today: date
 ) -> None:
+    last = today + _days(bought)
     pantry = FakePantry(
-        (_staple(1, "rice", typical_interval_days=interval, last_purchased=today + _days(bought)),)
+        (
+            _staple(
+                1,
+                "rice",
+                status="buy_next_time",
+                typical_interval_days=interval,
+                last_purchased=last,
+            ),
+        )
     )
 
     item = pantry.confirm_stocked("rice", today, plenty=plenty)
 
     assert item is not None
-    assert item.next_ask_on == (None if ask is None else today + _days(ask))
+    assert (item.status, item.next_ask_on) == (
+        "have",
+        None if ask is None else today + _days(ask),
+    )
     assert pantry.get_item("rice") == item
     assert pantry.confirm_stocked("rice", today, plenty=plenty) == item  # a replay changes nothing
 
@@ -650,8 +671,10 @@ def test_fake_pantry_confirming_keeps_a_later_postponement(plenty: bool, today: 
 def test_fake_pantry_refuses_items_the_real_schema_cannot_hold() -> None:
     with pytest.raises(ValueError, match="id"):
         FakePantry((_staple(1, "rice"), _staple(1, "oats")))
-    with pytest.raises(ValueError, match="name"):  # names are unique under casefold
+    with pytest.raises(ValueError, match="name"):  # names are unique after strip and casefold
         FakePantry((_staple(1, "Jalapeño"), _staple(2, "JALAPEÑO")))
+    with pytest.raises(ValueError, match="name"):
+        FakePantry((_staple(1, "rice"), _staple(2, " rice ")))
 
 
 def test_fake_pantry_logging_the_latest_purchase_resets_the_item(today: date) -> None:
