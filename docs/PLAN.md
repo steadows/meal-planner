@@ -220,7 +220,7 @@ The bot always repeats back what it understood, because voice transcription is e
 - Each staple starts with a rough guess (olive oil 10 weeks, rice 8, butter 3).
 - Every purchase gets logged. After two purchases, the interval becomes the median gap between them.
 - The planner asks once 90% of the interval has passed. For olive oil every 10 weeks, that's around week 9.
-- "Still good" pushes the next ask back a week and lengthens the estimate a little. "Out of X" shortens it.
+- "Still good" pushes the next ask back a week; "we have plenty" pushes it back one interval, never less than a week. The estimate itself adjusts from the gap the next purchase records *(Steve, 2026-09-26)*. "Out of X" shortens it.
 
 This is crude on purpose. A median over a few purchases is enough, and Steve can correct it in one sentence.
 
