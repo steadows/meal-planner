@@ -41,18 +41,26 @@ def meals_processes() -> list[str]:
 def _meals_pids() -> list[str]:
     pattern = os.environ.get(PATTERN_ENV, PATTERN)
     found = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True, check=False)
+    if found.returncode not in (0, 1):  # 1 is "none"; anything else means we can't tell
+        raise RuntimeError(f"pgrep failed (exit {found.returncode}): {found.stderr.strip()}")
     return [pid for pid in found.stdout.split() if int(pid) != os.getpid()]
 
 
 def busy_locks(lock_dir: Path) -> list[Path]:
     """Try every `*.lock` in `lock_dir` at once; return the ones held elsewhere.
 
-    An empty list means every lock was ours at one instant. All fds are closed before returning.
+    An empty list means every lock was ours at one instant (or `lock_dir` doesn't exist yet). A
+    directory that can't be listed raises. All fds are closed before returning.
     """
+    try:  # not Path.glob, which hides a directory it can't list
+        with os.scandir(lock_dir) as entries:
+            paths = sorted(Path(entry.path) for entry in entries if entry.name.endswith(".lock"))
+    except FileNotFoundError:
+        return []  # no lock was ever taken
     busy: list[Path] = []
     fds: list[int] = []
     try:
-        for path in sorted(lock_dir.glob("*.lock")):
+        for path in paths:
             fd = os.open(path, os.O_RDONLY)
             fds.append(fd)
             try:
@@ -123,7 +131,11 @@ def main(argv: list[str] | None = None) -> int:
     if len(args) != 1:
         print("usage: drain.py <lock_dir>", file=sys.stderr)
         return 2
-    drain(Path(args[0]))
+    try:
+        drain(Path(args[0]))
+    except (OSError, RuntimeError) as exc:  # can't tell what's running: never report safe
+        print(f"drain.py: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 

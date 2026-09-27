@@ -14,7 +14,7 @@ case "$1" in
     *) usage ;;
 esac
 
-DEPLOY="$(cd "$(dirname "$0")" && pwd)"
+DEPLOY="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 ROOT="$(dirname "$DEPLOY")"
 DOMAIN="gui/$(id -u)"
 AGENTS_DIR="$HOME/Library/LaunchAgents"
@@ -26,15 +26,25 @@ die() {
 }
 
 # launchd fires on the Mac's own time zone, and the jobs judge their windows in America/Detroit.
-zone="$(readlink "${MEALS_LOCALTIME:-/etc/localtime}" || true)"
+localtime="${MEALS_LOCALTIME:-/etc/localtime}"
+zone="$(readlink "$localtime")" || die "can't read the time zone from $localtime"
 case "$zone" in
     */America/Detroit) ;;
     *) die "this Mac's time zone is ${zone#*/zoneinfo/}, not America/Detroit; the schedule would fire at the wrong hours" ;;
 esac
 
-# launchd starts agents with a bare PATH, so bake in where uv and claude (under nvm) live now.
-uv="$(command -v uv)" || die "uv is not on PATH; run this from a shell where uv is on PATH"
-claude="$(command -v claude)" || die "claude is not on PATH; run this from a shell where claude is on PATH"
+# launchd starts agents with a bare PATH, so bake in where uv and claude (under nvm) live now. `type -P`
+# searches PATH only: a shell function or alias of the same name would bake a path that can't start.
+resolve() {
+    local found
+    found="$(type -P "$1")" || die "$1 is not on PATH; run this from a shell where $1 is on PATH"
+    case "$found" in
+        /*) echo "$found" ;;
+        *) die "$1 resolves to the relative path $found; run this from a shell with an absolute PATH" ;;
+    esac
+}
+uv="$(resolve uv)"
+claude="$(resolve claude)"
 path="$(dirname "$uv"):$(dirname "$claude"):/usr/bin:/bin:/usr/sbin:/sbin"
 for value in "$ROOT" "$uv" "$path"; do
     case "$value" in
@@ -65,6 +75,7 @@ if [ "$activate" -eq 0 ]; then
 fi
 
 # Stop and drain whatever an earlier install left running, so a rerun is as safe as a code switch.
+# uninstall.sh also refuses a linked worktree and root, before any launchctl call.
 "$DEPLOY/uninstall.sh"
 mkdir -p "$AGENTS_DIR"
 for label in "${labels[@]}"; do
