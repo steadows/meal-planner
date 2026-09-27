@@ -120,5 +120,8 @@ job's lock and, for a cart fill, the Chrome lock.
    `cart_fill`, the next `reconcile`).
    - For `cart_fill`, if the message is the cart report, the fill had finished and only its report
      was stuck: keep the cart.
-   - If it says the fill failed or stopped partway, empty the cart in the Meijer app, then reply
-     "retry cart".
+   - Empty the cart only when the message itself asks you to: "The cart fill stopped partway …
+     Empty it in the Meijer app, then reply 'retry cart'." Do that, then reply "retry cart".
+   - A bare "job cart_fill failed: …" without that request doesn't say whether the cart filled.
+     Keep the cart and wait: if the fill had finished, `reconcile` resends its cart report within
+     the hour.
