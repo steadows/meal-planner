@@ -135,11 +135,9 @@ def _ask_date(item: PantryItem) -> date | None:
 
 
 def _postponed_ask(item: PantryItem, on: date, plenty: bool) -> date | None:
-    """The `next_ask_on` to store. "Still good" pushes the ask to a week after `on`; "plenty" one
-    interval after it, never less than a week. The push is stored only when it's later than the
-    current ask date (or there is none), so a replay or a stale reply can't pull an ask forward.
-    Otherwise the stored value stands: a `next_ask_on` is kept, and a 90% point stays computed
-    (None), so it keeps following the interval."""
+    """The `next_ask_on` that `SqlitePantry.confirm_stocked` stores (its docstring has the rule):
+    the push when it's later than the current ask date, else the stored value, None under a 90%
+    point."""
     wait = STILL_GOOD_DAYS
     if plenty and item.typical_interval_days is not None:
         wait = max(item.typical_interval_days, STILL_GOOD_DAYS)
