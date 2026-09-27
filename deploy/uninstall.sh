@@ -23,7 +23,12 @@ die() {
 uid="$(id -u)"
 [ "$uid" -ne 0 ] || die "don't run this as root: the agents live in your own gui domain, not gui/0"
 DOMAIN="gui/$uid"
+# `type -P` skips shell functions; a relative result could run a stand-in that exits 0 and skips the drain.
 uv="$(type -P uv)" || die "uv is not on PATH; run this from a shell where uv is on PATH"
+case "$uv" in
+    /*) ;;
+    *) die "uv resolves to the relative path $uv; run this from a shell with an absolute PATH" ;;
+esac
 
 # The agents are the only things that start work, so stop them all before draining. Removing the
 # plist keeps the next login from loading it again. `launchctl print` exits 113 for a service that

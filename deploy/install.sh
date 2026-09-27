@@ -14,16 +14,19 @@ case "$1" in
     *) usage ;;
 esac
 
-DEPLOY="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
-ROOT="$(dirname "$DEPLOY")"
-DOMAIN="gui/$(id -u)"
-AGENTS_DIR="$HOME/Library/LaunchAgents"
-STAGE="$ROOT/data/launchd"
-
 die() {
     echo "install.sh: $*" >&2
     exit 1
 }
+
+DEPLOY="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(dirname "$DEPLOY")"
+uid="$(id -u)"
+# Under sudo, even a dry run would leave root-owned dirs in the checkout.
+[ "$uid" -ne 0 ] || die "don't run this as root: the agents belong to your own login"
+DOMAIN="gui/$uid"
+AGENTS_DIR="$HOME/Library/LaunchAgents"
+STAGE="$ROOT/data/launchd"
 
 # launchd fires on the Mac's own time zone, and the jobs judge their windows in America/Detroit.
 localtime="${MEALS_LOCALTIME:-/etc/localtime}"
@@ -75,7 +78,7 @@ if [ "$activate" -eq 0 ]; then
 fi
 
 # Stop and drain whatever an earlier install left running, so a rerun is as safe as a code switch.
-# uninstall.sh also refuses a linked worktree and root, before any launchctl call.
+# uninstall.sh also refuses a linked worktree, before any launchctl call.
 "$DEPLOY/uninstall.sh"
 mkdir -p "$AGENTS_DIR"
 for label in "${labels[@]}"; do
