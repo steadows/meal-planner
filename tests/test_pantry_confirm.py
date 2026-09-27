@@ -1,11 +1,13 @@
 """SqlitePantry.confirm_stocked, the next_ask_on ask date and the seed's bootstrap reminder (B3).
 
-Authority: `.context/seams/lane-b-pantry.md`, "Revision 5" [Rev5] (no interval growth), which wins
-over "Revision 4 — PR 2 (B3)" [Rev4], which wins over the rest of that file; the `Pantry` Protocol
-docstrings in meals/contracts.py [Protocol]; and
-`FakePantry.confirm_stocked`, the reference behaviour Revision 4 defers to [Fake]. The B3 dispatch
-brief's items are cited as [A1]..[D]. Expected values are worked out by hand, never from the code.
-Setup writes rows straight to the tables (`insert_item`, `_log`), not through the code under test.
+Authority: `.context/seams/lane-b-pantry.md`, "Revision 6" [Rev6] (PR 2b: the push is stored only
+when it's later than the current ask date, and plenty waits at least a week), which wins over
+"Revision 5" [Rev5] (no interval growth), which wins over "Revision 4 — PR 2 (B3)" [Rev4], which
+wins over the rest of that file; the `Pantry` Protocol docstrings in meals/contracts.py [Protocol],
+`confirm_stocked`'s above all; and `FakePantry.confirm_stocked` in meals/fakes/pantry.py, the
+reference behaviour the real pantry must match [Fake]. The B3 dispatch brief's items are cited as
+[A1]..[D]. Expected values are worked out by hand, never from the code. Setup writes rows straight
+to the tables (`insert_item`, `_log`), not through the code under test.
 """
 
 from __future__ import annotations
@@ -94,7 +96,7 @@ def test_confirming_a_flagged_item_restocks_it_and_never_logs_a_purchase(
     assert rows == [(1, str(_on(-30)))]
 
 
-# ── confirm_stocked: the push and the new ask date ([A3] [A4]) ────────────────
+# ── confirm_stocked: the push and the new ask date ([A3] [A4] [Rev6]) ─────────
 
 
 @pytest.mark.parametrize(
@@ -105,19 +107,31 @@ def test_confirming_a_flagged_item_restocks_it_and_never_logs_a_purchase(
         ({"typical_interval_days": 42}, True, _on(42)),
         ({}, False, _on(7)),
         ({}, True, _on(7)),
+        # Plenty waits one interval, but never less than a week: max(3, 7) days.
+        ({"typical_interval_days": 3}, True, _on(7)),
         # A purchase date with no interval: still no ask date, and nothing to grow
         ({"last_purchased": _on(-100)}, False, _on(7)),
-        # A current ask date: the later of it and the push.
+        # A stored next_ask_on: the push replaces it only when it's later; otherwise it's kept.
         ({"typical_interval_days": 42, "next_ask_on": _on(90)}, False, _on(90)),
         ({"typical_interval_days": 42, "next_ask_on": _on(90)}, True, _on(90)),
         ({"typical_interval_days": 42, "next_ask_on": _on(-3)}, False, _on(7)),
         ({"typical_interval_days": 42, "next_ask_on": _on(-3)}, True, _on(42)),
         # The 90% rule, not next_ask_on: 90% of 71 days is 63.9, rounded up to 64. Bought 5 days
-        # ago, that's 59 days out, later than a week.
-        ({"typical_interval_days": 71, "last_purchased": _on(-5)}, False, _on(59)),
+        # ago, that's 59 days out, later than a week, so it stays computed: next_ask_on stays None.
+        ({"typical_interval_days": 71, "last_purchased": _on(-5)}, False, None),
         # ...and earlier than one interval (71), so plenty moves it.
         ({"typical_interval_days": 71, "last_purchased": _on(-5)}, True, _on(71)),
-        # next_ask_on is the current ask date, not the later 90% point (59 days out): max(3, 7).
+        # 90% of 10 days is 9: bought 2 days ago, that's day 7, the week's own day. A tie isn't
+        # later, so it stays computed.
+        ({"typical_interval_days": 10, "last_purchased": _on(-2)}, False, None),
+        # A stale plenty: bought 30 days after the reply's day, 90% of 20 (18 days) puts the ask at
+        # day 48. One interval out (day 20) is earlier, so it stays computed.
+        ({"typical_interval_days": 20, "last_purchased": _on(30)}, True, None),
+        # 90% of 56 is 50.4, rounded up to 51: bought 20 days ago, that's day 31. One interval out
+        # (day 56) is later, so plenty stores it.
+        ({"typical_interval_days": 56, "last_purchased": _on(-20)}, True, _on(56)),
+        # next_ask_on is the current ask date, not the later 90% point (59 days out): the week
+        # (day 7) is later than day 3.
         (
             {"typical_interval_days": 71, "last_purchased": _on(-5), "next_ask_on": _on(3)},
             False,
@@ -129,30 +143,40 @@ def test_confirming_a_flagged_item_restocks_it_and_never_logs_a_purchase(
         "plenty: one interval",
         "still good, no interval: a week",
         "plenty, no interval: a week",
+        "plenty, interval under a week: a week",
         "still good, bought but no interval: a week",
         "later next_ask_on kept (still good)",
         "later next_ask_on kept (plenty)",
         "earlier next_ask_on moved to the week (still good)",
         "earlier next_ask_on moved to the interval (plenty)",
-        "later 90% point kept (still good)",
+        "later 90% point stays computed (still good)",
         "earlier 90% point moved to the interval (plenty)",
+        "90% point on the week's day stays computed (still good)",
+        "later 90% point stays computed (stale plenty)",
+        "90% point a month out moved to the interval (plenty)",
         "earlier next_ask_on beats a later 90% point (still good)",
     ],
 )
-def test_confirming_moves_the_ask_date_to_the_later_of_the_current_one_and_the_push(
-    db: sqlite3.Connection, insert_item: Insert, fields: dict[str, object], plenty: bool, ask: date
-) -> None:  # [A3] [A4]; [Rev4] "The push", "The new ask date"; [Fake] "only ever pushes back"
-    insert_item(_item(1, "rice", **fields))
+def test_confirming_stores_the_push_only_when_it_is_later_than_the_current_ask_date(
+    db: sqlite3.Connection,
+    insert_item: Insert,
+    fields: dict[str, object],
+    plenty: bool,
+    ask: date | None,
+) -> None:  # [A3] [A4]; [Rev6] "The rule"; [Protocol] confirm_stocked; [Fake]
+    # Flagged first, so every row shows the write happened, even where next_ask_on stays NULL.
+    insert_item(_item(1, "rice", status="buy_next_time", **fields))
     expected = _item(1, "rice", **{**fields, "next_ask_on": ask})
     assert SqlitePantry(db).confirm_stocked("rice", ON, plenty=plenty) == expected
     assert SqlitePantry(db).get_item("rice") == expected
-    assert _column(db, "next_ask_on") == {"rice": str(ask)}
+    assert _column(db, "next_ask_on") == {"rice": None if ask is None else str(ask)}
+    assert _column(db, "status") == {"rice": "have"}
 
 
 # ── confirm_stocked: the interval ([Rev5]) ────────────────────────────────────
 
 _PAST = {"typical_interval_days": 60, "last_purchased": _on(-100)}  # lasted 40 days past it
-_INSIDE = {"typical_interval_days": 60, "last_purchased": _on(-10)}  # 90% point is day 54
+_INSIDE = {"typical_interval_days": 60, "last_purchased": _on(-10)}  # 90% point: 54 on, day 44
 
 
 @pytest.mark.parametrize(
@@ -161,7 +185,7 @@ _INSIDE = {"typical_interval_days": 60, "last_purchased": _on(-10)}  # 90% point
         # Revision 4 grew this one to 100 + 7 = 107.
         (_PAST, False, _on(7)),
         (_PAST, True, _on(60)),
-        (_INSIDE, False, _on(44)),
+        (_INSIDE, False, None),  # the week (day 7) loses to the 90% point, which stays computed
         (_INSIDE, True, _on(60)),
         ({**_PAST, "category": "fallback"}, False, _on(7)),
         ({**_PAST, "category": "perishable"}, False, _on(7)),
@@ -178,14 +202,50 @@ _INSIDE = {"typical_interval_days": 60, "last_purchased": _on(-10)}  # 90% point
     ],
 )
 def test_confirming_never_changes_the_interval(
-    db: sqlite3.Connection, insert_item: Insert, fields: dict[str, object], plenty: bool, ask: date
+    db: sqlite3.Connection,
+    insert_item: Insert,
+    fields: dict[str, object],
+    plenty: bool,
+    ask: date | None,
 ) -> None:  # [Rev5] "`confirm_stocked` never touches `typical_interval_days`"
-    insert_item(_item(1, "olive oil", **fields))
+    # Flagged first, so the re-read shows the write happened, even where next_ask_on stays NULL.
+    insert_item(_item(1, "olive oil", status="buy_next_time", **fields))
     expected = _item(1, "olive oil", **fields, next_ask_on=ask)
     assert SqlitePantry(db).confirm_stocked("olive oil", ON, plenty=plenty) == expected
     assert SqlitePantry(db).get_item("olive oil") == expected
     interval = fields.get("typical_interval_days")
     assert _column(db, "typical_interval_days") == {"olive oil": interval}
+
+
+# ── confirm_stocked: a computed ask date keeps following the interval ([Rev6]) ─
+
+
+def test_a_back_dated_purchase_moves_an_ask_date_a_losing_still_good_left_computed(
+    db: sqlite3.Connection, insert_item: Insert
+) -> None:  # [Rev6] "a back-dated purchase ... that shortens the interval moves the ask"; the
+    # fault F2 fixes: the old code stored the 90% point as next_ask_on, freezing it there
+    # Bought 10 days ago on a 60-day interval: the 90% point is 54 days on, day 44.
+    insert_item(
+        _item(
+            1, "coffee", status="buy_next_time", typical_interval_days=60, last_purchased=_on(-10)
+        )
+    )
+    _log(db, 1, _on(-10))
+    pantry = SqlitePantry(db)
+    # "Still good" today: the week (day 7) loses to day 44, which stays computed.
+    pantry.confirm_stocked("coffee", ON)
+    assert _column(db, "next_ask_on") == {"coffee": None}
+    assert _column(db, "status") == {"coffee": "have"}  # written all the same
+    # A purchase 30 days ago comes in late. Its date and the last one are 20 days apart, so the
+    # median gap re-learns the interval as 20, and 90% of that (18 days) after day -10 is day 8.
+    pantry.log_purchase("coffee", _on(-30))
+    relearned = _item(1, "coffee", typical_interval_days=20, last_purchased=_on(-10))
+    assert SqlitePantry(db).get_item("coffee") == relearned
+    assert [item.name for item in pantry.staples_due(_on(7))] == []
+    assert [item.name for item in pantry.staples_due(_on(8))] == ["coffee"]
+    # The "still good" redelivered: the week (day 7) still loses, now to day 8. Nothing changes.
+    assert pantry.confirm_stocked("coffee", ON) == relearned
+    assert SqlitePantry(db).get_item("coffee") == relearned
 
 
 # ── confirm_stocked: replays, lookup, datetimes ([A6] [A7] [A8]) ──────────────
