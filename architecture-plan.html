@@ -148,35 +148,35 @@ tr:last-child td { border-bottom: 0; }
 },
 {
 "id": "0.2",
-"text": "`meals/db.py`: the next migration (numbered at merge): `job_run` table (PK job, week_start)",
-"status": "todo"
+"text": "`meals/db.py`: the next migration (numbered at merge): `job_run` table (PK job, week_start) Done 2026-09-26 in contracts #21 (8c24816): migration 3.",
+"status": "done"
 },
 {
 "id": "0.3",
-"text": "`claude_runner.run(..., hold_fds=())`. (Killing the child's group on any exception is already in contracts' ungated follow-up PR.)",
-"status": "todo"
+"text": "`claude_runner.run(..., hold_fds=())`. (Killing the child's group on any exception is already in contracts' ungated follow-up PR.) Done 2026-09-26 in contracts #21 (8c24816).",
+"status": "done"
 },
 {
 "id": "0.4",
-"text": "layers: `(__main__)` its own top layer; `(background)`, `(plan_state)` in the feature layer",
-"status": "todo"
+"text": "layers: `(__main__)` its own top layer; `(background)`, `(plan_state)` in the feature layer Done 2026-09-26 in contracts #21 (8c24816).",
+"status": "done"
 },
 {
 "id": "0.5",
-"text": "RED via `test-writer` + ONE `spec-watchdog` (schema + concurrency = high tier)",
-"status": "todo",
+"text": "RED via `test-writer` + ONE `spec-watchdog` (schema + concurrency = high tier) Done 2026-09-26 in contracts #21: test-writer, then one spec-watchdog pass.",
+"status": "done",
 "gate": true
 },
 {
 "id": "0.6",
-"text": "`/steadows-code-review` → PR → Steve merges",
-"status": "todo",
+"text": "`/steadows-code-review` → PR → Steve merges Done 2026-09-26: #21 merged as 8c24816 (Codex sweep: no additional findings; ultra: nothing material).",
+"status": "done",
 "gate": true
 },
 {
 "id": "0.7",
-"text": "`/steadows-verify`: phase gate",
-"status": "todo",
+"text": "`/steadows-verify`: phase gate Done 2026-09-26 in #21: READY (652 passed, 98%, Python 3.11).",
+"status": "done",
 "gate": true
 }
 ]
@@ -235,41 +235,41 @@ tr:last-child td { border-bottom: 0; }
 "tasks": [
 {
 "id": "2.1",
-"text": "`/steadows-seams`: expect HIGH tier (flock, claim, CAS, redelivery)",
-"status": "todo",
+"text": "`/steadows-seams`: expect HIGH tier (flock, claim, CAS, redelivery). Done 2026-09-26: tier HIGH; seam map `.context/seams/P2.md` (decisions D1–D10)",
+"status": "done",
 "gate": true
 },
 {
 "id": "2.2",
-"text": "RED via `test-writer` + ONE `spec-watchdog`: the ADR's Integration Test Points for plan_state and jobs (window edges incl. DST, inspect-before-decide, no finish before delivery, result preservation under Telegram exhaustion and SIGTERM, reconcile midnight + expiry, Mealie retry, first week, busy-lock messages)",
-"status": "todo",
+"text": "RED via `test-writer` + ONE `spec-watchdog`: the ADR's Integration Test Points for plan_state and jobs (window edges incl. DST, inspect-before-decide, no finish before delivery, result preservation under Telegram exhaustion and SIGTERM, reconcile midnight + expiry, Mealie retry, first week, busy-lock messages). Done 2026-09-26: 192 tests (tw-p2) + one spec-watchdog pass (fix-then-freeze; 8 repairs, 8855768)",
+"status": "done",
 "gate": true
 },
 {
 "id": "2.3",
-"text": "`meals/plan_state.py`: `transition() -> bool`, `claim() -> Claim`, frozen `JobRun`, rowcount asserted on every write",
-"status": "todo"
+"text": "`meals/plan_state.py`: `transition() -> bool`, `claim() -> Claim`, frozen `JobRun`, rowcount asserted on every write. Done 2026-09-26",
+"status": "done"
 },
 {
 "id": "2.4",
-"text": "`meals/jobs.py`: lock → inspect → decide → claim → act → finish → always-report for the five jobs; catch-all; per-job `signal.alarm`; SIGTERM → exception",
-"status": "todo"
+"text": "`meals/jobs.py`: lock → inspect → decide → claim → act → finish → always-report for the five jobs; catch-all; per-job `signal.alarm`; SIGTERM → exception. Done 2026-09-26 (flat 45-min alarm per D9)",
+"status": "done"
 },
 {
 "id": "2.5",
-"text": "`meals/__main__.py`: `bot`, `job <name> [--now] [--week] [--retry]`",
-"status": "todo"
+"text": "`meals/__main__.py`: `job <name> [--now] [--week] [--retry]`, composing the merged modules; `cart_fill` refuses until cart merges. (`bot` moved to 4.1, seam map D1). Done 2026-09-26",
+"status": "done"
 },
 {
 "id": "2.6",
-"text": "`/simplify` → `/steadows-code-review` → PR → `/steadows-ultrareview`",
-"status": "todo",
+"text": "`/simplify` → `/steadows-code-review` → PR → `/steadows-ultrareview`. PR #26 open 2026-09-26 (code review: 16 + Codex 4, all fixed RED-first); ultrareview round 1 NOT READY (5 fixed RED-first), convergence 2 CLOSED",
+"status": "done",
 "gate": true
 },
 {
 "id": "2.7",
-"text": "`/steadows-verify`: phase gate",
-"status": "todo",
+"text": "`/steadows-verify`: phase gate. Done 2026-09-26: READY (964 passed, 96% coverage, Python 3.11; security PASS, LOW/INFO only)",
+"status": "done",
 "gate": true
 }
 ]
@@ -332,7 +332,7 @@ tr:last-child td { border-bottom: 0; }
 "tasks": [
 {
 "id": "4.1",
-"text": "Wire real planner, cart, Mealie, pantry into `jobs.py` (entry points import real modules)",
+"text": "Wire real planner, cart, Mealie, pantry into `jobs.py` (entry points import real modules); `__main__ bot` → `meals.bot.main()`; cart_fill's 20-min Chrome alarm + 'waiting behind another fill' hook with cart (P2 seam map D1, D9)",
 "status": "todo"
 },
 {

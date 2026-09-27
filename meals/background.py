@@ -1,4 +1,6 @@
 """Background work for the bot: chat-sized work off the event loop, and detached job processes.
+Also the Telegram plumbing the bot and the jobs share: splitting, one-line errors, and a sender
+for a job process, which has no bot Application of its own.
 
 ADR-0001 (docs/adr/ADR-0001-runtime-model.md), Decision and Ownership.
 """
@@ -11,10 +13,13 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
+from datetime import timedelta
 from typing import TypeVar
 
+import telegram
 from telegram import Message, Update
 from telegram.constants import MessageLimit
+from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError
 from telegram.ext import ContextTypes
 
 logger = logging.getLogger(__name__)
@@ -27,6 +32,9 @@ ERROR_MAX_CHARS = 300
 BUSY_TEXT = f"I'm already working on {MAX_IN_FLIGHT} requests. Try again in a few minutes."
 TIMEOUT_TEXT = f"That took over {DEADLINE_S // 60} minutes, so I gave up. Try again later."
 _ERROR_PREFIX = "Sorry, that didn't work: "
+SEND_ATTEMPTS = 3
+SEND_BUDGET_S = 120
+_BACKOFF_S = (5.0, 15.0)
 
 # Requests whose work hasn't finished. Only the event-loop thread touches it.
 _in_flight = 0
@@ -97,9 +105,14 @@ async def _reply(message: Message, text: str) -> None:
 
     Empty text is still sent, so Telegram rejects it and the caller's error path reports it.
     """
-    size = MessageLimit.MAX_TEXT_LENGTH
-    for chunk in [text[i : i + size] for i in range(0, len(text), size)] or [text]:
+    for chunk in split_message(text):
         await message.reply_text(chunk, parse_mode=None)
+
+
+def split_message(text: str) -> list[str]:
+    """`text` in chunks within Telegram's message limit. Empty text stays one (empty) chunk."""
+    size = MessageLimit.MAX_TEXT_LENGTH
+    return [text[i : i + size] for i in range(0, len(text), size)] or [text]
 
 
 def _release(_future: object = None) -> None:
@@ -113,10 +126,15 @@ def _log_abandoned(future: asyncio.Future[T], elapsed_s: float) -> None:
 
 
 def _one_line(exc: Exception) -> str:
-    """The first line of `exc`, or its type name if it has no text, cut to ERROR_MAX_CHARS."""
+    """The error reply: `exc`'s first line after the prefix, cut to ERROR_MAX_CHARS."""
+    return (_ERROR_PREFIX + first_line(exc))[:ERROR_MAX_CHARS]
+
+
+def first_line(exc: BaseException) -> str:
+    """The first line of `exc`'s text, or its type name if it has none. Chat replies and job
+    reports show only this: the rest (a traceback, a scraped page) belongs in the log."""
     text = str(exc).strip()
-    first = text.splitlines()[0] if text else type(exc).__name__
-    return (_ERROR_PREFIX + first)[:ERROR_MAX_CHARS]
+    return text.splitlines()[0] if text else type(exc).__name__
 
 
 def spawn_job(name: str, *args: str) -> int:
@@ -134,3 +152,73 @@ def spawn_job(name: str, *args: str) -> int:
     )
     logger.info("started job %s %s (pid %d)", name, " ".join(args), process.pid)
     return process.pid
+
+
+# ── sending from a job process ───────────────────────────────────────────────
+
+
+class DeliveryFailed(Exception):
+    """A Telegram message wasn't delivered: retries ran out, or Telegram refused it."""
+
+
+class TelegramSend:
+    """`jobs.Deps.send` for a job process: plain text to Steve's chat, split at Telegram's limit, with a
+    fresh `telegram.Bot` per attempt. Transient errors (network, flood control) are retried up to
+    SEND_ATTEMPTS within SEND_BUDGET_S, which counts the attempts themselves as well as the waits
+    (no attempt or wait starts past it); anything else, or running out, raises DeliveryFailed.
+
+    DeliveryFailed carries only the error's type, never its text, and drops the chain: PTB's
+    InvalidToken message includes the token."""
+
+    def __init__(
+        self,
+        token: str,
+        chat_id: int,
+        *,
+        sleep: Callable[[float], object] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._token = token
+        self._chat_id = chat_id
+        self._sleep = sleep
+        self._clock = clock
+
+    def __call__(self, text: str) -> None:
+        pending = list(split_message(text))
+        spent = 0.0  # attempts timed on the clock, plus each wait (the sleep may be injected)
+        for attempt in range(1, SEND_ATTEMPTS + 1):
+            began = self._clock()
+            try:
+                # Each attempt gets only what's left of the budget (seam map D25).
+                remaining = max(SEND_BUDGET_S - spent, 0.0)
+                asyncio.run(asyncio.wait_for(self._send(pending), timeout=remaining))
+                return
+            except TimeoutError:
+                raise DeliveryFailed("Telegram didn't answer within the send budget") from None
+            except TelegramError as exc:
+                spent += self._clock() - began
+                wait = _retry_wait(exc, attempt)
+                kind = type(exc).__name__
+                if wait is None or attempt == SEND_ATTEMPTS or spent + wait > SEND_BUDGET_S:
+                    raise DeliveryFailed(f"Telegram didn't take the message ({kind})") from None
+                logger.warning("Telegram send attempt %d failed (%s); retrying", attempt, kind)
+                self._sleep(wait)
+                spent += wait
+
+    async def _send(self, pending: list[str]) -> None:
+        """Send the chunks in order, dropping each from `pending` once it's delivered, so a retry
+        resumes where the last attempt stopped."""
+        async with telegram.Bot(self._token) as bot:
+            while pending:
+                await bot.send_message(chat_id=self._chat_id, text=pending[0], parse_mode=None)
+                pending.pop(0)
+
+
+def _retry_wait(exc: TelegramError, attempt: int) -> float | None:
+    """Seconds to wait before retrying, or None if the error isn't transient."""
+    if isinstance(exc, RetryAfter):
+        wait = exc.retry_after
+        return wait.total_seconds() if isinstance(wait, timedelta) else float(wait)
+    if isinstance(exc, NetworkError) and not isinstance(exc, BadRequest):
+        return _BACKOFF_S[min(attempt, len(_BACKOFF_S)) - 1]
+    return None
