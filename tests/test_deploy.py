@@ -644,6 +644,23 @@ def test_uninstall_ignores_a_uv_that_is_only_a_shell_function(sandbox: Sandbox) 
     assert SAFE not in out
 
 
+def test_uninstall_refuses_a_uv_found_through_a_relative_path_dir(
+    sandbox: Sandbox, tmp_path: Path
+) -> None:
+    # D19 (security review S1): a stand-in `uv` that exits 0 would skip the drain and report safe.
+    assert UV is not None
+    marker = tmp_path / "relative-uv-ran"
+    stand_in = sandbox.cwd / "fakebin" / "uv"  # the script runs from sandbox.cwd
+    stand_in.parent.mkdir()
+    stand_in.write_text(f'#!/bin/sh\n: > "{marker}"\nexit 0\n')
+    stand_in.chmod(0o755)
+    path = f"fakebin:{sandbox.bin}:{os.path.dirname(UV)}:{SYSTEM_PATH}"
+    code, out = sandbox.run("uninstall.sh", PATH=path)
+    assert code != 0, out
+    assert SAFE not in out
+    assert not marker.exists(), "uninstall ran the uv it found through a relative PATH dir"
+
+
 def test_uninstall_stops_when_pgrep_fails(sandbox: Sandbox) -> None:
     # D15: pgrep exits 2 on a pattern it can't compile, and that isn't "no processes".
     code, out = sandbox.run("uninstall.sh", MEALS_DRAIN_PATTERN=f"{sandbox.tag} (bot|job")
@@ -695,7 +712,9 @@ def test_a_linked_worktree_may_still_dry_run(sandbox: Sandbox) -> None:
     assert sorted(sandbox.rendered()) == PLIST_NAMES
 
 
-@pytest.mark.parametrize("argv", ACTIVATE_OR_UNINSTALL)
+@pytest.mark.parametrize(
+    "argv", [*ACTIVATE_OR_UNINSTALL, pytest.param(("install.sh", "--dry-run"), id="dry-run")]
+)
 def test_scripts_refuse_to_run_as_root(sandbox: Sandbox, argv: tuple[str, ...]) -> None:
     (sandbox.bin / "id").write_text(FAKE_ROOT_ID)
     (sandbox.bin / "id").chmod(0o755)
@@ -703,6 +722,8 @@ def test_scripts_refuse_to_run_as_root(sandbox: Sandbox, argv: tuple[str, ...]) 
     assert code != 0, out
     assert sandbox.calls() == [], "D17: refuse EUID 0 before any launchctl call"
     assert SAFE not in out
+    # S2: under sudo, anything created in the checkout would be root-owned.
+    assert not (sandbox.root / "data").exists(), "created data/ as root"
 
 
 @pytest.mark.parametrize(
