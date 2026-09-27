@@ -26,6 +26,7 @@ from meals.contracts import (
     WeekProposal,
 )
 from meals.fakes import ClaudeCall, FakeClaudeRunner, FakeMealieClient, FakePantry
+from meals.pantry import SqlitePantry
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -207,6 +208,24 @@ def test_claude_runner_error_keeps_raw_output() -> None:
 def test_fakes_implement_protocols(fake_mealie: FakeMealieClient, fake_pantry: FakePantry) -> None:
     assert isinstance(fake_mealie, MealieClient)
     assert isinstance(fake_pantry, Pantry)
+
+
+def _public_methods(cls: type) -> dict[str, inspect.Signature]:
+    """Inherited ones included, so splitting a class into bases can't hide a method."""
+    return {
+        name: inspect.signature(member, eval_str=True)
+        for name, member in inspect.getmembers(cls, callable)
+        if not name.startswith("_")
+    }
+
+
+def test_both_pantries_have_every_pantry_method_with_the_same_signature() -> None:
+    """Callers hold a `Pantry`, and isinstance checks method names only. So the fake offers
+    exactly the Protocol's methods (one only the fake has is a contract gap), and SqlitePantry
+    offers them all (plus its own `load_seed`), with the same names, kinds, defaults and types."""
+    protocol = _public_methods(Pantry)
+    assert _public_methods(FakePantry) == protocol
+    assert _public_methods(SqlitePantry).items() >= protocol.items()
 
 
 # ── FakeClaudeRunner ─────────────────────────────────────────────────────────
