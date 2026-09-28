@@ -2,8 +2,8 @@
 type: presence
 agent: pm
 feature: "PM/coordination lane: sweeps the vault, unblocks waiting-on edges, tracks merge order against PLAN.md, files follow-ups — owns no meals/ code"
-status: active
-phase: "PRs 17-23 merged today (plan synced; branch rule; python pin). Active: wiring P2 (Phase 5 / Lane G), pantry PR 3 (Phase 3 / Lane B), contracts confirm_stocked Protocol PR. Bot (Phase 4 / Lane D) waits on Steve opening a session; cart (Phase 6 / Lane F) waits on the Meijer spike"
+status: idle
+phase: "WRAPPED 2026-09-28 for Steve account switch. PRs 1-27 merged; 28 (mealie) and 29 (wiring) relayed to merge then /wrap. Handoff: ~/meal-planner-pm/.context/handoffs/2026-09-26-pm-lane.md"
 owns_branches: ["pm"]
 plan: docs/PLAN.md (Concurrency lanes, Coordination with agent-brain)
 tracker_epic: none
@@ -11,7 +11,7 @@ current_worktree: /Users/stevemeadows/meal-planner-pm
 current_branch: feat/pm
 current_ticket: none
 touches: [docs/PLAN.md, CLAUDE.md, .claude/settings.json, .gitignore, .github/, .brain/presence/, .brain/connections/, .brain/journal/]
-updated: 2026-09-26T21:01:15Z
+updated: 2026-09-28T15:19:42Z
 ---
 Coordination lane, not a build lane — owns no files under `meals/`. Job: periodic sweep of `.brain/` (presence notes, `connections/`, journal) to catch stalled lanes, unresolved `waiting-on` edges, and merge-order violations against the diagram in PLAN.md (`Concurrency lanes`); message a stuck lane; keep this note's `status` honest. Comms: live `SendMessage` between lanes (Steve, 2026-09-25) — do NOT arm a watcher on `dm/pm/pending`.
 

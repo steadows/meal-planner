@@ -450,12 +450,12 @@ volumes:
   mealie-data:
 ```
 
-- [ ] Run `docker compose up -d` and open `http://localhost:9925`.
-- [ ] Log in with the default `changeme@example.com` / `MyPassword`, then change it right away.
-- [ ] Set `PUID`/`PGID` to your host user IDs (the default is 911) so the data volume is writable. Set `TZ`, or meal-plan dates will be off.
-- [ ] Create a long-lived API token at `/user/profile/api-tokens`. Interactive API docs are at `/docs`.
+- [x] Run `docker compose up -d` and open `http://localhost:9925`. (v3.28.0 from `docker/mealie/compose.yaml`, on 127.0.0.1 only, 2026-09-26.)
+- [x] Log in with the default `changeme@example.com` / `MyPassword`, then change it right away. (Replaced with a local admin login; the password is in the macOS Keychain under `meal-planner-mealie-admin`.)
+- [x] Set `PUID`/`PGID` to your host user IDs (the default is 911) so the data volume is writable. Set `TZ`, or meal-plan dates will be off. (In the untracked `docker/mealie/.env`; `TZ` is in the compose file.)
+- [x] Create a long-lived API token at `/user/profile/api-tokens`. Interactive API docs are at `/docs`. (Token `meal-planner` is in `.env`; `tests/test_mealie_client_integration.py` passes against it.)
 - [ ] Import the Phase 0 recipes by URL and fix any the importer mangled.
-- [ ] Tag recipes by slot: `protein`, `grain`, `veg-tray`, `sauce`, `kid-cook`, `lunch-build`.
+- [~] Tag recipes by slot: `protein`, `grain`, `veg-tray`, `sauce`, `kid-cook`, `lunch-build`. (The tags exist, plus `rotation` and `batch-ok`; tagging waits on the imports.)
 - [ ] Set the machine to never sleep, and start Docker on boot.
 
 Not yet tested: whether the importer handles every recipe site Steve uses.
