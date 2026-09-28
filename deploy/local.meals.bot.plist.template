@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- A template: deploy/install.sh fills in the ROOT, UV and PATH placeholders. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>local.meals.bot</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-i</string>
+        <string>@@UV@@</string>
+        <string>run</string>
+        <string>python</string>
+        <string>-m</string>
+        <string>meals</string>
+        <string>bot</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>@@ROOT@@</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>@@PATH@@</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>@@ROOT@@/data/logs/launchd-bot.log</string>
+    <key>StandardErrorPath</key>
+    <string>@@ROOT@@/data/logs/launchd-bot.log</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+</dict>
+</plist>

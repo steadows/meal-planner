@@ -285,36 +285,36 @@ tr:last-child td { border-bottom: 0; }
 "tasks": [
 {
 "id": "3.1",
-"text": "`/steadows-seams` + tier (expect ordinary)",
-"status": "todo",
+"text": "`/steadows-seams` + tier (expect ordinary). Done 2026-09-26: tier HIGH (the uninstall drain is a locking seam, the rollback net for the Chrome/cart lock); seam map `.context/seams/P3.md` (decisions D1–D13)",
+"status": "done",
 "gate": true
 },
 {
 "id": "3.2",
-"text": "RED: rendered plists pass `plutil -lint`; `install.sh --dry-run` output; tz assert; uninstall waits for `meals bot|job` processes incl. a spawned job that hasn't taken its lock",
-"status": "todo",
+"text": "RED: rendered plists pass `plutil -lint`; `install.sh --dry-run` output; tz assert; uninstall waits for `meals bot|job` processes incl. a spawned job that hasn't taken its lock Done: tests/test_deploy.py (#29)",
+"status": "done",
 "gate": true
 },
 {
 "id": "3.3",
-"text": "`deploy/*.plist.template`: bot (`caffeinate -i`, KeepAlive, ThrottleInterval 30, PYTHONUNBUFFERED), sat_propose (Sat 08–20 hourly), sat_nudge (Sat 16–21 hourly), sun_autoapprove (Sun 08–20 hourly), reconcile (`{Minute: 15}`), all RunAtLoad",
-"status": "todo"
+"text": "`deploy/*.plist.template`: bot (`caffeinate -i`, KeepAlive, ThrottleInterval 30, PYTHONUNBUFFERED), sat_propose (Sat 08–20 hourly), sat_nudge (Sat 16–21 hourly), sun_autoapprove (Sun 08–20 hourly), reconcile (`{Minute: 15}`), all RunAtLoad (#29)",
+"status": "done"
 },
 {
 "id": "3.4",
-"text": "`deploy/install.sh` (idempotent; bakes uv/claude PATH; asserts America/Detroit; `launchctl bootstrap gui/$UID`; `--dry-run` is the only mode used before P4.8) + `uninstall.sh` (boot out all five → wait for `meals bot|job` processes → take every lock in `data/locks` at once, non-blocking poll, naming holders → 'safe to switch code') + `deploy/README.md` Stuck-run section",
-"status": "todo"
+"text": "`deploy/install.sh` (idempotent; bakes uv/claude PATH; asserts America/Detroit; `launchctl bootstrap gui/$UID`; `--dry-run` is the only mode used before P4.8) + `uninstall.sh` (boot out all five → wait for `meals bot|job` processes → take every lock in `data/locks` at once, non-blocking poll, naming holders → 'safe to switch code') + `deploy/README.md` Stuck-run section (#29)",
+"status": "done"
 },
 {
 "id": "3.5",
-"text": "`/simplify` → `/steadows-code-review` → PR",
-"status": "todo",
+"text": "`/simplify` → `/steadows-code-review` → PR. Done: PR #29 (ultrareview + 3 convergence passes: CLOSED)",
+"status": "done",
 "gate": true
 },
 {
 "id": "3.6",
-"text": "`/steadows-verify`: phase gate",
-"status": "todo",
+"text": "`/steadows-verify`: phase gate. Done 2026-09-26: READY (#29)",
+"status": "done",
 "gate": true
 }
 ]
