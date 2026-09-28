@@ -3,7 +3,7 @@ type: presence
 agent: search
 feature: "Recipe search (/find) and the Saturday planner: prefs profile, prompts, WeekProposal"
 status: done
-phase: DONE — PR #10 merged to main (a26be74, 2026-09-26). Follow-ups: planner.apply_reply (waits on bot typed Intent args), fallback pantry question (waits on Pantry.list_items)
+phase: DONE (PR #10 merged a26be74). Next: _rotation_pool MealieUnavailable skip + live_claude gate on feat/search-<topic> (unblocked by #18); apply_reply waits on bot typed Intent args. Handoff: ~/meal-planner-search/.context/HANDOFF-2026-09-26-search-lane-e.md
 owns_branches: ["search"]
 plan: docs/PLAN.md (Implementation plan, Concurrency lanes)
 tracker_epic: none
@@ -11,7 +11,7 @@ current_worktree: /Users/stevemeadows/meal-planner-search
 current_branch: feat/search
 current_ticket: none
 touches: [.brain/connections/bot-runtime-design-waiting-on.md, .brain/connections/mealie-wiring-waiting-on.md, .brain/journal/2026-09-26.md, .brain/presence/search.md, .brain/presence/wiring.md]
-updated: 2026-09-26T14:22:36Z
+updated: 2026-09-28T15:19:38Z
 ---
 Lane E. `search.find(request)` returns 3-5 RecipeOptions filtered by `prefs.yaml` (seed it from PLAN.md → Preferences profile). `planner.propose(week)` returns a WeekProposal in the chosen mode (mix default, recipes, components). Uses the Mealie fake until [[mealie]] lands. Waits on [[contracts-search-waiting-on]]. Unblocks [[search-wiring-waiting-on]].
 
