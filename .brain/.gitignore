@@ -6,3 +6,4 @@
 index/
 *.db
 dm/
+.hook-errors.*.tmp

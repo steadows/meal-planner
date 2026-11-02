@@ -8,7 +8,7 @@ blocks: []
 files: [meals/contracts.py]
 discovered: 2026-09-26T03:24:11Z
 resolved: null
-updated: 2026-09-27T00:22:08Z
+updated: 2026-09-28T15:45:00Z
 ---
 **Status (contracts, 2026-09-26 ~20:18 EDT): the Protocol line is on main** (#24, merged c289c5b). This note's original close condition is met. It stays at `watch` because it carries the F2 joint-PR plan and Steve's rulings below. **Close it when the joint F2 PR merges.**
 
@@ -81,3 +81,19 @@ If both land in one contracts PR, fine. Otherwise whichever merges first is 2.
 - The note stays `watch` for the one remaining item, the **F2 joint PR**: [[contracts]]' `feat/contracts-f2-ask-date` (the fake half, the plenty floor, and the datetime/strip parity fixes), with pantry's 2b stacked on it.
 - 2b also swaps `_PantryTools` for `Pantry`.
 - Resolve the note when that PR merges.
+
+**Status 2026-09-28 ([[contracts]] wrap).** The fake half is pushed: `feat/contracts-f2-ask-date` @ 3abb7f9, all pre-PR gates done. [[pantry]]'s 2b is local on `feat/pantry-f2-ask-date` (12a9e7e, 41cf02c, de616df), not pushed yet.
+- **Open product question for Steve, raised by [[pantry]]'s code review:** under F2, a "still good" that loses to a later 90% point stores nothing. A later back-dated purchase or seed correction can then shorten the interval and make the item due inside the week, even the same day. [[contracts]]' own review raised the same case (scored 25).
+- **The proposed fix is floor semantics.** `next_ask_on` becomes a floor: the ask date = max(next_ask_on, 90% point) when both are known, and `confirm_stocked` stores max(stored, pushed).
+- **Side effect:** a stored `next_ask_on` can no longer pull an ask EARLIER than the 90% point. Today's Protocol says the ask date "is next_ask_on when set". No live producer of an early `next_ask_on` exists, but `test_fake_pantry_next_ask_on_replaces_the_interval_rule`'s rice row changes.
+- **If Steve says "at least a week, always":** [[contracts]] reworks the fake, the Protocol and test_contracts on its branch (`_ask_date`, `confirm_stocked`, class and method docstrings, about 4 rows), and [[pantry]] rebases 2b.
+- **Otherwise it ships as is,** and [[pantry]] documents and pins the case.
+- [[contracts]] recommends the floor.
+
+**Status 2026-09-28 11:45 EDT ([[pantry]] wrap).** 2b is now PUSHED: `origin/feat/pantry-f2-ask-date` @ de616df (stacked on 3abb7f9). There's no PR yet, and the Codex sweep hasn't run.
+- [[pantry]] also recommends the floor.
+- Steve was asked, answered "wants to clarify", then asked every lane to wrap. **The question is still open.** Neither lane changes F2 until he answers.
+- Whichever way he answers, pantry still owes the review fixes:
+  - F5: SqlitePantry's docstring mirrors the Protocol in full;
+  - F9: the parity EXTRAS ids are derived from the sample, not hard-coded.
+- The as-built path adds F3 (the tool description must not promise the ask "stands") and F2 (a test pinning the behaviour inside the week).

@@ -3,15 +3,15 @@ type: presence
 agent: wiring
 feature: "Scheduled jobs and end-to-end: sat_propose, sat_nudge, sun_autoapprove, cart_fill, entry point"
 status: active
-phase: "Phase 5 / Lane G, ADR P3 3.1–3.6 (launchd deploy) DONE in PR #29, awaiting Steve's merge go: all gates closed (ultrareview converged, verify READY), plan P3 6/6. Nothing activated (P4.8). P2 merged (#26); P1 merged (#20)."
+phase: "Phase 5 / Lane G, ADR P3 3.1–3.6 MERGED (PR #29 = 46d170f, 2026-09-28T15:23Z, on Steve's relayed go). Plan P0–P3 done; next P4 (integration, acceptance, activation at P4.8), gated on bot/cart/search/mealie/pantry. P2 #26, P1 #20."
 owns_branches: ["wiring"]
 plan: docs/PLAN.md (Implementation plan, Concurrency lanes)
 tracker_epic: none
 current_worktree: /Users/stevemeadows/meal-planner-wiring
-current_branch: feat/wiring-p3
+current_branch: feat/wiring
 current_ticket: none
-touches: [deploy/, tests/test_deploy.py, architecture-plan.html, docs/PLAN.md]
-updated: 2026-09-27T03:41:43Z
+touches: []
+updated: 2026-09-28T15:24:02Z
 ---
 Lane G — last. Jobs keyed on weekly_plan.status so every job is safe to rerun; one Chrome session at a time via a lock; bot never blocks (background subprocesses); max two concurrent claude processes. Done when a full Saturday dry run works end to end (M4). Waits on [[pantry-wiring-waiting-on]], [[mealie-wiring-waiting-on]], [[search-wiring-waiting-on]] and [[bot-wiring-waiting-on]].
 
