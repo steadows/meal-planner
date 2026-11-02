@@ -269,10 +269,8 @@ class SqlitePantry:
         after a purchase can set the ask again. Callers dedupe replies (e.g. on the Telegram
         update_id) before calling.
 
-        Item names are unique after `strip().casefold()`, which is stricter than the schema's
-        ASCII-only `COLLATE NOCASE`, so duplicate inserts are rejected. `name` is compared with
-        item names and aliases the same way, and an exact name beats another item's alias. An
-        unknown name returns None and writes nothing. A datetime `on` counts as `on.date()`, its
+        `name` is compared with item names and aliases after `strip().casefold()`, and an exact
+        name beats another item's alias. An unknown name returns None and writes nothing. A datetime `on` counts as `on.date()`, its
         day in its own timezone: pass the local day, not a UTC timestamp."""
         on = _as_day(on)
         with self._write():
@@ -286,11 +284,12 @@ class SqlitePantry:
             )
             updated = self._reread(item.id)  # before COMMIT, so no other writer's change leaks in
         logger.info(
-            "pantry: %s %s on %s; next ask %s",
+            "pantry: %s %s on %s; next ask %s (floor %s)",
             item.name,
             "plenty" if plenty else "still good",
             on,
             _ask_date(updated),
+            updated.next_ask_on,
         )
         return updated
 
@@ -371,9 +370,10 @@ class SqlitePantry:
         An existing item gets its product map rewritten from the seed, but never its status, last
         purchase or history. Its interval follows the seed only until it has two distinct purchase
         dates (then learning owns it). A seed row that ends up a staple with an interval but no
-        purchase or ask date (already in the house) gets a first ask at 90% of its interval from
-        `on`; a re-run never moves it. Raises ValueError, writing nothing, when two items would
-        claim the same name or alias.
+        purchase or ask date (already in the house) gets a first reminder (`next_ask_on`) at 90% of
+        its interval from `on`; a re-run never rewrites a stored `next_ask_on`, though a changed
+        interval can still move the ask date, the later of the two. Raises ValueError, writing
+        nothing, when two items would claim the same name or alias.
         """
         on = _as_day(on)
         seeds = tuple(items)
@@ -442,7 +442,7 @@ class SqlitePantry:
         columns = {
             **_product_map(seed),
             "typical_interval_days": interval,
-            # Only a new reminder is written; an existing ask date is never moved.
+            # Only a new reminder is written; a stored next_ask_on is never rewritten.
             **({"next_ask_on": reminder.isoformat()} if reminder is not None else {}),
         }
         assignments = ", ".join(f"{column} = ?" for column in columns)
