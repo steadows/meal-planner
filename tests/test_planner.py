@@ -419,7 +419,7 @@ def test_no_served_favorite_is_not_a_mealie_outage(
     new_recipes: tuple[RecipeOption, ...],
     unavailable: tuple[str, ...],
 ) -> None:
-    """A KeyError is Mealie answering 404, so only all-MealieUnavailable means it's unusable.
+    """A KeyError is an unknown slug, so only all-MealieUnavailable means Mealie is unusable.
     (No favorites at all is test_an_empty_pool_gives_only_new_finds.)"""
     four = (*new_recipes, sample_recipe)
     mealie = FakeMealieClient(

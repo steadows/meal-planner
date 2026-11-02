@@ -198,7 +198,7 @@ def _pantry_questions(pantry: Pantry, week_start: date) -> tuple[str, ...]:
 def _rotation_pool(mealie: MealieClient) -> dict[str, RecipeOption]:
     """Slug -> recipe for every `rotation` favorite. A slug whose recipe is gone, or that Mealie
     can't serve, is skipped. Raises MealieUnavailable if every fetch was unavailable: Mealie may be
-    down or its token revoked. A KeyError is Mealie answering 404, so it never counts."""
+    down or its token revoked. A KeyError is an unknown slug, not Mealie failing, so it never counts."""
     pool: dict[str, RecipeOption] = {}
     slugs = mealie.list_by_tag(ROTATION_TAG)
     unavailable: list[MealieUnavailable] = []
