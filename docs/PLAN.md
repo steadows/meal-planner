@@ -544,11 +544,11 @@ tests/
 
 | Contract | Shape | Used by |
 | --- | --- | --- |
-| Database schema | `pantry_item`, `purchase_log`, `weekly_plan`, `meal_rating` (Pantry rules section); `job_run`, one claim per scheduled job per week (ADR-0001; only `plan_state` reads and writes it) | pantry, planner, cart, bot, plan\_state |
-| `claude_runner.run(prompt, schema=None, chrome=False, timeout=600, hold_fds=())` | Returns validated JSON, or raises with the raw output attached. A `flock` lock passed in `hold_fds` (a job or Chrome lock) stays held while claude, or anything it started, still has the fd, even if the caller dies first (ADR-0001) | search, planner, intents, cart |
+| Database schema | `pantry_item`, `purchase_log`, `weekly_plan`, `meal_rating` (Pantry rules section); `job_run`, one claim per scheduled job per week (ADR-0001; only `plan_state` reads and writes it); `telegram_update`, one row per Telegram update the bot has claimed, so a replayed update is applied once (only `meals/bot/` reads and writes it) | pantry, planner, cart, bot, plan\_state |
+| `claude_runner.run(prompt, schema=None, chrome=False, timeout=600, hold_fds=(), web=True)` | Returns validated JSON, or raises with the raw output attached. A `flock` lock passed in `hold_fds` (a job or Chrome lock) stays held while claude, or anything it started, still has the fd, even if the caller dies first (ADR-0001). `web=False` runs with no built-in tools at all (`--tools ""`), for a run whose prompt can carry web-sourced text and whose output drives writes (bot's free-text parse). | search, planner, intents, cart |
 | `RecipeOption` | name, url, source, hands\_on\_min, servings, batch\_ok, fit\_note, ingredients\[\], steps\[\], mealie\_slug (set only by the Mealie client; Claude's output can never set it) | search, planner, bot |
 | `WeekProposal` | week\_start (must be a Sunday, the cook day), mode, recipe\_options\[\], components{}, lunch\_builds\[\], kid\_nights\[\], pantry\_questions\[\] | planner, bot, cart |
-| `Intent` | kind (pick, swap, custody, pantry\_flip, add\_item, find, save, rate, mode), args | bot, pantry, planner |
+| `Intent` | a union of one model per kind (pick, swap, custody, pantry\_flip, add\_item, find, save, rate, mode), each with its own typed args; `IntentKind` names the kinds | bot, pantry, planner |
 | `CartList` / `CartReport` | week\_start (a Sunday), items with qty, unit, meijer\_url, preferred\_name / added\[\], substituted\[\], missing\[\], subtotal | cart, bot |
 | `mealie_client` interface | `import_url()`, `get_recipe()`, `list_by_tag()`, `set_meal_plan()` | search, planner, cart |
 | `pantry` interface | `staples_due()`, `flip_status()`, `confirm_stocked()` ("still good" / "have plenty"), `log_purchase()`, `get_item()`, `list_items()` | planner, bot, cart |

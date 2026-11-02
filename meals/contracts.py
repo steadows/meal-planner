@@ -23,11 +23,15 @@ from pydantic.json_schema import SkipJsonSchema
 
 PlanMode = Literal["mix", "recipes", "components"]
 Custody = Literal["wed+fri_sat", "wed+sat_sun"]
+ComponentSlot = Literal["proteins", "grains", "veg", "sauces", "fresh"]
 IntentKind = Literal[
     "pick", "swap", "custody", "pantry_flip", "add_item", "find", "save", "rate", "mode"
 ]
 PantryCategory = Literal["staple", "perishable", "fallback"]
 PantryStatus = Literal["have", "buy_next_time"]
+
+Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+Number = Annotated[int, Field(ge=1)]
 
 MAX_PANTRY_QUESTIONS = 3
 
@@ -147,9 +151,104 @@ class WeekProposal(Contract):
     )
 
 
-class Intent(Contract):
-    kind: IntentKind
-    args: dict[str, str] = Field(description="Kind-specific arguments, e.g. {'item': 'eggs'}")
+class PickArgs(Contract):
+    numbers: tuple[Number, ...] = Field(min_length=1)
+
+
+class PickIntent(Contract):
+    kind: Literal["pick"]
+    args: PickArgs
+
+
+class SwapArgs(Contract):
+    slot: ComponentSlot
+    remove: Text
+    add: Text | None
+
+
+class SwapIntent(Contract):
+    kind: Literal["swap"]
+    args: SwapArgs
+
+
+class CustodyArgs(Contract):
+    custody: Custody
+
+
+class CustodyIntent(Contract):
+    kind: Literal["custody"]
+    args: CustodyArgs
+
+
+class PantryFlipArgs(Contract):
+    item: Text
+    to: Literal["buy_next_time", "still_good", "plenty"]
+
+
+class PantryFlipIntent(Contract):
+    kind: Literal["pantry_flip"]
+    args: PantryFlipArgs
+
+
+class AddItemArgs(Contract):
+    item: Text
+
+
+class AddItemIntent(Contract):
+    kind: Literal["add_item"]
+    args: AddItemArgs
+
+
+class FindArgs(Contract):
+    request: Text
+
+
+class FindIntent(Contract):
+    kind: Literal["find"]
+    args: FindArgs
+
+
+class SaveArgs(Contract):
+    number: Number
+    add_to_week: bool
+
+
+class SaveIntent(Contract):
+    kind: Literal["save"]
+    args: SaveArgs
+
+
+class RateArgs(Contract):
+    target: Text
+    rater: Literal["steve", "miles"]
+    rating: Literal[-1, 1]
+
+
+class RateIntent(Contract):
+    kind: Literal["rate"]
+    args: RateArgs
+
+
+class ModeArgs(Contract):
+    mode: PlanMode
+
+
+class ModeIntent(Contract):
+    kind: Literal["mode"]
+    args: ModeArgs
+
+
+Intent = (
+    PickIntent
+    | SwapIntent
+    | CustodyIntent
+    | PantryFlipIntent
+    | AddItemIntent
+    | FindIntent
+    | SaveIntent
+    | RateIntent
+    | ModeIntent
+)
 
 
 class CartItem(Contract):
@@ -192,7 +291,14 @@ class PantryItem(Contract):
     status: PantryStatus = "have"
     typical_interval_days: int | None = Field(default=None, gt=0)
     last_purchased: date | None = None
-    next_ask_on: date | None = None
+    next_ask_on: date | None = Field(
+        default=None,
+        description=(
+            "A floor under the ask date, not the ask date itself. The ask date is the later of "
+            "this and 90% of the interval after the last purchase, and a buy_next_time item is "
+            "due at once. Use staples_due to know what is due."
+        ),
+    )
     default_qty: float | None = None
     default_unit: str | None = None
     meijer_product_id: str | None = None
@@ -222,8 +328,22 @@ def validate_claude_output(schema: type[M], payload: object) -> M:
 
 def describe_rejection(schema: type[BaseModel], exc: ValidationError) -> str:
     """A ClaudeRunnerError reason naming the first rejected field and why, so a refused field (a
-    possible injection) doesn't read like an ordinary type mismatch in the logs."""
-    first = exc.errors()[0]
+    possible injection) doesn't read like an ordinary type mismatch in the logs. Union branches
+    whose `kind` didn't match are skipped, so the field named is in the branch Claude meant."""
+    errors = exc.errors()
+    mismatched_branches: set[tuple[str | int, ...]] = {
+        error["loc"][:-1]
+        for error in errors
+        if error["loc"][-1:] == ("kind",) and error["type"] == "literal_error"
+    }
+    first = next(
+        (
+            error
+            for error in errors
+            if not any(error["loc"][: len(prefix)] == prefix for prefix in mismatched_branches)
+        ),
+        errors[0],
+    )
     where = ".".join(str(part) for part in first["loc"]) or "(root)"
     return (
         f"output failed {schema.__name__} validation ({exc.error_count()} error(s); "
@@ -249,7 +369,8 @@ class MealieClient(Protocol):
 
     def get_recipe(self, slug: str) -> RecipeOption:
         """The recipe, with `mealie_slug` set to `slug`. Raises KeyError for an unknown slug, and
-        MealieUnavailable for any other failure."""
+        MealieUnavailable for the failures the MealieUnavailable docstring names. Any other error,
+        a bug included, propagates as is."""
         ...
 
     def list_by_tag(self, tag: str) -> tuple[str, ...]:
@@ -265,13 +386,16 @@ class MealieClient(Protocol):
 class Pantry(Protocol):
     """The pantry rules (PLAN.md, Pantry rules).
 
-    An item's *ask date* is `next_ask_on` when set; otherwise `last_purchased` plus
-    ceil(9 * interval / 10) days (PLAN: ask at 90%) when both are known; otherwise it has none.
+    An item's *90% point* is `last_purchased` plus ceil(9 * interval / 10) days (PLAN: ask at
+    90%) when both are known. Its *ask date* is the later of `next_ask_on` and the 90% point,
+    whichever of them are known; with neither, it has none. So `next_ask_on` is a floor: the ask
+    date is never before it. A `buy_next_time` flag still makes an item due at once.
 
-    Item names are unique under casefold, which is stricter than the schema's ASCII-only
-    `COLLATE NOCASE`, so implementations reject a duplicate on insert. Every method taking a
-    `name` matches it against item names and aliases after `strip().casefold()`, and an exact
-    name beats another item's alias. An unknown name returns None and writes nothing.
+    Item names are unique after `strip().casefold()`, which is stricter than the schema's
+    ASCII-only `COLLATE NOCASE`, so implementations reject a duplicate on insert. Every method
+    taking a `name` compares it with item names and aliases the same way, and an exact name beats
+    another item's alias. An unknown name returns None and writes nothing. A datetime `on` counts
+    as `on.date()`, its day in its own timezone: pass the local day, not a UTC timestamp.
     """
 
     def staples_due(self, on: date) -> tuple[PantryItem, ...]:
@@ -286,14 +410,18 @@ class Pantry(Protocol):
 
     def confirm_stocked(self, name: str, on: date, plenty: bool = False) -> PantryItem | None:
         """Steve says the item is still stocked on `on`: "still good", or "have plenty" (`plenty`).
-        Status becomes `have`, and the next ask moves to a week after `on` (still good) or one
-        interval after it (plenty; a week with no interval), unless the ask date is already
-        later: this never pulls an ask earlier. Logs no purchase and never changes the interval.
+        Status becomes `have`. The push is a week after `on` (still good) or one interval after it
+        (plenty; a week with no interval), never less than a week. The ask date stays on or after
+        the push, even if a back-dated purchase later shortens the interval; only a newer purchase
+        clears that (`log_purchase`). A later `buy_next_time` flip still makes the item due at
+        once (`staples_due`). So `next_ask_on` becomes the later of the push and any stored
+        `next_ask_on`, and a later 90% point still sets the ask date. The call itself never pulls
+        an ask earlier. Logs no purchase and never changes the interval.
         Returns the updated item.
 
         Repeating a reply for the same `on` changes nothing only while nothing else has written
         the item: a redelivered "still good" after an "out of X" flip sets `have` again, and one
-        after a purchase sets the ask again. Callers dedupe replies (e.g. on the Telegram
+        after a purchase can set the ask again. Callers dedupe replies (e.g. on the Telegram
         update_id) before calling."""
         ...
 

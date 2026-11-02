@@ -391,15 +391,25 @@ def test_a_favorite_mealie_cannot_serve_is_skipped_with_a_warning(
     assert all(record.exc_info is None for record in caplog.records)
 
 
+@pytest.mark.parametrize(
+    ("unavailable", "deleted"),
+    [((FAVORITE, "second-favorite"), ()), ((FAVORITE,), ("gone-slug",))],
+    ids=["all-unavailable", "deleted-and-unavailable"],
+)
 def test_propose_fails_loudly_when_mealie_serves_no_favorite(
-    patched_claude: FakeClaudeRunner, fake_pantry: FakePantry, sample_recipe: RecipeOption
+    patched_claude: FakeClaudeRunner,
+    fake_pantry: FakePantry,
+    sample_recipe: RecipeOption,
+    unavailable: tuple[str, ...],
+    deleted: tuple[str, ...],
 ) -> None:
-    """Every call failing can mean Mealie is down or its token revoked: not a web-only week."""
-    slugs = (FAVORITE, "second-favorite")
+    """Nothing served and something unavailable can mean Mealie is down, its token revoked or its
+    parser broken: not a web-only week. A deleted favorite alongside doesn't change that (a 404
+    only proves the recipe lookup works)."""
     mealie = FakeMealieClient(
-        recipes=dict.fromkeys(slugs, sample_recipe),
-        tags={planner.ROTATION_TAG: slugs},
-        unavailable=slugs,
+        recipes=dict.fromkeys(unavailable, sample_recipe),
+        tags={planner.ROTATION_TAG: (*unavailable, *deleted)},
+        unavailable=unavailable,
     )
 
     with pytest.raises(MealieUnavailable, match="2 rotation favorites") as raised:
@@ -409,22 +419,16 @@ def test_propose_fails_loudly_when_mealie_serves_no_favorite(
     assert patched_claude.calls == []
 
 
-@pytest.mark.parametrize(
-    "unavailable", [(), ("broken-b",)], ids=["all-deleted", "deleted-and-unavailable"]
-)
-def test_no_served_favorite_is_not_a_mealie_outage(
+def test_all_deleted_favorites_are_not_a_mealie_outage(
     patched_claude: FakeClaudeRunner,
     fake_pantry: FakePantry,
     sample_recipe: RecipeOption,
     new_recipes: tuple[RecipeOption, ...],
-    unavailable: tuple[str, ...],
 ) -> None:
-    """A KeyError is an unknown slug, so only all-MealieUnavailable means Mealie is unusable.
+    """Every favorite gone (KeyError) is stale tags, not Mealie failing: plan from web finds.
     (No favorites at all is test_an_empty_pool_gives_only_new_finds.)"""
     four = (*new_recipes, sample_recipe)
-    mealie = FakeMealieClient(
-        tags={planner.ROTATION_TAG: ("gone-a", "broken-b")}, unavailable=unavailable
-    )
+    mealie = FakeMealieClient(tags={planner.ROTATION_TAG: ("gone-a", "gone-b")})
     patched_claude.queue(_draft(four, favorites=[]))
 
     assert _propose(mealie, fake_pantry).recipe_options == four

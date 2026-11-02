@@ -85,6 +85,15 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
             PRIMARY KEY (job, week_start)
         )""",
     ),
+    (
+        # One row per Telegram update the bot has claimed, so a replayed update is applied once.
+        # Only meals/bot/ reads or writes it, and the bot prunes old rows. `seen_at` is SQLite's
+        # UTC CURRENT_TIMESTAMP text, 'YYYY-MM-DD HH:MM:SS'.
+        """CREATE TABLE telegram_update (
+            update_id INTEGER PRIMARY KEY,
+            seen_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""",
+    ),
 )
 
 
