@@ -202,7 +202,8 @@ class HttpMealieClient:
     def get_recipe(self, slug: str) -> RecipeOption:
         try:
             return self._recipe_option(slug)
-        except (httpx.HTTPError, ValueError) as exc:  # KeyError (no such recipe) passes through
+        # KeyError (no such recipe) passes through. InvalidURL is a Location httpx can't parse.
+        except (httpx.HTTPError, httpx.InvalidURL, ValueError) as exc:
             raise MealieUnavailable(_unavailable_reason(slug, exc)) from exc
 
     def _recipe_option(self, slug: str) -> RecipeOption:
@@ -277,7 +278,7 @@ class HttpMealieClient:
         if response.status_code == 404:
             raise KeyError(slug)
         response.raise_for_status()
-        return _Recipe.model_validate(response.json())
+        return _Recipe.model_validate_json(response.content)
 
     def _create_entry(self, day: str, recipe_id: UUID) -> None:
         entry = {
