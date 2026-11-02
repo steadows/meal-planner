@@ -1,22 +1,24 @@
 import inspect
+import json
 import subprocess
 import sys
 import tomllib
 from collections.abc import Callable
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 import pytest
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
-from meals import claude_runner
+from meals import claude_runner, contracts
 from meals.contracts import (
     CartItem,
     CartList,
     CartReport,
     ClaudeRunnerError,
     Components,
+    Contract,
     Intent,
     MealieClient,
     MealieUnavailable,
@@ -103,14 +105,16 @@ def test_week_proposal_caps_pantry_questions_at_three() -> None:
         (Intent, "kind", "delete_everything"),
     ],
 )
-def test_closed_vocabularies_reject_unknown_values(
-    model: type[BaseModel], field: str, bad: str
-) -> None:
+def test_closed_vocabularies_reject_unknown_values(model: Any, field: str, bad: str) -> None:
+    # Intent is a union of one model per kind (contracts-8), not a class: validate through a
+    # TypeAdapter, from a pick whose args fit.
     base: dict[str, object] = (
-        _proposal().model_dump() if model is WeekProposal else {"kind": "pick", "args": {}}
+        _proposal().model_dump()
+        if model is WeekProposal
+        else {"kind": "pick", "args": {"numbers": [1]}}
     )
     with pytest.raises(ValidationError):
-        model.model_validate(base | {field: bad})
+        TypeAdapter(model).validate_python(base | {field: bad})
 
 
 def test_models_are_frozen(sample_recipe: RecipeOption) -> None:
@@ -120,7 +124,9 @@ def test_models_are_frozen(sample_recipe: RecipeOption) -> None:
 
 def test_models_reject_unknown_fields() -> None:
     with pytest.raises(ValidationError):
-        Intent.model_validate({"kind": "pick", "args": {}, "confidence": 0.9})
+        TypeAdapter(Intent).validate_python(
+            {"kind": "pick", "args": {"numbers": [1]}, "confidence": 0.9}
+        )
 
 
 def test_cart_report_subtotal_is_non_negative_cents() -> None:
@@ -202,6 +208,210 @@ def test_claude_runner_error_keeps_raw_output() -> None:
     assert "invalid JSON" in str(err)
 
 
+# ── Intent: one typed model per kind ─────────────────────────────────────────
+
+# Seam map contracts-8-bot-asks (AC-1 to AC-5) and bot's ask (2026-11-02, §1): Intent is a plain
+# union of nine `XIntent(kind: Literal["x"], args: XArgs)` models. Per kind: the variant, its args
+# model, and args that fit, typed as the contract holds them. The new names are reached through the
+# module (`contracts.X`), so a missing one fails its own test and the rest of the file still runs.
+INTENT_VARIANTS: dict[str, tuple[str, str, dict[str, object]]] = {
+    "pick": ("PickIntent", "PickArgs", {"numbers": (2, 3)}),
+    "swap": (
+        "SwapIntent",
+        "SwapArgs",
+        {"slot": "veg", "remove": "peppers + onion", "add": "roasted zucchini"},
+    ),
+    "custody": ("CustodyIntent", "CustodyArgs", {"custody": "wed+sat_sun"}),
+    "pantry_flip": (
+        "PantryFlipIntent",
+        "PantryFlipArgs",
+        {"item": "olive oil", "to": "still_good"},
+    ),
+    "add_item": ("AddItemIntent", "AddItemArgs", {"item": "eggs"}),
+    "find": ("FindIntent", "FindArgs", {"request": "a sheet-pan salmon dinner"}),
+    "save": ("SaveIntent", "SaveArgs", {"number": 2, "add_to_week": True}),
+    "rate": (
+        "RateIntent",
+        "RateArgs",
+        {"target": "shredded chicken", "rater": "miles", "rating": -1},
+    ),
+    "mode": ("ModeIntent", "ModeArgs", {"mode": "components"}),
+}
+
+
+def _intent(payload: object) -> Any:
+    """Validate as `contracts.Intent`, the union, the way bot validates Claude's output."""
+    return TypeAdapter(contracts.Intent).validate_python(payload)
+
+
+def _as_json(value: object) -> Any:
+    """As Claude's JSON output carries it: tuples arrive as lists."""
+    return json.loads(json.dumps(value))
+
+
+@pytest.mark.parametrize(
+    ("kind", "args"),
+    [
+        *(pytest.param(kind, args, id=kind) for kind, (_, _, args) in INTENT_VARIANTS.items()),
+        # "cancel the zucchini": add is None, which drops the entry (bot's ask, SwapArgs).
+        pytest.param("swap", {"slot": "veg", "remove": "zucchini", "add": None}, id="swap-drop"),
+    ],
+)
+def test_each_intent_kind_validates_to_its_variant(kind: str, args: dict[str, object]) -> None:
+    variant_name, args_name, _ = INTENT_VARIANTS[kind]
+    variant, args_model = getattr(contracts, variant_name), getattr(contracts, args_name)
+
+    intent = _intent({"kind": kind, "args": _as_json(args)})
+
+    assert type(intent) is variant
+    assert intent.kind == kind
+    assert type(intent.args) is args_model
+    assert intent.args.model_dump() == args
+
+
+# AC-2: each row is the kind's fitting args from INTENT_VARIANTS with one thing changed.
+MISFITS = [
+    # Another kind's args: kind and args are checked together, not each on its own.
+    pytest.param("pick", {"item": "eggs"}, id="pick-with-add_item-args"),
+    pytest.param("find", {"item": "eggs"}, id="find-with-add_item-args"),
+    pytest.param("save", {"numbers": [2]}, id="save-with-pick-args"),
+    # A missing field. SwapArgs.add and SaveArgs.add_to_week are required, with no default.
+    pytest.param("pick", {}, id="pick-missing-numbers"),
+    pytest.param("swap", {"slot": "veg", "remove": "peppers + onion"}, id="swap-missing-add"),
+    pytest.param("save", {"number": 2}, id="save-missing-add_to_week"),
+    pytest.param("rate", {"target": "shredded chicken", "rating": -1}, id="rate-missing-rater"),
+    # An extra field.
+    pytest.param("add_item", {"item": "eggs", "qty": "2"}, id="add_item-extra-field"),
+    # A blank Text field.
+    pytest.param("add_item", {"item": "   "}, id="add_item-blank-item"),
+    pytest.param("find", {"request": "  "}, id="find-blank-request"),
+    pytest.param("pantry_flip", {"item": "  ", "to": "still_good"}, id="pantry_flip-blank-item"),
+    pytest.param(
+        "swap",
+        {"slot": "veg", "remove": " ", "add": "roasted zucchini"},
+        id="swap-blank-remove",
+    ),
+    pytest.param(
+        "swap", {"slot": "veg", "remove": "peppers + onion", "add": "  "}, id="swap-blank-add"
+    ),
+    pytest.param("rate", {"target": "\t", "rater": "miles", "rating": -1}, id="rate-blank-target"),
+    # A wrongly typed field.
+    pytest.param("add_item", {"item": 5}, id="add_item-item-not-text"),
+    pytest.param("pick", {"numbers": [2, "three"]}, id="pick-number-not-int"),
+    pytest.param("pick", {"numbers": 2}, id="pick-numbers-not-a-list"),
+    pytest.param("save", {"number": "two", "add_to_week": True}, id="save-number-not-int"),
+    pytest.param("save", {"number": 2, "add_to_week": "maybe"}, id="save-add_to_week-not-bool"),
+    # Numbers are 1-based, and a pick names at least one.
+    pytest.param("pick", {"numbers": []}, id="pick-no-numbers"),
+    pytest.param("pick", {"numbers": [2, 0]}, id="pick-number-0"),
+    pytest.param("save", {"number": 0, "add_to_week": True}, id="save-number-0"),
+    # Closed vocabularies.
+    pytest.param(
+        "swap",
+        {"slot": "dessert", "remove": "peppers + onion", "add": "roasted zucchini"},
+        id="swap-slot-not-a-components-field",
+    ),
+    # "have" is a PantryStatus, but not one of pantry_flip's three replies.
+    pytest.param("pantry_flip", {"item": "olive oil", "to": "have"}, id="pantry_flip-to-have"),
+    pytest.param(
+        "rate", {"target": "shredded chicken", "rater": "miles", "rating": 0}, id="rate-rating-0"
+    ),
+    pytest.param(
+        "rate",
+        {"target": "shredded chicken", "rater": "guest", "rating": -1},
+        id="rate-rater-guest",
+    ),
+    pytest.param("custody", {"custody": "every_day"}, id="custody-not-a-custody"),
+    pytest.param("mode", {"mode": "keto"}, id="mode-not-a-plan-mode"),
+]
+
+
+@pytest.mark.parametrize(("kind", "args"), MISFITS)
+def test_intent_args_reject_shapes_that_do_not_fit_the_kind(
+    kind: str, args: dict[str, object]
+) -> None:
+    variant_name, _, fitting = INTENT_VARIANTS[kind]
+    variant = getattr(contracts, variant_name)
+    # The fitting args pass, so the misfit is refused for the one thing that changed.
+    assert type(_intent({"kind": kind, "args": _as_json(fitting)})) is variant
+
+    with pytest.raises(ValidationError):
+        _intent({"kind": kind, "args": args})
+
+
+def test_intent_kind_names_every_variant() -> None:
+    """IntentKind stays the closed list of kinds, and matches the union's, so neither drifts."""
+    variants = [getattr(contracts, variant) for variant, _, _ in INTENT_VARIANTS.values()]
+
+    assert set(get_args(contracts.Intent)) == set(variants)
+    # Each variant pins its one kind.
+    assert [get_args(v.model_fields["kind"].annotation) for v in variants] == [
+        (kind,) for kind in INTENT_VARIANTS
+    ]
+    assert sorted(get_args(contracts.IntentKind)) == sorted(INTENT_VARIANTS)
+
+
+def test_component_slot_names_every_components_field() -> None:
+    assert sorted(get_args(contracts.ComponentSlot)) == sorted(Components.model_fields)
+
+
+@pytest.mark.parametrize("kind", list(INTENT_VARIANTS))
+def test_intent_variants_are_frozen_and_reject_extras(kind: str) -> None:
+    variant_name, args_name, args = INTENT_VARIANTS[kind]
+    variant, args_model = getattr(contracts, variant_name), getattr(contracts, args_name)
+    fitting = {"kind": kind, "args": _as_json(args)}
+    intent = variant.model_validate(fitting)
+    field = next(iter(args))
+
+    with pytest.raises(ValidationError):
+        intent.kind = kind
+    with pytest.raises(ValidationError):
+        setattr(intent.args, field, getattr(intent.args, field))
+    with pytest.raises(ValidationError):
+        variant.model_validate(fitting | {"confidence": 0.9})
+    with pytest.raises(ValidationError):
+        args_model.model_validate(_as_json(args) | {"confidence": "high"})
+
+
+def test_text_strips_and_refuses_blank() -> None:
+    text = TypeAdapter(contracts.Text)
+
+    assert text.validate_python("  olive oil\n") == "olive oil"
+    for blank in ("", "   ", "\t\n"):
+        with pytest.raises(ValidationError):
+            text.validate_python(blank)
+    # The args fields use it: Steve's " eggs " arrives stripped.
+    assert _intent({"kind": "add_item", "args": {"item": " eggs "}}).args.item == "eggs"
+    # Number, its sibling alias: 1-based.
+    number = TypeAdapter(contracts.Number)
+    assert number.validate_python(1) == 1
+    with pytest.raises(ValidationError):
+        number.validate_python(0)
+
+
+def test_intent_schema_is_one_the_claude_cli_accepts() -> None:
+    """The claude CLI refuses pydantic's `discriminator` keyword at startup, before any model call
+    (.brain/research/claude-cli-json-schema-subset.md, checked 2026-11-02 on 2.1.314). So Intent is
+    a plain union (anyOf, never oneOf), and each variant pins its kind for Claude to pick by."""
+
+    class Reply(Contract):  # an object holding Intents, as bot's IntentReply does
+        intents: tuple[contracts.Intent, ...]
+
+    schema = Reply.model_json_schema()
+    text = json.dumps(schema)
+    kinds = [
+        definition["properties"]["kind"]
+        for definition in schema.get("$defs", {}).values()
+        if "kind" in definition.get("properties", {})
+    ]
+
+    assert '"discriminator":' not in text
+    assert '"oneOf":' not in text
+    assert all("const" in kind or len(kind.get("enum", ())) == 1 for kind in kinds), kinds
+    pinned = [kind["const"] if "const" in kind else kind["enum"][0] for kind in kinds]
+    assert sorted(pinned) == sorted(INTENT_VARIANTS)
+
+
 # ── fakes satisfy the Protocols ──────────────────────────────────────────────
 
 
@@ -250,6 +460,17 @@ def test_fake_claude_records_hold_fds_with_the_real_runs_default() -> None:
 
     assert [call.hold_fds for call in fake.calls] == [(7, 9), ()]
     assert ClaudeCall("find recipes", None, False, 600).hold_fds == ()
+
+
+def test_fake_claude_records_web() -> None:
+    """Seam map contracts-8-bot-asks, `run(..., web=True)`: bot's parse run passes web=False, and
+    its tests check it did. ClaudeCall built without web, as before, gets the real run's default."""
+    fake = FakeClaudeRunner([{"a": 1}, {"a": 2}])
+    fake.run("parse Steve's reply", web=False)
+    fake.run("find recipes")
+
+    assert [call.web for call in fake.calls] == [False, True]
+    assert ClaudeCall("find recipes", None, False, 600).web is True
 
 
 def test_fake_claude_run_takes_the_real_runs_parameters() -> None:

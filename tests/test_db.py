@@ -1,8 +1,9 @@
 """meals.db: connection setup and schema migrations.
 
 Authority: the db.py docstrings, PLAN.md (Table schema; Runtime concurrency), the seam map
-(`get_db()` / `migrate()` / `MIGRATIONS`), and ADR-0001 (§`job_run`, migration 3). The expected
-schema below is transcribed by hand from PLAN.md and the ADR's DDL, not read back from the code.
+(`get_db()` / `migrate()` / `MIGRATIONS`), ADR-0001 (§`job_run`, migration 3), and seam map
+contracts-8-bot-asks (migration 4, `telegram_update`). The expected schema below is transcribed by
+hand from PLAN.md, the ADR's DDL and bot's DDL, not read back from the code.
 """
 
 import logging
@@ -78,6 +79,13 @@ JOB_RUN_SCHEMA: dict[str, Column] = {
     "finished_at": ("DATETIME", 0, None, 0),
     "outcome": ("TEXT", 0, None, 0),
     "detail": ("TEXT", 0, None, 0),
+}
+
+# Seam map contracts-8-bot-asks, migration 4 (bot's DDL): the bot claims each Telegram update once.
+# update_id INTEGER PRIMARY KEY; seen_at defaults to CURRENT_TIMESTAMP.
+TELEGRAM_UPDATE_SCHEMA: dict[str, Column] = {
+    "update_id": ("INTEGER", 0, None, 1),
+    "seen_at": ("DATETIME", 1, "CURRENT_TIMESTAMP", 0),
 }
 
 # The smallest valid row per table; tests override one column at a time.
@@ -165,9 +173,6 @@ def test_migration_3_adds_job_run_and_changes_nothing_else(
 ) -> None:
     """ADR-0001 §`job_run` and Ownership → contracts: the ADR's DDL, no FK, and no other change
     (no new columns, no weekly_plan change, no extra index)."""
-    # The ADR's three items only, so no migration 4 rides along. Fails on purpose when a later,
-    # requested migration 4 lands: update it then.
-    assert len(meals.db.MIGRATIONS) == 3
     monkeypatch.setattr(meals.db, "MIGRATIONS", meals.db.MIGRATIONS[:3])
     expected_schema = PLAN_SCHEMA | {
         "pantry_item": PLAN_SCHEMA["pantry_item"] | {"next_ask_on": ("DATE", 0, None, 0)},
@@ -182,6 +187,32 @@ def test_migration_3_adds_job_run_and_changes_nothing_else(
             actual = {row[1]: (row[2].upper(), row[3], row[4], row[5]) for row in info}
             assert actual == expected, table
         assert conn.execute("PRAGMA foreign_key_list(job_run)").fetchall() == []
+        named = _column(conn, "SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")
+        assert set(named) == set(expected_schema) | {"purchase_log_item_day"}
+
+
+def test_migration_4_adds_telegram_update_and_changes_nothing_else(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Seam map contracts-8-bot-asks, migration 4: bot's DDL, no FK, no index, and no other change."""
+    # Migration 4 only, so no migration 5 rides along. Fails on purpose when a later, requested
+    # migration 5 lands: update it then.
+    assert len(meals.db.MIGRATIONS) == 4
+    monkeypatch.setattr(meals.db, "MIGRATIONS", meals.db.MIGRATIONS[:4])
+    expected_schema = PLAN_SCHEMA | {
+        "pantry_item": PLAN_SCHEMA["pantry_item"] | {"next_ask_on": ("DATE", 0, None, 0)},
+        "job_run": JOB_RUN_SCHEMA,
+        "telegram_update": TELEGRAM_UPDATE_SCHEMA,
+    }
+
+    with _open(tmp_path) as conn:
+        assert _version(conn) == 4
+        assert _tables(conn) == set(expected_schema)
+        for table, expected in expected_schema.items():
+            info = conn.execute(f"PRAGMA table_info({table})").fetchall()
+            actual = {row[1]: (row[2].upper(), row[3], row[4], row[5]) for row in info}
+            assert actual == expected, table
+        assert conn.execute("PRAGMA foreign_key_list(telegram_update)").fetchall() == []
         named = _column(conn, "SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")
         assert set(named) == set(expected_schema) | {"purchase_log_item_day"}
 
@@ -327,6 +358,33 @@ def test_a_new_job_run_row_is_running_with_started_at_filled_in(tmp_path: Path) 
     assert (row["finished_at"], row["outcome"], row["detail"]) == (None, None, None)
 
 
+# Bot's claim (seam map contracts-8-bot-asks; bot's ask 2026-11-02, §2). The SQL is bot's; the test
+# shows the table supports it.
+CLAIM_UPDATE = (
+    "INSERT INTO telegram_update (update_id, seen_at) VALUES (?, ?) "
+    "ON CONFLICT(update_id) DO NOTHING"
+)
+
+
+def test_telegram_update_claims_each_update_once(tmp_path: Path) -> None:
+    """The first claim of an update changes one row and a replay changes none, keeping the first
+    seen_at; the retention DELETE (cutoff: now - 48 h) removes only the rows seen before it."""
+    with _open(tmp_path) as conn:
+        assert conn.execute(CLAIM_UPDATE, (1001, "2026-10-31 08:00:00")).rowcount == 1
+        assert conn.execute(CLAIM_UPDATE, (1001, "2026-11-02 09:00:00")).rowcount == 0
+        assert conn.execute(CLAIM_UPDATE, (1002, "2026-11-02 09:00:00")).rowcount == 1
+        rows = conn.execute("SELECT update_id, seen_at FROM telegram_update ORDER BY update_id")
+        assert [tuple(row) for row in rows] == [
+            (1001, "2026-10-31 08:00:00"),
+            (1002, "2026-11-02 09:00:00"),
+        ]
+
+        cutoff = "2026-10-31 09:00:00"
+        swept = conn.execute("DELETE FROM telegram_update WHERE seen_at < ?", (cutoff,))
+        assert swept.rowcount == 1
+        assert _column(conn, "SELECT update_id FROM telegram_update") == [1002]
+
+
 # ── connection settings ──────────────────────────────────────────────────────
 
 
@@ -449,6 +507,31 @@ def test_migration_3_upgrades_a_v2_database_and_keeps_its_rows(
         plans = conn.execute("SELECT week_start, components, status FROM weekly_plan")
         assert [tuple(row) for row in plans] == [("2026-09-27", "{}", "approved")]
         assert _column(conn, "SELECT count(*) FROM job_run") == [0]
+
+
+def test_migration_4_upgrades_a_v3_database_and_keeps_its_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Seam map contracts-8-bot-asks: telegram_update is the next migration, applied to a live v3
+    database without touching the pantry, weekly_plan or job_run."""
+    migrations = meals.db.MIGRATIONS
+    monkeypatch.setattr(meals.db, "MIGRATIONS", migrations[:3])
+    with _open(tmp_path) as v3:
+        _insert(v3, "pantry_item", next_ask_on="2026-10-03")
+        _insert(v3, "weekly_plan", status="approved")
+        _insert(v3, "job_run", outcome="done")
+        v3.commit()
+
+    monkeypatch.setattr(meals.db, "MIGRATIONS", migrations[:4])
+    with _open(tmp_path) as conn:
+        assert _version(conn) == 4
+        items = conn.execute("SELECT name, category, next_ask_on FROM pantry_item")
+        assert [tuple(row) for row in items] == [("olive oil", "staple", "2026-10-03")]
+        plans = conn.execute("SELECT week_start, components, status FROM weekly_plan")
+        assert [tuple(row) for row in plans] == [("2026-09-27", "{}", "approved")]
+        jobs = conn.execute("SELECT job, week_start, outcome FROM job_run")
+        assert [tuple(row) for row in jobs] == [("cart_fill", "2026-09-27", "done")]
+        assert _column(conn, "SELECT count(*) FROM telegram_update") == [0]
 
 
 def test_appended_migration_is_applied_once_in_order(
