@@ -43,7 +43,8 @@ Limit (F5): telegram.* DEBUG records go unchecked; wiring must never log telegra
 
 Bot PR 2b adds AC-3 to startup: run_bot opens the gate's claim connection on PANTRY_DB. A test that
 sends updates to the polled app does so through `serve`, inside the replaced run_polling, so a
-run_bot that closes that connection when polling ends is still served correctly.
+run_bot that closes that connection when polling ends is still served correctly. The pre-PR code
+review's CR-2 adds to AC-16: that open failing is refused like the first open failing.
 """
 
 import html
@@ -236,6 +237,34 @@ def test_refuses_unreadable_pantry_db(content: str, bot_env: Path, polls: Polls)
 
     assert bot_env.read_bytes() == before, "the refusal changed the pantry database file"
     assert polls == [], "run_bot polled before refusing"
+
+
+@pytest.mark.usefixtures("telegram")
+def test_refuses_when_the_gate_connection_cannot_open(
+    bot_env: Path, polls: Polls, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # CR-2 (the pre-PR code review), AC-16 (a refusal names the step): run_bot opens PANTRY_DB
+    # twice at startup, #38's check that it opens, then the gate's claim connection. The first
+    # open works and the second raises sqlite3's OperationalError. run_bot refuses as it does when
+    # the first fails, "Could not open PANTRY_DB" with the path, not with the raw sqlite3 error,
+    # and never polls. getMe is answered, so the refusal may come before or after the token check.
+    opened: list[object] = []
+
+    def second_open_fails(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        opened.append(args)
+        if len(opened) == 2:
+            raise sqlite3.OperationalError("unable to open database file")
+        return get_db(*args, **kwargs)
+
+    monkeypatch.setattr(handlers, "get_db", second_open_fails)  # handlers' `from meals.db import`
+
+    with pytest.raises(RuntimeError) as raised:
+        handlers.run_bot()
+
+    assert len(opened) == 2, f"run_bot opened PANTRY_DB {len(opened)} times at startup"
+    refusal = str(raised.value)
+    assert refusal.startswith("Could not open PANTRY_DB") and str(bot_env) in refusal, refusal
+    assert polls == [], "run_bot polled after the gate connection failed to open"
 
 
 @pytest.mark.usefixtures("telegram")

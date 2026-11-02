@@ -26,8 +26,9 @@ from telegram import Bot, Update
 from telegram.ext import Application
 from telegram.request import BaseRequest, HTTPXRequest, RequestData
 
-from meals.contracts import Pantry
+from meals.contracts import Pantry, PantryItem, PantryStatus
 from meals.db import migrate
+from meals.fakes import FakePantry
 
 _MISSING: ImportError | None = None
 try:
@@ -134,6 +135,22 @@ class PantryOpener:
             yield self._pantry
         finally:
             self.closed += 1
+
+
+class LockedPantry(FakePantry):
+    """A FakePantry whose `flip_status` raises SQLite's "database is locked", writing nothing, for
+    the item named `locked` (found as `get_item` finds it, aliases included), until `locked` is set
+    to None. The pre-PR code review's CR-1 (bot PR 2b): a pantry error on one intent."""
+
+    def __init__(self, items: tuple[PantryItem, ...], *, locked: str | None) -> None:
+        super().__init__(items)
+        self.locked = locked
+
+    def flip_status(self, name: str, status: PantryStatus) -> PantryItem | None:
+        item = self.get_item(name)
+        if item is not None and item.name == self.locked:
+            raise sqlite3.OperationalError("database is locked")
+        return super().flip_status(name, status)
 
 
 def memory_gate_conn() -> sqlite3.Connection:

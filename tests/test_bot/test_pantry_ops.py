@@ -20,16 +20,22 @@ write and recording the ticket together; and the free-text handler must take the
 event loop when the message arrives, before `background.start`, not in the worker thread. These
 tests call apply one at a time, so they can't tell either difference.
 
+The pre-PR code review's CR-1 adds: a pantry error on one intent fails only that intent. The
+later intents still run, and the failed write is not recorded as the item's newest write.
+
 Pantries are `meals.fakes.FakePantry` over the conftest items (olive oil, rice, butter
-[buy_next_time], tahini, eggs, chicken nuggets), read back after each call.
+[buy_next_time], tahini, eggs, chicken nuggets), read back after each call; CR-1's is conftest's
+LockedPantry over the same items.
 """
 
+import sqlite3
 import time
 
 import pytest
 
-from meals.contracts import PantryFlipArgs, PantryFlipIntent
+from meals.contracts import PantryFlipArgs, PantryFlipIntent, PantryItem
 from meals.fakes import FakePantry
+from test_bot.conftest import LockedPantry
 
 _MISSING: ImportError | None = None
 try:
@@ -151,3 +157,42 @@ def test_no_write_after_deadline(fake_pantry: FakePantry) -> None:
         "buy_next_time",
         "buy_next_time",
     ), "apply wrote nothing with time left"
+
+
+def test_pantry_error_is_not_recorded_as_a_write(
+    sample_pantry_items: tuple[PantryItem, ...],
+) -> None:
+    # CR-1 (the pre-PR code review): the pantry raises SQLite's "database is locked" for eggs, the
+    # first of two intents. apply still answers one line per intent and still writes rice after
+    # it; eggs read back unchanged. The failed write is not recorded as eggs' newest write: once
+    # the lock clears, a message that arrived earlier (a lower ticket) still writes eggs. A
+    # LatestWrites that records the ticket before the write, or whatever the write did, refuses it
+    # as "a newer message already set eggs".
+    _require_pantry_ops()
+    pantry = LockedPantry(sample_pantry_items, locked="eggs")
+    latest = pantry_ops.LatestWrites()
+    older, newer = latest.ticket(), latest.ticket()
+    apply_by = time.monotonic() + TIME_LEFT_S
+    eggs_before = pantry.get_item("eggs")
+
+    try:
+        lines = pantry_ops.apply(
+            (_out_of("eggs"), _out_of("rice")),
+            pantry=pantry,
+            ticket=newer,
+            apply_by=apply_by,
+            latest=latest,
+        )
+    except sqlite3.Error as exc:
+        pytest.fail(f"apply let eggs' {exc!r} escape, so rice never ran", pytrace=False)
+
+    assert len(lines) == 2, f"one echo line per intent: {lines}"
+    assert pantry.get_item("eggs") == eggs_before, "eggs changed though their write raised"
+    assert _status(pantry, "rice") == "buy_next_time", "the intent after the failed one didn't run"
+
+    pantry.locked = None
+    pantry_ops.apply(
+        (_out_of("eggs"),), pantry=pantry, ticket=older, apply_by=apply_by, latest=latest
+    )
+
+    assert _status(pantry, "eggs") == "buy_next_time", "the failed write blocked an older ticket"

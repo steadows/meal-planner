@@ -3,7 +3,8 @@
 Authority: PLAN.md, Phase 4 (on-the-go pantry updates by text; the bot repeats back what changed)
 and Runtime concurrency; ADR-0001, Decision (chat-sized slow work runs through background.start,
 off the event loop); and the bot PR's Acceptance → proof table: AC-4, AC-6, AC-7, AC-8, AC-9,
-AC-11 and AC-12.
+AC-11 and AC-12. The pre-PR code review's CR-1 adds: a pantry error on one intent loses no other
+intent's echo.
 
 Bot PR 2b's design, from that table's seams: Claude only parses. One tool-free
 `claude_runner.run(prompt, schema=IntentReply, timeout=PARSE_TIMEOUT_S, web=False)` per message,
@@ -53,6 +54,7 @@ from meals.contracts import ClaudeRunnerError, PantryFlipArgs, PantryItem, Pantr
 from meals.fakes import FakeClaudeRunner, FakePantry
 from test_bot.conftest import (
     AnyApp,
+    LockedPantry,
     PantryOpener,
     RecordingRequest,
     build_bot,
@@ -259,6 +261,28 @@ def test_unknown_item_writes_nothing_and_asks(
     changed = {name for name, item in after.items() if item != before[name]}
     assert changed == {"rice", "tahini"}, f"items written: {changed}"
     assert UNKNOWN in _line_about(answer, "zucchini blossoms"), answer
+
+
+def test_pantry_error_on_one_item_keeps_the_other_echoes(
+    patched_claude: FakeClaudeRunner, sample_pantry_items: tuple[PantryItem, ...]
+) -> None:
+    # CR-1 (the pre-PR code review), with PLAN.md Phase 4 (the bot repeats back what changed) and
+    # AC-6: one message parses to rice then eggs, and the pantry raises SQLite's "database is
+    # locked" for eggs only. Rice is written and its line says it is on the list; eggs read back
+    # unchanged and get a line of their own that doesn't. The message is answered per intent, not
+    # as one failure: background's generic error reply would drop rice's echo.
+    pantry = LockedPantry(sample_pantry_items, locked="eggs")
+    patched_claude.queue(_parsed(_flip("rice"), _flip("eggs")))
+    eggs_before = pantry.get_item("eggs")
+
+    answer = _answer(_send(PantryOpener(pantry), "out of rice and eggs"))
+
+    assert _status(pantry, "rice") == "buy_next_time", "rice wasn't written"
+    assert pantry.get_item("eggs") == eggs_before, "eggs changed though their write raised"
+    assert not answer.startswith(background._ERROR_PREFIX), f"one failure reply: {answer!r}"
+    rice, eggs = _line_about(answer, "rice"), _line_about(answer, "eggs")
+    assert rice != eggs, f"rice and eggs share a line: {answer!r}"
+    assert ON_THE_LIST in rice and ON_THE_LIST not in eggs, answer
 
 
 @pytest.mark.parametrize(
