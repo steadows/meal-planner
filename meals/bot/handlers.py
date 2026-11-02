@@ -1,7 +1,8 @@
 """The bot's Application and entry point (PLAN.md, Phase 4; ADR-0001, Decision).
 
 `run_bot()` refuses missing or rejected tokens, missing, zero or group chat ids, and a PANTRY_DB
-that cannot open and migrate. Its chat lock fails closed; errors are logged without the token.
+that cannot open and migrate. Its chat lock fails closed; errors are logged without Telegram's
+response text or the token.
 It checks the token with one getMe, then polls for messages and edits only, keeping any pending
 updates. `/pantry` checks that the file exists, opens it once per command, and replies in plain text.
 """
@@ -71,18 +72,37 @@ def build_app(
 async def _stop_on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Log a handler failure and stop dispatch without replying to the chat."""
     try:
-        error = (
-            "".join(traceback.format_exception(context.error)) if context.error is not None else ""
-        )
         logger.error(
-            "Stopping update after handler failure\n%s", _redact_token(error, context.bot.token)
+            "Stopping update after handler failure\n%s",
+            _format_error(context.error, context.bot.token),
         )
     finally:
         raise ApplicationHandlerStop
 
 
+def _format_error(error: BaseException | None, token: str) -> str:
+    """Render the visible exception chain without Telegram response text or the token."""
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    while error is not None and id(error) not in seen:
+        chain.append(error)
+        seen.add(id(error))
+        if error.__cause__ is not None:
+            error = error.__cause__
+        else:
+            error = None if error.__suppress_context__ else error.__context__
+    lines: list[str] = []
+    for exc in reversed(chain):
+        lines.extend(traceback.format_tb(exc.__traceback__))
+        detail = type(exc).__name__
+        if not isinstance(exc, TelegramError):
+            detail += f": {exc}"
+        lines.append(detail + "\n")
+    return _redact_token("".join(lines), token)
+
+
 def _redact_token(text: str, token: str) -> str:
-    """Remove the secret half from raw and URL-encoded Telegram tokens."""
+    """Remove the literal secret half from diagnostic text."""
     secret = token.partition(":")[2]
     return text.replace(secret, "<redacted>") if secret else text
 
@@ -123,10 +143,7 @@ async def _check_token(app: Application[Any, Any, Any, Any, Any, Any]) -> None:
     except InvalidToken:
         raise RuntimeError("Telegram rejected TELEGRAM_BOT_TOKEN") from None
     except TelegramError as exc:
-        detail = _redact_token(background.first_line(exc), app.bot.token)
-        raise RuntimeError(
-            ("Telegram getMe failed: " + detail)[: background.ERROR_MAX_CHARS]
-        ) from None
+        raise RuntimeError(f"Telegram getMe failed ({type(exc).__name__})") from None
 
 
 def run_bot() -> None:
@@ -162,7 +179,4 @@ def run_bot() -> None:
     except InvalidToken:
         raise RuntimeError("Telegram rejected TELEGRAM_BOT_TOKEN") from None
     except TelegramError as exc:
-        detail = _redact_token(background.first_line(exc), app.bot.token)
-        raise RuntimeError(
-            ("Telegram polling failed: " + detail)[: background.ERROR_MAX_CHARS]
-        ) from None
+        raise RuntimeError(f"Telegram polling failed ({type(exc).__name__})") from None
