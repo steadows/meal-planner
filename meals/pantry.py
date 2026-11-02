@@ -124,26 +124,21 @@ def _ninety_percent_point(start: date, interval: int) -> date:
 
 
 def _ask_date(item: PantryItem) -> date | None:
-    """The day the planner should start asking about `item`: its `next_ask_on` if set ("still
-    good", "plenty" or the seed's reminder), else 90% of its interval after the last purchase.
+    """The later of `next_ask_on` and the 90% point, or whichever is known.
     None when neither is known."""
-    if item.next_ask_on is not None:
-        return item.next_ask_on
     if item.typical_interval_days is None or item.last_purchased is None:
-        return None
-    return _ninety_percent_point(item.last_purchased, item.typical_interval_days)
+        return item.next_ask_on
+    point = _ninety_percent_point(item.last_purchased, item.typical_interval_days)
+    return point if item.next_ask_on is None else max(item.next_ask_on, point)
 
 
-def _postponed_ask(item: PantryItem, on: date, plenty: bool) -> date | None:
-    """The `next_ask_on` that `SqlitePantry.confirm_stocked` stores (its docstring has the rule):
-    the push when it's later than the current ask date, else the stored value, None under a 90%
-    point."""
+def _postponed_ask(item: PantryItem, on: date, plenty: bool) -> date:
+    """The `next_ask_on` that `SqlitePantry.confirm_stocked` stores (its docstring has the rule)."""
     wait = STILL_GOOD_DAYS
     if plenty and item.typical_interval_days is not None:
         wait = max(item.typical_interval_days, STILL_GOOD_DAYS)
     pushed = on + timedelta(days=wait)
-    current = _ask_date(item)
-    return pushed if current is None or pushed > current else item.next_ask_on
+    return pushed if item.next_ask_on is None else max(pushed, item.next_ask_on)
 
 
 def _due_sort_key(item: PantryItem, on: date) -> tuple[bool, bool, int, str]:
@@ -259,21 +254,26 @@ class SqlitePantry:
         return updated
 
     def confirm_stocked(self, name: str, on: date, plenty: bool = False) -> PantryItem | None:
-        """Steve says the item called `name` (or carrying it as an alias) is still stocked on `on`:
-        "still good", or "have plenty" (`plenty`).
+        """Steve says the item is still stocked on `on`: "still good", or "have plenty" (`plenty`).
+        Status becomes `have`. The push is a week after `on` (still good) or one interval after it
+        (plenty; a week with no interval), never less than a week. The ask date stays on or after
+        the push, even if a back-dated purchase later shortens the interval; only a newer purchase
+        clears that (`log_purchase`). A later `buy_next_time` flip still makes the item due at
+        once (`staples_due`). So `next_ask_on` becomes the later of the push and any stored
+        `next_ask_on`, and a later 90% point still sets the ask date. The call itself never pulls
+        an ask earlier. Logs no purchase and never changes the interval.
+        Returns the updated item.
 
-        Status becomes 'have'. The push is a week after `on` (still good) or one interval after it
-        (plenty; a week with no interval), never less than a week. When the push is later than the
-        ask date, or there is none, it becomes `next_ask_on`. Otherwise the ask date stands as
-        stored: a `next_ask_on` is kept, and a 90% point stays computed (`next_ask_on` stays
-        NULL), so it keeps following the interval, which a later purchase can shorten. The call
-        itself never pulls an ask earlier. Never changes the interval: a longer-lasting item
-        lengthens it through the gap its next purchase records. Logs no purchase.
+        Repeating a reply for the same `on` changes nothing only while nothing else has written
+        the item: a redelivered "still good" after an "out of X" flip sets `have` again, and one
+        after a purchase can set the ask again. Callers dedupe replies (e.g. on the Telegram
+        update_id) before calling.
 
-        Repeating any mix of these replies for the same `on` changes nothing while nothing else
-        has written the item; one after a purchase can set the ask again. A datetime `on` counts
-        as `on.date()`, its day in its own timezone. Returns the updated item, or None if unknown.
-        """
+        Item names are unique after `strip().casefold()`, which is stricter than the schema's
+        ASCII-only `COLLATE NOCASE`, so duplicate inserts are rejected. `name` is compared with
+        item names and aliases the same way, and an exact name beats another item's alias. An
+        unknown name returns None and writes nothing. A datetime `on` counts as `on.date()`, its
+        day in its own timezone: pass the local day, not a UTC timestamp."""
         on = _as_day(on)
         with self._write():
             item = self.get_item(name)
