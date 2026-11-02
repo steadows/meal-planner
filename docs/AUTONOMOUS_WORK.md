@@ -4,6 +4,9 @@
 > is mostly a record of those projects' own incidents. What carries over is the durable shape: gate
 > order, verification standard, stop conditions, and when Codex comes in. Update this header, not
 > a separate changelog, as rulings land.
+>
+> **2026-11-01:** §2 step 3 and §3 now follow Steve's 2026-10-09 ruling that Codex writes GREEN by
+> default on every surface. The adopted text said lanes write their own GREEN.
 
 This file governs *how* a lane runs its own build loop day to day. It does not list any lane's
 tasks or dependencies. Those live in `docs/PLAN.md` (Implementation plan, Concurrency lanes) and
@@ -55,9 +58,10 @@ The `pm` lane sweeps the brain and relays to Steve.
    ADR is the input to the seams pass.
 3. **TDD, by tier.** High-risk surfaces (concurrency and locking, money, auth and secrets,
    migrations and schema, security) get RED from `test-writer` plus one `spec-watchdog` pass.
-   Everywhere else the lane writes RED itself, watches it fail, then implements. RED always comes
-   before GREEN. The tier is per task: if any seam in the task is high-risk, the whole task's RED
-   goes through the pair, so split the task if you want the rest to stay fast. Here that means
+   Everywhere else the lane writes RED itself and watches it fail. Either way, the lane freezes RED
+   and Codex writes GREEN (§3). RED always comes before GREEN. The tier is per task: if any seam
+   in the task is high-risk, the whole task's RED goes through the pair, so split the task if you
+   want the rest to stay fast. Here that means
    `db.py`, `claude_runner.py`'s process limit and env handling, the cart's Chrome session, and
    anything touching `.env`.
 4. **Verify**: see §4.
@@ -92,9 +96,16 @@ The `pm` lane sweeps the brain and relays to Steve.
 
 ## 3. Codex — where it comes in
 
-Lanes write their own GREEN. There is no autonomous Codex implementation loop. Codex enters at the
-three points below, always through the global dispatch contract
-(`~/.claude/rules/common/codex-dispatch.md`: run it yourself via Bash, the model it names,
+**Codex writes GREEN by default, on every surface** *(Steve, 2026-10-09;
+`~/.claude/rules/common/development-workflow.md` step 3)*. The lane commits RED, then dispatches
+Codex with `--write` and a "do not touch test files" clause. A diff that edits a test is an
+automatic review flag. Codex can't commit in its sandbox, so the lane reviews the diff and commits
+it. The lane writes GREEN inline only for mechanical co-change (a rename, a moved fixture, a
+constant with no new logic) or for craft no test can gate, and says which exception it took. Size
+alone is not an exception.
+
+Codex also enters at the three points below. Every dispatch goes through the global dispatch
+contract (`~/.claude/rules/common/codex-dispatch.md`: run it yourself via Bash, the model it names,
 `--effort xhigh`, **never `ultra`**, and no `--write` for reviews).
 
 **Data boundary: code yes, data no** *(Steve, 2026-09-25)*.
