@@ -39,6 +39,7 @@ from meals.contracts import (
     SwapIntent,
     Text,
     WeekProposal,
+    describe_rejection,
     validate_claude_output,
 )
 from meals.fakes import ClaudeCall, FakeClaudeRunner, FakeMealieClient, FakePantry
@@ -342,6 +343,48 @@ def test_intent_args_reject_shapes_that_do_not_fit_the_kind(
 
     with pytest.raises(ValidationError):
         _intent({"kind": kind, "args": args})
+
+
+@pytest.mark.parametrize(
+    ("intent", "named", "hidden"),
+    [
+        pytest.param(
+            {"kind": "swap", "args": {"slot": "dessert", "remove": "peppers + onion", "add": None}},
+            "intents.0.SwapIntent.args.slot",
+            "PickIntent",
+            id="swap-slot",
+        ),
+        # A late branch, so the reason can't depend on the union's order.
+        pytest.param(
+            {
+                "kind": "rate",
+                "args": {"target": "shredded chicken", "rater": "guest", "rating": -1},
+            },
+            "intents.0.RateIntent.args.rater",
+            "PickIntent",
+            id="rate-rater",
+        ),
+        # No branch's kind matches, so there's no branch to prefer; the reason still names kind.
+        pytest.param(
+            {"kind": "dance", "args": {"item": "eggs"}}, "kind", None, id="no-kind-matches"
+        ),
+    ],
+)
+def test_rejection_names_the_field_in_the_branch_whose_kind_matched(
+    intent: dict[str, object], named: str, hidden: str | None
+) -> None:
+    """describe_rejection exists so a refused field (a possible injection) stands out in the logs.
+    A misfit Intent fails in every union branch, and the others fail only on kind, so the reason
+    names the error in the branch whose kind matched."""
+    with pytest.raises(ValidationError) as caught:
+        _Reply.model_validate({"intents": [intent]})
+
+    reason = describe_rejection(_Reply, caught.value)
+
+    assert "error(s); first at " in reason, reason
+    assert named in reason, reason
+    if hidden is not None:
+        assert hidden not in reason, reason
 
 
 def test_intent_kind_names_every_variant() -> None:
