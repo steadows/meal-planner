@@ -137,6 +137,7 @@ def test_shipped_profile_has_every_rule(rule: str) -> None:
 
 
 @pytest.mark.integration
+@pytest.mark.usefixtures("live_claude")
 def test_find_live_against_real_claude(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PREFS_FILE")
     get_settings.cache_clear()

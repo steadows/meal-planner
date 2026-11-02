@@ -11,6 +11,7 @@ from meals.config import get_settings
 from meals.contracts import (
     ClaudeRunnerError,
     Components,
+    MealieUnavailable,
     PantryItem,
     RecipeOption,
     WeekProposal,
@@ -365,6 +366,72 @@ def test_a_stale_pool_slug_is_skipped_with_a_warning(
     assert "deleted-slug" not in patched_claude.calls[0].prompt
 
 
+def test_a_favorite_mealie_cannot_serve_is_skipped_with_a_warning(
+    patched_claude: FakeClaudeRunner,
+    fake_pantry: FakePantry,
+    sample_recipe: RecipeOption,
+    new_recipes: tuple[RecipeOption, ...],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The broken recipe exists, so only MealieUnavailable (not KeyError) can explain the skip.
+    mealie = FakeMealieClient(
+        recipes={FAVORITE: sample_recipe, "broken-slug": sample_recipe},
+        tags={planner.ROTATION_TAG: (FAVORITE, "broken-slug")},
+        unavailable=("broken-slug",),
+    )
+    patched_claude.queue(_draft(new_recipes))
+
+    with caplog.at_level(logging.WARNING, logger="meals.planner"):
+        proposal = _propose(mealie, fake_pantry)
+
+    assert proposal.recipe_options == (mealie.get_recipe(FAVORITE), *new_recipes)
+    assert "broken-slug" in caplog.text
+    assert "broken-slug" not in patched_claude.calls[0].prompt
+    # The chained cause isn't vetted (contracts): log the message, never the traceback.
+    assert all(record.exc_info is None for record in caplog.records)
+
+
+def test_propose_fails_loudly_when_mealie_serves_no_favorite(
+    patched_claude: FakeClaudeRunner, fake_pantry: FakePantry, sample_recipe: RecipeOption
+) -> None:
+    """Every call failing can mean Mealie is down or its token revoked: not a web-only week."""
+    slugs = (FAVORITE, "second-favorite")
+    mealie = FakeMealieClient(
+        recipes=dict.fromkeys(slugs, sample_recipe),
+        tags={planner.ROTATION_TAG: slugs},
+        unavailable=slugs,
+    )
+
+    with pytest.raises(MealieUnavailable, match="2 rotation favorites") as raised:
+        _propose(mealie, fake_pantry)
+
+    assert isinstance(raised.value.__cause__, MealieUnavailable)
+    assert patched_claude.calls == []
+
+
+@pytest.mark.parametrize(
+    ("rotation", "unavailable"),
+    [((), ()), (("gone-a", "gone-b"), ()), (("gone-a", "broken-b"), ("broken-b",))],
+    ids=["no-favorites", "all-deleted", "deleted-and-unavailable"],
+)
+def test_no_served_favorite_is_not_a_mealie_outage(
+    patched_claude: FakeClaudeRunner,
+    fake_pantry: FakePantry,
+    new_recipes: tuple[RecipeOption, ...],
+    rotation: tuple[str, ...],
+    unavailable: tuple[str, ...],
+) -> None:
+    """A KeyError is Mealie answering 404, so only all-MealieUnavailable means it's unusable."""
+    fourth = new_recipes[0].model_copy(
+        update={"name": "New find 3", "url": "https://example.com/n3"}
+    )
+    finds = (*new_recipes, fourth)
+    mealie = FakeMealieClient(tags={planner.ROTATION_TAG: rotation}, unavailable=unavailable)
+    patched_claude.queue(_draft(finds, favorites=[]))
+
+    assert _propose(mealie, fake_pantry).recipe_options == finds
+
+
 def test_prompt_lists_only_the_rotation_pool(
     patched_claude: FakeClaudeRunner,
     fake_pantry: FakePantry,
@@ -617,6 +684,7 @@ def test_a_stored_ingredient_name_cannot_break_out_either(
 
 
 @pytest.mark.integration
+@pytest.mark.usefixtures("live_claude")
 def test_propose_live_against_real_claude(
     monkeypatch: pytest.MonkeyPatch, fake_mealie: FakeMealieClient, fake_pantry: FakePantry
 ) -> None:
