@@ -355,9 +355,8 @@ class MealieClient(Protocol):
 
     def get_recipe(self, slug: str) -> RecipeOption:
         """The recipe, with `mealie_slug` set to `slug`. Raises KeyError for an unknown slug, and
-        MealieUnavailable for an HTTP error other than the recipe's 404, a rejected token
-        (401/403), a network failure, or a response that doesn't parse. Any other error, a bug
-        included, propagates as is."""
+        MealieUnavailable for the failures the MealieUnavailable docstring names. Any other error,
+        a bug included, propagates as is."""
         ...
 
     def list_by_tag(self, tag: str) -> tuple[str, ...]:

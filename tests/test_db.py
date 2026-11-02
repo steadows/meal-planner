@@ -81,8 +81,8 @@ JOB_RUN_SCHEMA: dict[str, Column] = {
     "detail": ("TEXT", 0, None, 0),
 }
 
-# Seam map contracts-8-bot-asks, migration 4 (bot's DDL): the bot claims each Telegram update once.
-# update_id INTEGER PRIMARY KEY; seen_at defaults to CURRENT_TIMESTAMP.
+# Migration 4 (bot's DDL): the bot claims each Telegram update once. update_id INTEGER PRIMARY KEY;
+# seen_at defaults to CURRENT_TIMESTAMP.
 TELEGRAM_UPDATE_SCHEMA: dict[str, Column] = {
     "update_id": ("INTEGER", 0, None, 1),
     "seen_at": ("DATETIME", 1, "CURRENT_TIMESTAMP", 0),
@@ -194,7 +194,7 @@ def test_migration_3_adds_job_run_and_changes_nothing_else(
 def test_migration_4_adds_telegram_update_and_changes_nothing_else(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Seam map contracts-8-bot-asks, migration 4: bot's DDL, no FK, no index, and no other change."""
+    """Migration 4: bot's DDL, no FK, no index, and no other change."""
     # Migration 4 only, so no migration 5 rides along. Fails on purpose when a later, requested
     # migration 5 lands: update it then.
     assert len(meals.db.MIGRATIONS) == 4
@@ -358,8 +358,7 @@ def test_a_new_job_run_row_is_running_with_started_at_filled_in(tmp_path: Path) 
     assert (row["finished_at"], row["outcome"], row["detail"]) == (None, None, None)
 
 
-# Bot's claim (seam map contracts-8-bot-asks; bot's ask 2026-11-02, §2). The SQL is bot's; the test
-# shows the table supports it.
+# Bot's claim (bot's ask 2026-11-02, §2). The SQL is bot's; the test shows the table supports it.
 CLAIM_UPDATE = (
     "INSERT INTO telegram_update (update_id, seen_at) VALUES (?, ?) "
     "ON CONFLICT(update_id) DO NOTHING"
@@ -512,8 +511,8 @@ def test_migration_3_upgrades_a_v2_database_and_keeps_its_rows(
 def test_migration_4_upgrades_a_v3_database_and_keeps_its_rows(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Seam map contracts-8-bot-asks: telegram_update is the next migration, applied to a live v3
-    database without touching the pantry, weekly_plan or job_run."""
+    """telegram_update is the next migration, applied to a live v3 database without touching the
+    pantry, weekly_plan or job_run."""
     migrations = meals.db.MIGRATIONS
     monkeypatch.setattr(meals.db, "MIGRATIONS", migrations[:3])
     with _open(tmp_path) as v3:
