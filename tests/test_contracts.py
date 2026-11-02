@@ -678,14 +678,23 @@ def test_fake_pantry_takes_a_datetime_as_its_calendar_day(today: date) -> None:
 
 
 @pytest.mark.parametrize("plenty", [False, True], ids=["still_good", "plenty"])
-def test_fake_pantry_confirming_keeps_a_later_postponement(plenty: bool, today: date) -> None:
-    later = today + _days(90)
-    pantry = FakePantry((_staple(1, "rice", typical_interval_days=42, next_ask_on=later),))
+@pytest.mark.parametrize(
+    ("stored", "kept"),
+    [(90, True), (3, False)],
+    ids=["a later stored date stays", "an earlier stored date rises to the push"],
+)
+def test_fake_pantry_confirming_stores_the_later_of_stored_and_pushed(
+    plenty: bool, stored: int, kept: bool, today: date
+) -> None:
+    pantry = FakePantry(
+        (_staple(1, "rice", typical_interval_days=42, next_ask_on=today + _days(stored)),)
+    )
 
     item = pantry.confirm_stocked("rice", today, plenty=plenty)
 
+    pushed = today + _days(42 if plenty else 7)
     assert item is not None
-    assert item.next_ask_on == later
+    assert item.next_ask_on == (today + _days(stored) if kept else pushed)
 
 
 def test_fake_pantry_refuses_items_the_real_schema_cannot_hold() -> None:
