@@ -237,7 +237,7 @@ CREATE TABLE pantry_item (
     status                 TEXT NOT NULL DEFAULT 'have' CHECK (status IN ('have','buy_next_time')),
     typical_interval_days  INTEGER,                     -- NULL for perishables
     last_purchased         DATE,
-    next_ask_on            DATE,                        -- "still good" / "plenty": ask again on or after
+    next_ask_on            DATE,                        -- "still good" / "plenty" floor: ask on the later of this and the 90% point
     default_qty            REAL,
     default_unit           TEXT,                        -- "bottle", "lb", "dozen"
     meijer_product_id      TEXT,
