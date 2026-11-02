@@ -38,12 +38,17 @@ untrusted and can encode the token any way, so a NetworkError whose text has the
 '%2D' or '&#45;' must not show the token either, and the log is searched once percent-decoded and
 HTML-unescaped too; R3-2, the update stops when the gate raises and the error handler's own log
 raises as well.
+
+The post-PR review's R4-1 (2026-11-02) changes AC-1's error log: an httpx transport error chained
+under a Telegram error carried the token past the redactor, so the error handler logs exception
+type names and stack frames only, for the whole chain, and never any exception's text.
 """
 
 import html
 import logging
 from urllib.parse import unquote
 
+import httpx
 import pytest
 from telegram import Update
 from telegram.error import NetworkError
@@ -67,6 +72,7 @@ from test_bot.conftest import (
 STRANGER_ID = 9191
 GROUP_CHAT_ID = -100777
 GATE_ERROR = "gate failure marker 5d2"  # the text of the error the broken gate raises
+TRANSPORT_TEXT = "transport marker 9c4"  # R4-1: text only the transport cause's message carries
 SECRET = TOKEN.partition(":")[2]  # a bot token's secret is the part after the colon
 ENCODED_TOKEN = TOKEN.replace(":", "%3A")  # the bot's token as a percent-encoded URL carries it
 SECRET_ENCODED_TOKEN = ENCODED_TOKEN.replace("-", "%2D")  # R3-1: encoded inside the secret too
@@ -176,12 +182,17 @@ def test_gate_failure_stops_every_handler(
     # lets the update through to /pantry. The gate raises here for Steve's own /pantry, the
     # strongest case: when the lock can't decide, even the allowed chat stops. How the bot stops it
     # (an error handler, a wrapper in build_app) is open; the gate is replaced where build_app
-    # reads it.
+    # reads it. The post-PR review's R4-1: the error handler logs exception type names and stack
+    # frames only, never an exception's text, so the log names RuntimeError and shows no GATE_ERROR.
+    # The gate raises a bound error, so its frame's source line (`raise error`) doesn't name its
+    # type, and only a logged type name can.
+    caplog.set_level(logging.DEBUG, logger="meals")
     ran: list[int] = []
 
     async def broken_gate(update: Update, *args: object, **kwargs: object) -> None:
         ran.append(update.update_id)
-        raise RuntimeError(GATE_ERROR)
+        error = RuntimeError(GATE_ERROR)
+        raise error
 
     monkeypatch.setattr("meals.bot.handlers.gate", broken_gate)
     opener = PantryOpener(FakePantry(sample_pantry_items))
@@ -195,13 +206,15 @@ def test_gate_failure_stops_every_handler(
     assert opener.opened == 0, "the pantry was opened after the gate raised"
     assert probe.seen == [], "a later handler group ran after the gate raised"
     assert [name for name, _ in request.calls] == ["getMe"], "the bot called Telegram about it"
+    records = [record for record in caplog.records if record.name.split(".")[0] == "meals"]
     logged = [  # caplog formats each record as it arrives, filling exc_text
-        record.getMessage() + (record.exc_text or "")
-        for record in caplog.records
-        if record.levelno >= logging.ERROR and record.name.split(".")[0] == "meals"
+        (record.levelno, record.getMessage() + (record.exc_text or "")) for record in records
     ]
-    assert any(GATE_ERROR in text for text in logged), (
-        "no meals ERROR record shows the gate's error"
+    assert any(level >= logging.ERROR and "RuntimeError" in text for level, text in logged), (
+        "no meals ERROR record names the gate error's type"
+    )
+    assert [text for _, text in logged if GATE_ERROR in text] == [], (
+        "a meals record shows the gate error's text"
     )
 
 
@@ -317,6 +330,56 @@ def test_gate_error_log_never_shows_the_token(
     assert any(record.levelno >= logging.ERROR for record in records), "no meals ERROR record"
     logged = [record.getMessage() + (record.exc_text or "") for record in records]
     assert [text for text in logged if _shows_secret(text)] == [], "a meals record has the token"
+
+
+@pytest.mark.parametrize(
+    "echoed",
+    [TOKEN, ENCODED_TOKEN, SECRET_ENCODED_TOKEN, SECRET_ESCAPED_TOKEN],
+    ids=["raw", "percent_encoded", "secret_percent_encoded", "secret_html_escaped"],
+)
+def test_gate_error_log_never_shows_a_transport_cause(
+    echoed: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    sample_pantry_items: tuple[PantryItem, ...],
+) -> None:
+    # AC-1's error log, the post-PR review's R4-1: PTB raises NetworkError for an httpx failure,
+    # chained `from` the httpx error (telegram/request/_httpxrequest.py:303). That cause is not a
+    # Telegram error, and its text can echo the response, token included. The gate raises that
+    # chain here. The update still stops and an ERROR is still logged, but no meals record shows
+    # the token in any form, searched once decoded, nor the cause's text (TRANSPORT_TEXT): the
+    # error handler logs type names and frames only, for the whole chain. The gate is replaced
+    # where build_app reads it, as in the S1 test above.
+    caplog.set_level(logging.DEBUG, logger="meals")
+    ran: list[int] = []
+    status_line = f"{TRANSPORT_TEXT} HTTP/1.1 502 for /bot{echoed}/sendMessage".encode()
+
+    async def leaky_gate(update: Update, *args: object, **kwargs: object) -> None:
+        ran.append(update.update_id)
+        try:
+            raise httpx.RemoteProtocolError(f"illegal status line: {status_line!r}")
+        except httpx.RemoteProtocolError as cause:
+            raise NetworkError(f"httpx.RemoteProtocolError: {cause}") from cause
+
+    monkeypatch.setattr("meals.bot.handlers.gate", leaky_gate)
+    opener = PantryOpener(FakePantry(sample_pantry_items))
+    app, request = build_bot(opener)
+    probe = Probe()
+    app.add_handler(TypeHandler(Update, probe), group=1)
+
+    dispatch(app, text_update(app.bot, 1, "/pantry"))
+
+    assert ran == [1], "the replaced gate never ran: build_app no longer reads handlers.gate"
+    assert opener.opened == 0, "the pantry was opened after the gate raised"
+    assert probe.seen == [], "a later handler group ran after the gate raised"
+    assert [name for name, _ in request.calls] == ["getMe"], "the bot called Telegram about it"
+    records = [record for record in caplog.records if record.name.split(".")[0] == "meals"]
+    assert any(record.levelno >= logging.ERROR for record in records), "no meals ERROR record"
+    logged = [record.getMessage() + (record.exc_text or "") for record in records]
+    assert [text for text in logged if _shows_secret(text)] == [], "a meals record has the token"
+    assert [text for text in logged if TRANSPORT_TEXT in text] == [], (
+        "a meals record shows the transport cause's text"
+    )
 
 
 def test_business_message_with_allowed_chat_id_is_dropped(

@@ -29,6 +29,11 @@ The post-PR review's R3-1 (2026-11-02) adds to C2: that text is untrusted and ca
 any way, so the same failures with the secret's '-' as '%2D' or '&#45;' are refused without showing
 the token either, and what is shown is searched once percent-decoded and HTML-unescaped too.
 
+The post-PR review's R4-2 (2026-11-02) adds to AC-16: a reply PTB can't parse raises a plain
+TypeError, not a Telegram error, and its chain can carry the token. run_bot turns ANY exception from
+the getMe check or from run_polling into a refusal naming the step, without the exception's text or
+chain; a rejected token keeps its own refusal.
+
 Settings come from env vars only, with the project .env switched off. `Application.run_polling` is
 replaced by a recorder, so nothing polls, and conftest's guard fails anything that would reach
 Telegram. A test whose startup gets as far as the token check routes PTB's HTTP client to a
@@ -381,6 +386,80 @@ def test_telegram_failure_at_polling_start_never_shows_the_token(
     monkeypatch.setattr(Application, "run_polling", failed)
 
     with pytest.raises(RuntimeError, match=TELEGRAM_FAILED) as raised:
+        handlers.run_bot()
+
+    assert len(started) == 1, f"run_polling was called {len(started)} times"
+    shown = str(raised.value) + "".join(traceback.format_exception(raised.value))
+    assert not _shows_secret(shown), "the refusal shows the token"
+
+
+@pytest.mark.parametrize(
+    "echoed",
+    [TOKEN, ENCODED_TOKEN, SECRET_ENCODED_TOKEN, SECRET_ESCAPED_TOKEN],
+    ids=["raw", "percent_encoded", "secret_percent_encoded", "secret_html_escaped"],
+)
+@pytest.mark.usefixtures("bot_env")
+def test_malformed_getme_reply_never_shows_the_token(
+    echoed: str,
+    polls: Polls,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # AC-16, the post-PR review's R4-2: getMe answers 200 with a User that has no required field
+    # and one unexpected field named after the token. PTB 22.8 builds the User with that field as
+    # a keyword (telegram/_telegramobject.py:397), and its fallback raises a plain TypeError
+    # ("User.__init__() missing 3 required positional arguments ...") while handling the first
+    # TypeError ("... got an unexpected keyword argument '<the token>'"), so the token is in the
+    # chain, not a Telegram error. run_bot refuses before polling, naming getMe, and the token
+    # appears nowhere in the refusal, the chain printed with it, or a meals log record, searched
+    # as written and once decoded.
+    caplog.set_level(logging.DEBUG, logger="meals")
+    reply = json.dumps({"ok": True, "result": {echoed: 1}}).encode()
+
+    async def malformed(self: HTTPXRequest, *args: Any, **kwargs: Any) -> tuple[int, bytes]:
+        return 200, reply
+
+    monkeypatch.setattr(HTTPXRequest, "do_request", malformed)
+
+    with pytest.raises(RuntimeError, match="(?i)getme") as raised:
+        handlers.run_bot()
+
+    assert polls == [], "run_bot polled after getMe's reply couldn't be read"
+    shown = str(raised.value) + "".join(traceback.format_exception(raised.value))
+    assert not _shows_secret(shown), "the refusal shows the token"
+    logged = [
+        record.getMessage() + (record.exc_text or "")
+        for record in caplog.records
+        if record.name.split(".")[0] == "meals"
+    ]
+    assert [text for text in logged if _shows_secret(text)] == [], "a meals record has the token"
+
+
+@pytest.mark.parametrize(
+    "echoed",
+    [TOKEN, ENCODED_TOKEN, SECRET_ENCODED_TOKEN, SECRET_ESCAPED_TOKEN],
+    ids=["raw", "percent_encoded", "secret_percent_encoded", "secret_html_escaped"],
+)
+@pytest.mark.usefixtures("bot_env", "telegram")
+def test_malformed_reply_at_polling_start_never_shows_the_token(
+    echoed: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # AC-16, the post-PR review's R4-2: getMe accepts the token at the check, then run_polling's
+    # start fails with a plain TypeError, as PTB raises for a reply it can't parse (the test
+    # above). Here the error's own text carries the token, and so does the error it is chained
+    # from. The replaced run_polling raises it. run_bot refuses, naming polling, and the refusal
+    # and the chain printed with it show no form of the token, searched as written and once
+    # decoded. Log records go unchecked, as in the S2 test above.
+    started: list[AnyApp] = []
+
+    def failed(self: AnyApp, *args: Any, **kwargs: Any) -> None:
+        started.append(self)
+        unexpected = TypeError(f"User.__init__() got an unexpected keyword argument '{echoed}'")
+        raise TypeError(f"Couldn't build a User from the reply's '{echoed}'") from unexpected
+
+    monkeypatch.setattr(Application, "run_polling", failed)
+
+    with pytest.raises(RuntimeError, match="(?i)polling") as raised:
         handlers.run_bot()
 
     assert len(started) == 1, f"run_polling was called {len(started)} times"
