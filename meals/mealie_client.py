@@ -20,7 +20,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from meals.config import Settings, get_settings
-from meals.contracts import TRUSTED, Ingredient, RecipeOption
+from meals.contracts import TRUSTED, Ingredient, MealieUnavailable, RecipeOption
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +199,12 @@ class HttpMealieClient:
         return slug
 
     def get_recipe(self, slug: str) -> RecipeOption:
+        try:
+            return self._recipe_option(slug)
+        except (httpx.HTTPError, ValueError) as exc:  # KeyError (no such recipe) passes through
+            raise MealieUnavailable(_unavailable_reason(slug, exc)) from exc
+
+    def _recipe_option(self, slug: str) -> RecipeOption:
         recipe = self._fetch_recipe(slug)
         seconds = recipe.prep_time_seconds
         option = RecipeOption(
@@ -310,6 +316,16 @@ class HttpMealieClient:
             yield from body.items
             if page >= body.total_pages:
                 return
+
+
+def _unavailable_reason(slug: str, exc: Exception) -> str:
+    """Build a log-safe message from fixed fields only, never the cause's text or body."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        method = exc.request.method
+        path = exc.request.url.path
+        return f"Mealie couldn't serve recipe {slug}: HTTP {status} from {method} {path}"
+    return f"Mealie couldn't serve recipe {slug}: {type(exc).__name__}"
 
 
 def _require_public_url(url: str) -> None:
