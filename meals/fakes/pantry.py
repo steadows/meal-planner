@@ -1,20 +1,25 @@
 import math
 from collections.abc import Iterable
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from meals.contracts import PantryItem, PantryStatus
+from meals.rollup import name_key
 
 STILL_GOOD_DAYS = 7
 
 
+def _as_day(on: date) -> date:
+    """A datetime is also a date; use its calendar day, as SqlitePantry does."""
+    return on.date() if isinstance(on, datetime) else on
+
+
 def _ask_date(item: PantryItem) -> date | None:
-    """`next_ask_on`, else PLAN's 90% point: ceil(9 * interval / 10) days after the last purchase."""
-    if item.next_ask_on is not None:
-        return item.next_ask_on
+    """The later of `next_ask_on` and PLAN's 90% point, or whichever is known."""
     if item.typical_interval_days is None or item.last_purchased is None:
-        return None
+        return item.next_ask_on
     ninety_percent = -(-9 * item.typical_interval_days // 10)  # ceil, in integers: no float
-    return item.last_purchased + timedelta(days=ninety_percent)
+    point = item.last_purchased + timedelta(days=ninety_percent)
+    return point if item.next_ask_on is None else max(item.next_ask_on, point)
 
 
 def _is_due(item: PantryItem, on: date) -> bool:
@@ -26,7 +31,7 @@ def _due_order(item: PantryItem, on: date) -> tuple[bool, bool, int, str]:
     """Flagged first (no ask date last among them), then most days past the ask date, then name."""
     ask = _ask_date(item)
     days_past = 0 if ask is None else (on - ask).days
-    return (item.status != "buy_next_time", ask is None, -days_past, item.name.casefold())
+    return (item.status != "buy_next_time", ask is None, -days_past, name_key(item.name))
 
 
 class FakePantry:
@@ -38,12 +43,13 @@ class FakePantry:
         # The real schema can't hold these, so a test mustn't be able to build them.
         if len({item.id for item in items}) != len(items):
             raise ValueError("FakePantry: item ids must be unique")
-        if len({item.name.casefold() for item in items}) != len(items):
-            raise ValueError("FakePantry: item names must be unique under casefold")
+        if len({name_key(item.name) for item in items}) != len(items):
+            raise ValueError("FakePantry: item names must be unique after strip and casefold")
         self._items: dict[int, PantryItem] = {item.id: item for item in items}
         self._purchases: frozenset[tuple[int, date]] = frozenset()
 
     def staples_due(self, on: date) -> tuple[PantryItem, ...]:
+        on = _as_day(on)
         due = (i for i in self._items.values() if i.category == "staple" and _is_due(i, on))
         return tuple(sorted(due, key=lambda item: _due_order(item, on)))
 
@@ -52,15 +58,17 @@ class FakePantry:
         return None if item is None else self._replace(item, {"status": status})
 
     def confirm_stocked(self, name: str, on: date, plenty: bool = False) -> PantryItem | None:
+        on = _as_day(on)
         item = self._find(name)
         if item is None:
             return None
         interval = item.typical_interval_days
-        wait = interval if plenty and interval is not None else STILL_GOOD_DAYS
+        wait = STILL_GOOD_DAYS
+        if plenty and interval is not None:
+            wait = max(interval, STILL_GOOD_DAYS)
         pushed = on + timedelta(days=wait)
-        current = _ask_date(item)
-        ask = pushed if current is None else max(current, pushed)
-        return self._replace(item, {"status": "have", "next_ask_on": ask})
+        floor = pushed if item.next_ask_on is None else max(item.next_ask_on, pushed)
+        return self._replace(item, {"status": "have", "next_ask_on": floor})
 
     def log_purchase(
         self, name: str, on: date, qty: float | None = None, price_cents: int | None = None
@@ -69,6 +77,7 @@ class FakePantry:
             raise ValueError(f"qty must be a finite number above 0, got {qty}")
         if price_cents is not None and price_cents < 0:
             raise ValueError(f"price_cents can't be negative, got {price_cents}")
+        on = _as_day(on)
         item = self._find(name)
         if item is None or (item.id, on) in self._purchases:
             return item
@@ -85,10 +94,10 @@ class FakePantry:
 
     def _find(self, name: str) -> PantryItem | None:
         """Exact name first, so one item's alias can't shadow another item's name."""
-        wanted = name.strip().casefold()
+        wanted = name_key(name)
         items = self.list_items()
-        by_name = (item for item in items if item.name.casefold() == wanted)
-        by_alias = (item for item in items if wanted in {a.casefold() for a in item.aliases})
+        by_name = (item for item in items if name_key(item.name) == wanted)
+        by_alias = (item for item in items if wanted in {name_key(a) for a in item.aliases})
         return next(by_name, None) or next(by_alias, None)
 
     def _replace(self, item: PantryItem, changes: dict[str, object]) -> PantryItem:

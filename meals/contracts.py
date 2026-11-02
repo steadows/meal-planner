@@ -192,7 +192,14 @@ class PantryItem(Contract):
     status: PantryStatus = "have"
     typical_interval_days: int | None = Field(default=None, gt=0)
     last_purchased: date | None = None
-    next_ask_on: date | None = None
+    next_ask_on: date | None = Field(
+        default=None,
+        description=(
+            "A floor under the ask date, not the ask date itself. The ask date is the later of "
+            "this and 90% of the interval after the last purchase, and a buy_next_time item is "
+            "due at once. Use staples_due to know what is due."
+        ),
+    )
     default_qty: float | None = None
     default_unit: str | None = None
     meijer_product_id: str | None = None
@@ -265,13 +272,16 @@ class MealieClient(Protocol):
 class Pantry(Protocol):
     """The pantry rules (PLAN.md, Pantry rules).
 
-    An item's *ask date* is `next_ask_on` when set; otherwise `last_purchased` plus
-    ceil(9 * interval / 10) days (PLAN: ask at 90%) when both are known; otherwise it has none.
+    An item's *90% point* is `last_purchased` plus ceil(9 * interval / 10) days (PLAN: ask at
+    90%) when both are known. Its *ask date* is the later of `next_ask_on` and the 90% point,
+    whichever of them are known; with neither, it has none. So `next_ask_on` is a floor: the ask
+    date is never before it. A `buy_next_time` flag still makes an item due at once.
 
-    Item names are unique under casefold, which is stricter than the schema's ASCII-only
-    `COLLATE NOCASE`, so implementations reject a duplicate on insert. Every method taking a
-    `name` matches it against item names and aliases after `strip().casefold()`, and an exact
-    name beats another item's alias. An unknown name returns None and writes nothing.
+    Item names are unique after `strip().casefold()`, which is stricter than the schema's
+    ASCII-only `COLLATE NOCASE`, so implementations reject a duplicate on insert. Every method
+    taking a `name` compares it with item names and aliases the same way, and an exact name beats
+    another item's alias. An unknown name returns None and writes nothing. A datetime `on` counts
+    as `on.date()`, its day in its own timezone: pass the local day, not a UTC timestamp.
     """
 
     def staples_due(self, on: date) -> tuple[PantryItem, ...]:
@@ -286,14 +296,18 @@ class Pantry(Protocol):
 
     def confirm_stocked(self, name: str, on: date, plenty: bool = False) -> PantryItem | None:
         """Steve says the item is still stocked on `on`: "still good", or "have plenty" (`plenty`).
-        Status becomes `have`, and the next ask moves to a week after `on` (still good) or one
-        interval after it (plenty; a week with no interval), unless the ask date is already
-        later: this never pulls an ask earlier. Logs no purchase and never changes the interval.
+        Status becomes `have`. The push is a week after `on` (still good) or one interval after it
+        (plenty; a week with no interval), never less than a week. The ask date stays on or after
+        the push, even if a back-dated purchase later shortens the interval; only a newer purchase
+        clears that (`log_purchase`). A later `buy_next_time` flip still makes the item due at
+        once (`staples_due`). So `next_ask_on` becomes the later of the push and any stored
+        `next_ask_on`, and a later 90% point still sets the ask date. The call itself never pulls
+        an ask earlier. Logs no purchase and never changes the interval.
         Returns the updated item.
 
         Repeating a reply for the same `on` changes nothing only while nothing else has written
         the item: a redelivered "still good" after an "out of X" flip sets `have` again, and one
-        after a purchase sets the ask again. Callers dedupe replies (e.g. on the Telegram
+        after a purchase can set the ask again. Callers dedupe replies (e.g. on the Telegram
         update_id) before calling."""
         ...
 
