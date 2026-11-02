@@ -477,10 +477,23 @@ def test_get_recipe_raises_mealie_unavailable_for_a_network_failure(
     assert raised.value.__cause__ is stub.recipe_raises
 
 
+# httpx fails the request itself on a Location it can't parse, even with redirects off (AC-4,
+# ultrareview U1). InvalidURL is neither an HTTPError nor a ValueError.
+def test_get_recipe_raises_mealie_unavailable_for_a_redirect_httpx_cannot_parse(
+    client: HttpMealieClient, stub: MealieStub
+) -> None:
+    stub.recipe_answer = httpx.Response(302, headers={"Location": "https:foo"})
+
+    with pytest.raises(MealieUnavailable) as raised:
+        client.get_recipe("fajitas")
+
+    assert isinstance(raised.value.__cause__, httpx.InvalidURL)
+
+
 @pytest.mark.parametrize(
     ("recipe", "parsed", "cause_type"),
     [
-        pytest.param("<html>Mealie is starting</html>", None, json.JSONDecodeError, id="not-json"),
+        pytest.param("<html>Mealie is starting</html>", None, ValueError, id="not-json"),
         pytest.param(
             json.dumps(recipe_json("fajitas", id="not-a-uuid")),
             None,
@@ -504,6 +517,9 @@ def test_get_recipe_raises_mealie_unavailable_for_a_network_failure(
             "null",
             ValueError,
             id="parser-answers-json-that-is-not-a-list",
+        ),
+        pytest.param(
+            "[" * 1100 + "0" + "]" * 1100, None, ValueError, id="recipe-nested-too-deeply"
         ),
     ],
 )
