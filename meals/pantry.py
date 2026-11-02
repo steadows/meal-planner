@@ -282,7 +282,7 @@ class SqlitePantry:
             self._conn.execute(
                 "UPDATE pantry_item SET status = 'have', next_ask_on = ?, "
                 "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (_iso(_postponed_ask(item, on, plenty)), item.id),
+                (_postponed_ask(item, on, plenty).isoformat(), item.id),
             )
             updated = self._reread(item.id)  # before COMMIT, so no other writer's change leaks in
         logger.info(

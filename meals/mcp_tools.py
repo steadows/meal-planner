@@ -139,9 +139,9 @@ def build_server(open_pantry: OpenPantry, today: Callable[[], date] = date.today
 
     @server.tool()
     def confirm_stocked(name: str, on: date, plenty: StrictBool = False) -> PantryItem:
-        """Steve says the item is still good: the next ask waits at least a week, or one interval
-        when `plenty` is true ("we have plenty"), never less than a week. An ask date already set
-        later than that stands. `on` is the date of his message."""
+        """Steve says the item is still good: don't ask again for at least a week, or for one
+        interval if that's longer when `plenty` is true ("we have plenty"). A later ask date
+        already set stands. `on` is the date of his message."""
         day = _check_on(on, today())
         with _opened(open_pantry) as pantry:
             return _found(pantry.confirm_stocked(name, day, plenty), name)
