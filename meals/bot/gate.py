@@ -3,6 +3,7 @@
 `build_app` registers `gate` as a blocking handler in group -1, so it runs before every other
 handler. It passes only an ordinary message or edit from TELEGRAM_ALLOWED_CHAT_ID. Business
 messages, messages sent through a business connection and every other update kind stop here.
+Logging failures do not bypass the lock.
 """
 
 import logging
@@ -21,5 +22,9 @@ async def gate(update: Update, context: ContextTypes.DEFAULT_TYPE, *, allowed_ch
         or message.chat.id != allowed_chat_id
         or message.business_connection_id is not None
     ):
-        logger.info("dropped update from chat %s", "none" if message is None else message.chat.id)
-        raise ApplicationHandlerStop
+        try:
+            logger.info(
+                "dropped update from chat %s", "none" if message is None else message.chat.id
+            )
+        finally:
+            raise ApplicationHandlerStop

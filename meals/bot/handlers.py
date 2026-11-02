@@ -1,13 +1,14 @@
 """The bot's Application and entry point (PLAN.md, Phase 4; ADR-0001, Decision).
 
 `run_bot()` refuses missing or rejected tokens, missing, zero or group chat ids, and a PANTRY_DB
-that cannot open and migrate. Its chat lock fails closed. It checks the token with one getMe,
-then polls for messages and edits only, keeping any pending updates. `/pantry` opens the pantry
-once per command, never creates the file, and replies in plain text.
+that cannot open and migrate. Its chat lock fails closed; errors are logged without the token.
+It checks the token with one getMe, then polls for messages and edits only, keeping any pending
+updates. `/pantry` checks that the file exists, opens it once per command, and replies in plain text.
 """
 
 import asyncio
 import logging
+import traceback
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, closing, contextmanager
 from dataclasses import dataclass
@@ -15,7 +16,7 @@ from functools import partial
 from typing import Any
 
 from telegram import Update
-from telegram.error import InvalidToken
+from telegram.error import InvalidToken, TelegramError
 from telegram.ext import (
     AIORateLimiter,
     Application,
@@ -69,8 +70,21 @@ def build_app(
 
 async def _stop_on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Log a handler failure and stop dispatch without replying to the chat."""
-    logger.error("Stopping update after handler failure", exc_info=context.error)
-    raise ApplicationHandlerStop
+    try:
+        error = (
+            "".join(traceback.format_exception(context.error)) if context.error is not None else ""
+        )
+        logger.error(
+            "Stopping update after handler failure\n%s", _redact_token(error, context.bot.token)
+        )
+    finally:
+        raise ApplicationHandlerStop
+
+
+def _redact_token(text: str, token: str) -> str:
+    """Remove the secret half from raw and URL-encoded Telegram tokens."""
+    secret = token.partition(":")[2]
+    return text.replace(secret, "<redacted>") if secret else text
 
 
 async def _pantry(update: Update, context: ContextTypes.DEFAULT_TYPE, *, deps: BotDeps) -> None:
@@ -108,6 +122,11 @@ async def _check_token(app: Application[Any, Any, Any, Any, Any, Any]) -> None:
             pass
     except InvalidToken:
         raise RuntimeError("Telegram rejected TELEGRAM_BOT_TOKEN") from None
+    except TelegramError as exc:
+        detail = _redact_token(background.first_line(exc), app.bot.token)
+        raise RuntimeError(
+            ("Telegram getMe failed: " + detail)[: background.ERROR_MAX_CHARS]
+        ) from None
 
 
 def run_bot() -> None:
@@ -142,3 +161,8 @@ def run_bot() -> None:
         app.run_polling(allowed_updates=["message", "edited_message"])
     except InvalidToken:
         raise RuntimeError("Telegram rejected TELEGRAM_BOT_TOKEN") from None
+    except TelegramError as exc:
+        detail = _redact_token(background.first_line(exc), app.bot.token)
+        raise RuntimeError(
+            ("Telegram polling failed: " + detail)[: background.ERROR_MAX_CHARS]
+        ) from None
