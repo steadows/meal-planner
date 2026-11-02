@@ -8,15 +8,27 @@ before polling, name what's missing, never print the token, create no database f
 is on TELEGRAM_ALLOWED_CHAT_ID). The team-lead's 2a brief (2026-11-02): a refusal is a
 RuntimeError, and run_polling is called without drop_pending_updates=True.
 
+The pre-PR review (.context/reviews/pr2a-code-review.md, Issues — FIX NOW) and the team-lead's
+repair brief (2026-11-02) add: F1, a PANTRY_DB deleted after startup is not re-created by /pantry,
+which replies its one-line failure; F2, a PANTRY_DB that isn't a pantry database this code can open
+(not SQLite, or a newer schema) is refused before polling and left as it was; F3,
+TELEGRAM_ALLOWED_CHAT_ID=0 is refused like a missing one; F5, run_bot checks the token with
+Telegram before polling, and a rejected token is refused without showing it; F6, run_polling asks
+Telegram for message and edited_message updates only.
+
 Settings come from env vars only, with the project .env switched off. `Application.run_polling` is
 replaced by a recorder, so nothing polls, and conftest's guard fails anything that would reach
-Telegram; the one test that dispatches through run_bot's app routes PTB's HTTP client to a
-RecordingRequest instead.
+Telegram. A test whose startup gets as far as the token check routes PTB's HTTP client to a
+RecordingRequest (`telegram`), or, for F5, to a Telegram that rejects the token.
+
+Limit (F5): telegram.* DEBUG records go unchecked; wiring must never log telegram.* at DEBUG.
 """
 
 import inspect
+import json
 import logging
 import re
+import sqlite3
 import traceback
 from contextlib import closing, suppress
 from pathlib import Path
@@ -27,7 +39,7 @@ from telegram.ext import Application
 from telegram.request import HTTPXRequest
 
 from meals.config import Settings
-from meals.db import get_db
+from meals.db import MIGRATIONS, get_db
 from test_bot.conftest import ALLOWED_CHAT_ID, AnyApp, RecordingRequest, dispatch, text_update
 
 with suppress(
@@ -39,6 +51,7 @@ SECRET = "TEST-token-abc"  # a bot token's secret is the part after the colon
 TOKEN = f"123456:{SECRET}"
 GROUP_CHAT_ID = -100777
 MARKER = "zaatar marker 7f3"  # a pantry row only the test's PANTRY_DB holds
+PREFIX = "Couldn't read the pantry: "
 
 Polls = list[tuple[AnyApp, dict[str, Any]]]
 
@@ -71,6 +84,18 @@ def bot_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_settings: 
     return path
 
 
+@pytest.fixture
+def telegram(monkeypatch: pytest.MonkeyPatch) -> RecordingRequest:
+    """PTB's own HTTP client answered by a RecordingRequest, whose getMe accepts the token."""
+    recorder = RecordingRequest()
+
+    async def answer(self: HTTPXRequest, *args: Any, **kwargs: Any) -> tuple[int, bytes]:
+        return await recorder.do_request(*args, **kwargs)
+
+    monkeypatch.setattr(HTTPXRequest, "do_request", answer)
+    return recorder
+
+
 @pytest.mark.usefixtures("bot_env")
 def test_refuses_without_token(polls: Polls, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN")
@@ -92,6 +117,17 @@ def test_refuses_without_chat_id(polls: Polls, monkeypatch: pytest.MonkeyPatch) 
 
 
 @pytest.mark.usefixtures("bot_env")
+def test_refuses_zero_chat_id(polls: Polls, monkeypatch: pytest.MonkeyPatch) -> None:
+    # F3: no chat has id 0; a bot locked to it would start and then drop every update.
+    monkeypatch.setenv("TELEGRAM_ALLOWED_CHAT_ID", "0")
+
+    with pytest.raises(RuntimeError, match="TELEGRAM_ALLOWED_CHAT_ID"):
+        handlers.run_bot()
+
+    assert polls == [], "run_bot polled before refusing"
+
+
+@pytest.mark.usefixtures("bot_env")
 def test_refuses_missing_pantry_db(
     polls: Polls, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -105,6 +141,43 @@ def test_refuses_missing_pantry_db(
 
     assert not missing.exists(), "the refusal created the pantry database"
     assert polls == [], "run_bot polled before refusing"
+
+
+@pytest.mark.parametrize("content", ["not_sqlite", "newer_schema"])
+def test_refuses_unreadable_pantry_db(content: str, bot_env: Path, polls: Polls) -> None:
+    # F2: the file exists but isn't a pantry database this code can open: a few bytes of text, or
+    # a schema newer than this checkout's (meals.db refuses to write to it). Refused before
+    # polling, and left exactly as it was.
+    if content == "not_sqlite":
+        bot_env.write_bytes(b"not a pantry database\n" * 3)
+    else:
+        with closing(sqlite3.connect(bot_env)) as conn:
+            conn.execute("PRAGMA user_version = 999")
+    before = bot_env.read_bytes()
+
+    with pytest.raises(RuntimeError, match=f"PANTRY_DB|{re.escape(str(bot_env))}"):
+        handlers.run_bot()
+
+    assert bot_env.read_bytes() == before, "the refusal changed the pantry database file"
+    assert polls == [], "run_bot polled before refusing"
+
+
+@pytest.mark.usefixtures("telegram")
+def test_pending_migrations_run_at_startup(bot_env: Path, polls: Polls) -> None:
+    # F2: startup brings an older pantry database's schema up to date, so no migration is left to
+    # run inside a /pantry on the event loop. The database is at v1 when run_bot starts.
+    bot_env.unlink()
+    with closing(sqlite3.connect(bot_env)) as conn:
+        for statement in MIGRATIONS[0]:
+            conn.execute(statement)
+        conn.execute("PRAGMA user_version = 1")
+
+    handlers.run_bot()
+
+    assert len(polls) == 1, f"run_polling was called {len(polls)} times"
+    with closing(sqlite3.connect(bot_env)) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+    assert version == len(MIGRATIONS), f"the pantry database is still at v{version} after startup"
 
 
 @pytest.mark.parametrize("missing", ["TELEGRAM_ALLOWED_CHAT_ID", "PANTRY_DB"])
@@ -134,34 +207,70 @@ def test_refusal_never_shows_the_token(
 
 
 @pytest.mark.usefixtures("bot_env")
+def test_rejected_token_is_refused_without_showing_it(
+    polls: Polls,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # F5: Telegram answers getMe with 401. PTB's own InvalidToken carries the whole token in its
+    # text (_bot.py:867) and its retry loop logs it (ext/_utils/networkloop.py:183), so the token
+    # must appear nowhere in the refusal as Python prints it (the chain it shows included), in no
+    # log record (message or traceback), and in nothing printed. PTB's own DEBUG records
+    # (telegram.*) are left out: PTB logs its API URL, token included, at DEBUG whenever a Bot is
+    # built (_bot.py:342), and whether telegram.* DEBUG is ever recorded is bot logging setup,
+    # wiring P4.1's (seam map, Out of scope).
+    caplog.set_level(logging.DEBUG)
+    unauthorized = json.dumps({"ok": False, "error_code": 401, "description": "Unauthorized"})
+
+    async def reject(self: HTTPXRequest, *args: Any, **kwargs: Any) -> tuple[int, bytes]:
+        return 401, unauthorized.encode()
+
+    monkeypatch.setattr(HTTPXRequest, "do_request", reject)
+
+    with pytest.raises(RuntimeError, match="TELEGRAM_BOT_TOKEN") as raised:
+        handlers.run_bot()
+
+    assert polls == [], "run_bot polled with a rejected token"
+    shown = str(raised.value) + "".join(traceback.format_exception(raised.value))
+    assert SECRET not in shown, "the token is in the refusal or the chain printed with it"
+    for record in caplog.records:  # caplog formats each record as it arrives, filling exc_text
+        if record.levelno <= logging.DEBUG and record.name.startswith("telegram"):
+            continue
+        logged = record.getMessage() + (record.exc_text or "")
+        assert SECRET not in logged, f"a {record.name} log record has the token"
+    printed = capsys.readouterr()
+    assert SECRET not in printed.out + printed.err, "the token was printed"
+
+
+@pytest.mark.usefixtures("bot_env", "telegram")
 def test_polls_without_dropping_pending_updates(polls: Polls) -> None:
-    # Messages Steve sent while the bot was down must still arrive when it starts.
+    # Messages Steve sent while the bot was down must still arrive when it starts. F6: polling
+    # names the update kinds the bot reads, so no filter an earlier run left on Telegram's side
+    # applies.
     handlers.run_bot()
 
     assert len(polls) == 1, f"run_polling was called {len(polls)} times"
     _, arguments = polls[0]
     assert not arguments.get("drop_pending_updates"), f"run_polling got {arguments}"
+    allowed = arguments.get("allowed_updates")
+    assert allowed is not None, "run_polling got no allowed_updates"
+    assert sorted(allowed) == ["edited_message", "message"], f"allowed_updates={allowed!r}"
 
 
 def test_polled_app_answers_the_configured_chat_from_the_pantry_db(
-    bot_env: Path, polls: Polls, monkeypatch: pytest.MonkeyPatch
+    bot_env: Path, polls: Polls, telegram: RecordingRequest
 ) -> None:
     # AC-1 locks the bot to the TELEGRAM_ALLOWED_CHAT_ID setting; the handlers.py seam has run_bot
     # build /pantry's pantry from the PANTRY_DB setting. The app run_bot polls gets /pantry from
     # Steve's chat and from a group he writes in: only his chat is answered, from the row put in
-    # that database. For this test only, PTB's own HTTP client answers through a RecordingRequest.
+    # that database.
     with closing(get_db(bot_env)) as conn:
         conn.execute(
             "INSERT INTO pantry_item (name, aliases, category, status) VALUES (?, ?, ?, ?)",
             (MARKER, "[]", "staple", "buy_next_time"),
         )
         conn.commit()
-    recorder = RecordingRequest()
-
-    async def answer(self: HTTPXRequest, *args: Any, **kwargs: Any) -> tuple[int, bytes]:
-        return await recorder.do_request(*args, **kwargs)
-
-    monkeypatch.setattr(HTTPXRequest, "do_request", answer)
     handlers.run_bot()
     assert len(polls) == 1, f"run_polling was called {len(polls)} times"
     app, _ = polls[0]
@@ -172,6 +281,24 @@ def test_polled_app_answers_the_configured_chat_from_the_pantry_db(
         text_update(app.bot, 2, "/pantry", chat_id=GROUP_CHAT_ID, from_id=ALLOWED_CHAT_ID),
     )
 
-    sent = recorder.sent()
+    sent = telegram.sent()
     assert [params["chat_id"] for params in sent] == [ALLOWED_CHAT_ID], sent
     assert MARKER in sent[0]["text"], sent[0]["text"]
+
+
+def test_vanished_pantry_db_is_not_recreated(
+    bot_env: Path, polls: Polls, telegram: RecordingRequest
+) -> None:
+    # F1 (AC-16 "creates no database file", after startup): PANTRY_DB is deleted while the bot
+    # runs. /pantry replies its one-line failure and doesn't make a new, empty pantry.
+    handlers.run_bot()
+    assert len(polls) == 1, f"run_polling was called {len(polls)} times"
+    app, _ = polls[0]
+    bot_env.unlink()
+
+    dispatch(app, text_update(app.bot, 1, "/pantry"))
+
+    sent = telegram.sent()
+    assert len(sent) == 1 and sent[0]["text"].startswith(PREFIX), sent
+    assert "\n" not in sent[0]["text"] and "parse_mode" not in sent[0], sent
+    assert not bot_env.exists(), "/pantry re-created the pantry database"

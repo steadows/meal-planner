@@ -7,7 +7,7 @@ is PTB's real dispatch (group order, ApplicationHandlerStop), which AC-1 is a cl
 
 No test reaches Telegram: RecordingRequest answers every call, and `_no_telegram` fails any call
 that reaches PTB's own HTTP client instead (a `build_app` that ignored `request`, or a `run_bot`
-that called Telegram before polling).
+that called Telegram in a test that routed nothing to answer it).
 """
 
 import asyncio
@@ -144,27 +144,30 @@ def text_update(
     *,
     chat_id: int = ALLOWED_CHAT_ID,
     from_id: int | None = None,
+    kind: str = "message",
+    business_connection_id: str | None = None,
 ) -> Update:
     """A real text-message Update, as Telegram sends it; the sender defaults to the chat's owner. A
-    leading `/command` carries the bot_command entity, which is what PTB's CommandHandler matches."""
+    leading `/command` carries the bot_command entity, which is what PTB's CommandHandler matches.
+    `kind` is the Update field that carries the message (message, edited_message,
+    business_message); `business_connection_id`, when given, is set on the message."""
     command = text.split()[0] if text.startswith("/") else ""
     entities = [{"type": "bot_command", "offset": 0, "length": len(command)}] if command else []
-    data: dict[str, Any] = {
-        "update_id": update_id,
-        "message": {
-            "message_id": update_id,
-            "date": MESSAGE_DATE,
-            "chat": {"id": chat_id, "type": "private" if chat_id > 0 else "group"},
-            "from": {
-                "id": chat_id if from_id is None else from_id,
-                "is_bot": False,
-                "first_name": "S",
-            },
-            "text": text,
-            "entities": entities,
+    message: dict[str, Any] = {
+        "message_id": update_id,
+        "date": MESSAGE_DATE,
+        "chat": {"id": chat_id, "type": "private" if chat_id > 0 else "group"},
+        "from": {
+            "id": chat_id if from_id is None else from_id,
+            "is_bot": False,
+            "first_name": "S",
         },
+        "text": text,
+        "entities": entities,
     }
-    return Update.de_json(data, bot)
+    if business_connection_id is not None:
+        message["business_connection_id"] = business_connection_id
+    return Update.de_json({"update_id": update_id, kind: message}, bot)
 
 
 def dispatch(app: AnyApp, *updates: Update) -> None:
