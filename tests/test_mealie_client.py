@@ -499,6 +499,12 @@ def test_get_recipe_raises_mealie_unavailable_for_a_network_failure(
             ValueError,
             id="parser-answers-fewer-lines-than-sent",
         ),
+        pytest.param(
+            json.dumps(recipe_json("fajitas", recipeIngredient=[raw("2 limes")])),
+            "null",
+            ValueError,
+            id="parser-answers-json-that-is-not-a-list",
+        ),
     ],
 )
 def test_get_recipe_raises_mealie_unavailable_for_a_body_that_does_not_parse(
@@ -986,3 +992,33 @@ def test_get_recipe_keeps_the_token_out_of_mealie_unavailable(
     assert TOKEN in carried
     assert TOKEN not in str(error)
     assert TOKEN not in repr(error)
+
+
+def redirect_to_a_failing_path_that_holds_the_token(request: httpx.Request) -> httpx.Response:
+    if request.url.path == "/api/recipes/fajitas":
+        location = f"/failed/{request.headers['Authorization']}"
+        return httpx.Response(302, headers={"Location": location})
+    return httpx.Response(500, json={"detail": "boom"})
+
+
+# AC-6 (d): the message names the request this client built, not the path Mealie redirected it to.
+# from_settings takes no redirect option, so the client is built through the constructor.
+def test_get_recipe_names_the_request_it_built_when_mealie_redirects() -> None:
+    http = httpx.Client(
+        base_url="http://mealie.test",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+        transport=httpx.MockTransport(redirect_to_a_failing_path_that_holds_the_token),
+        follow_redirects=True,
+    )
+    client = HttpMealieClient(http)
+
+    with pytest.raises(MealieUnavailable) as raised:
+        client.get_recipe("fajitas")
+
+    error, cause = raised.value, raised.value.__cause__
+    assert isinstance(cause, httpx.HTTPStatusError)
+    # The token must really be in the failed request; otherwise its absence below proves nothing.
+    assert TOKEN in str(cause.request.url)
+    assert TOKEN not in str(error)
+    assert TOKEN not in repr(error)
+    assert "/api/recipes/fajitas" in str(error)
