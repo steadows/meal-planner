@@ -410,26 +410,24 @@ def test_propose_fails_loudly_when_mealie_serves_no_favorite(
 
 
 @pytest.mark.parametrize(
-    ("rotation", "unavailable"),
-    [((), ()), (("gone-a", "gone-b"), ()), (("gone-a", "broken-b"), ("broken-b",))],
-    ids=["no-favorites", "all-deleted", "deleted-and-unavailable"],
+    "unavailable", [(), ("broken-b",)], ids=["all-deleted", "deleted-and-unavailable"]
 )
 def test_no_served_favorite_is_not_a_mealie_outage(
     patched_claude: FakeClaudeRunner,
     fake_pantry: FakePantry,
+    sample_recipe: RecipeOption,
     new_recipes: tuple[RecipeOption, ...],
-    rotation: tuple[str, ...],
     unavailable: tuple[str, ...],
 ) -> None:
-    """A KeyError is Mealie answering 404, so only all-MealieUnavailable means it's unusable."""
-    fourth = new_recipes[0].model_copy(
-        update={"name": "New find 3", "url": "https://example.com/n3"}
+    """A KeyError is Mealie answering 404, so only all-MealieUnavailable means it's unusable.
+    (No favorites at all is test_an_empty_pool_gives_only_new_finds.)"""
+    four = (*new_recipes, sample_recipe)
+    mealie = FakeMealieClient(
+        tags={planner.ROTATION_TAG: ("gone-a", "broken-b")}, unavailable=unavailable
     )
-    finds = (*new_recipes, fourth)
-    mealie = FakeMealieClient(tags={planner.ROTATION_TAG: rotation}, unavailable=unavailable)
-    patched_claude.queue(_draft(finds, favorites=[]))
+    patched_claude.queue(_draft(four, favorites=[]))
 
-    assert _propose(mealie, fake_pantry).recipe_options == finds
+    assert _propose(mealie, fake_pantry).recipe_options == four
 
 
 def test_prompt_lists_only_the_rotation_pool(

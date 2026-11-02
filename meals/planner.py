@@ -196,24 +196,24 @@ def _pantry_questions(pantry: Pantry, week_start: date) -> tuple[str, ...]:
 
 
 def _rotation_pool(mealie: MealieClient) -> dict[str, RecipeOption]:
-    """Slug -> recipe for `rotation` favorites. Fail if every call raises MealieUnavailable."""
+    """Slug -> recipe for every `rotation` favorite. A slug whose recipe is gone, or that Mealie
+    can't serve, is skipped. Raises MealieUnavailable if every fetch was unavailable: Mealie may be
+    down or its token revoked. A KeyError is Mealie answering 404, so it never counts."""
     pool: dict[str, RecipeOption] = {}
     slugs = mealie.list_by_tag(ROTATION_TAG)
-    unavailable = 0
-    last_error: MealieUnavailable | None = None
+    unavailable: list[MealieUnavailable] = []
     for slug in slugs:
         try:
             pool[slug] = mealie.get_recipe(slug)
         except KeyError:
             logger.warning("planner: rotation slug %r has no recipe; skipping it", slug)
         except MealieUnavailable as exc:
-            unavailable += 1
-            last_error = exc
+            unavailable.append(exc)
             logger.warning("planner: rotation slug %r unavailable; skipping it: %s", slug, exc)
-    if slugs and unavailable == len(slugs):
+    if unavailable and len(unavailable) == len(slugs):
         raise MealieUnavailable(
             f"Mealie couldn't serve any of the {len(slugs)} rotation favorites"
-        ) from last_error
+        ) from unavailable[-1]
     return pool
 
 
