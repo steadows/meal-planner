@@ -18,8 +18,8 @@ def _ask_date(item: PantryItem) -> date | None:
     if item.typical_interval_days is None or item.last_purchased is None:
         return item.next_ask_on
     ninety_percent = -(-9 * item.typical_interval_days // 10)  # ceil, in integers: no float
-    ask = item.last_purchased + timedelta(days=ninety_percent)
-    return ask if item.next_ask_on is None else max(item.next_ask_on, ask)
+    point = item.last_purchased + timedelta(days=ninety_percent)
+    return point if item.next_ask_on is None else max(item.next_ask_on, point)
 
 
 def _is_due(item: PantryItem, on: date) -> bool:
@@ -67,8 +67,8 @@ class FakePantry:
         if plenty and interval is not None:
             wait = max(interval, STILL_GOOD_DAYS)
         pushed = on + timedelta(days=wait)
-        ask = pushed if item.next_ask_on is None else max(item.next_ask_on, pushed)
-        return self._replace(item, {"status": "have", "next_ask_on": ask})
+        floor = pushed if item.next_ask_on is None else max(item.next_ask_on, pushed)
+        return self._replace(item, {"status": "have", "next_ask_on": floor})
 
     def log_purchase(
         self, name: str, on: date, qty: float | None = None, price_cents: int | None = None
