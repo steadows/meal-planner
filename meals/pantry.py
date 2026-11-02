@@ -283,12 +283,13 @@ class SqlitePantry:
                 (_postponed_ask(item, on, plenty).isoformat(), item.id),
             )
             updated = self._reread(item.id)  # before COMMIT, so no other writer's change leaks in
+            ask_date = _ask_date(updated)
         logger.info(
             "pantry: %s %s on %s; next ask %s (floor %s)",
             item.name,
             "plenty" if plenty else "still good",
             on,
-            _ask_date(updated),
+            ask_date,
             updated.next_ask_on,
         )
         return updated
