@@ -425,7 +425,8 @@ def test_fake_pantry_asks_once_90_percent_of_the_interval_has_passed(today: date
     assert _due(pantry, today) == ["cumin"]
 
 
-def test_fake_pantry_next_ask_on_replaces_the_interval_rule(today: date) -> None:
+def test_fake_pantry_next_ask_on_is_a_floor_under_the_interval_rule(today: date) -> None:
+    """Steve, 2026-11-01: the ask date is the later of `next_ask_on` and the 90% point."""
     pantry = FakePantry(
         (
             # Overdue by its interval, but postponed to tomorrow.
@@ -436,7 +437,7 @@ def test_fake_pantry_next_ask_on_replaces_the_interval_rule(today: date) -> None
                 last_purchased=today - _days(120),
                 next_ask_on=today + _days(1),
             ),
-            # Not due by its interval, but its ask date is today.
+            # Its next_ask_on is today, but its 90% point is day 50 (ceil(0.9 * 56) after day -1).
             _staple(
                 2,
                 "rice",
@@ -448,7 +449,10 @@ def test_fake_pantry_next_ask_on_replaces_the_interval_rule(today: date) -> None
             _staple(3, "cumin", next_ask_on=today - _days(3)),
         )
     )
-    assert _due(pantry, today) == ["cumin", "rice"]
+    assert _due(pantry, today) == ["cumin"]
+    assert _due(pantry, today + _days(1)) == ["cumin", "tahini"]
+    assert "rice" not in _due(pantry, today + _days(49))
+    assert "rice" in _due(pantry, today + _days(50))
 
 
 def test_fake_pantry_flag_overrides_a_later_next_ask_on(today: date) -> None:
@@ -581,8 +585,8 @@ def test_fake_pantry_plenty_pushes_the_ask_back_one_interval_but_at_least_a_week
 
 
 def test_fake_pantry_still_good_never_pulls_the_ask_earlier(today: date) -> None:
-    """PLAN: "still good" pushes the next ask back. Volunteered early, it must not bring it forward.
-    The 90% point it leaves in place stays computed (not stored), so it still follows the interval."""
+    """PLAN: "still good" pushes the next ask back. Volunteered early, it must not bring it forward:
+    it stores a week's floor, and the later 90% point still decides the ask date."""
     last = today - _days(10)
     pantry = FakePantry(
         (
@@ -599,24 +603,25 @@ def test_fake_pantry_still_good_never_pulls_the_ask_earlier(today: date) -> None
     item = pantry.confirm_stocked("olive oil", today)
 
     assert item is not None
-    assert (item.status, item.next_ask_on) == ("have", None)
+    assert (item.status, item.next_ask_on) == ("have", today + _days(7))
     assert pantry.get_item("olive oil") == item
     assert _due(pantry, last + _days(62)) == []
     assert _due(pantry, last + _days(63)) == ["olive oil"]  # the 90% point, not today + 7
 
 
 @pytest.mark.parametrize(
-    ("plenty", "interval", "bought", "ask"),
+    ("plenty", "interval", "bought", "stored", "asked"),
     [
-        (False, 10, -2, None),  # ties its 90% point (day 7): nothing to move
-        (True, 20, 30, None),  # a stale "plenty" (`on` before the last purchase) loses to day 48
-        (True, 56, -20, 56),  # plenty beats the 90% point (day 31)
+        (False, 10, -2, 7, 7),  # ties its 90% point (day 7)
+        (True, 20, 30, 20, 48),  # a stale "plenty" (`on` before the last purchase): day 48 asks
+        (True, 56, -20, 56, 56),  # plenty beats the 90% point (day 31)
     ],
-    ids=["still good ties", "stale plenty loses", "plenty wins"],
+    ids=["still good ties", "stale plenty", "plenty wins"],
 )
-def test_fake_pantry_confirming_stores_the_push_only_when_it_is_later(
-    plenty: bool, interval: int, bought: int, ask: int | None, today: date
+def test_fake_pantry_confirming_always_stores_the_push_as_a_floor(
+    plenty: bool, interval: int, bought: int, stored: int, asked: int, today: date
 ) -> None:
+    """Steve, 2026-11-01: the push is stored even under a later 90% point, which still asks."""
     last = today + _days(bought)
     pantry = FakePantry(
         (
@@ -633,12 +638,27 @@ def test_fake_pantry_confirming_stores_the_push_only_when_it_is_later(
     item = pantry.confirm_stocked("rice", today, plenty=plenty)
 
     assert item is not None
-    assert (item.status, item.next_ask_on) == (
-        "have",
-        None if ask is None else today + _days(ask),
-    )
+    assert (item.status, item.next_ask_on) == ("have", today + _days(stored))
     assert pantry.get_item("rice") == item
+    assert _due(pantry, today + _days(asked - 1)) == []
+    assert _due(pantry, today + _days(asked)) == ["rice"]
     assert pantry.confirm_stocked("rice", today, plenty=plenty) == item  # a replay changes nothing
+
+
+def test_fake_pantry_still_good_holds_a_week_when_the_interval_later_shrinks(today: date) -> None:
+    """Steve, 2026-11-01: after "still good", don't ask again inside the week. A back-dated purchase
+    can make the real pantry re-learn a shorter interval; the fake leaves intervals as given, so the
+    test rebuilds the item with one."""
+    pantry = FakePantry(
+        (_staple(1, "coffee", typical_interval_days=60, last_purchased=today - _days(10)),)
+    )
+    pantry.confirm_stocked("coffee", today)  # the 90% point (day 44) is later than the push
+    backdated = pantry.log_purchase("coffee", today - _days(14))  # only adds history
+
+    assert backdated is not None
+    shrunk = FakePantry((backdated.model_copy(update={"typical_interval_days": 4}),))
+    assert _due(shrunk, today + _days(6)) == []  # the new 90% point is day -6
+    assert _due(shrunk, today + _days(7)) == ["coffee"]
 
 
 def test_fake_pantry_takes_a_datetime_as_its_calendar_day(today: date) -> None:
