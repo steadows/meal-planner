@@ -267,8 +267,8 @@ class Pantry(Protocol):
 
     An item's *90% point* is `last_purchased` plus ceil(9 * interval / 10) days (PLAN: ask at
     90%) when both are known. Its *ask date* is the later of `next_ask_on` and the 90% point,
-    whichever of them are known; with neither, it has none. So `next_ask_on` is a floor: the
-    item is never asked about before it.
+    whichever of them are known; with neither, it has none. So `next_ask_on` is a floor: the ask
+    date is never before it. A `buy_next_time` flag still makes an item due at once.
 
     Item names are unique after `strip().casefold()`, which is stricter than the schema's
     ASCII-only `COLLATE NOCASE`, so implementations reject a duplicate on insert. Every method
@@ -290,11 +290,12 @@ class Pantry(Protocol):
     def confirm_stocked(self, name: str, on: date, plenty: bool = False) -> PantryItem | None:
         """Steve says the item is still stocked on `on`: "still good", or "have plenty" (`plenty`).
         Status becomes `have`. The push is a week after `on` (still good) or one interval after it
-        (plenty; a week with no interval), never less than a week. The item is not asked about
-        before the push, even if a back-dated purchase later shortens the interval; only a newer
-        purchase clears that (`log_purchase`). So `next_ask_on` becomes the later of the push and
-        any stored `next_ask_on`, and a later 90% point still sets the ask date. The call itself
-        never pulls an ask earlier. Logs no purchase and never changes the interval.
+        (plenty; a week with no interval), never less than a week. The ask date stays on or after
+        the push, even if a back-dated purchase later shortens the interval; only a newer purchase
+        clears that (`log_purchase`). A later `buy_next_time` flip still makes the item due at
+        once (`staples_due`). So `next_ask_on` becomes the later of the push and any stored
+        `next_ask_on`, and a later 90% point still sets the ask date. The call itself never pulls
+        an ask earlier. Logs no purchase and never changes the interval.
         Returns the updated item.
 
         Repeating a reply for the same `on` changes nothing only while nothing else has written
