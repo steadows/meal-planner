@@ -464,9 +464,10 @@ def test_get_recipe_raises_mealie_unavailable_when_the_ingredient_parser_fails(
     assert "POST" in message and "/api/parser/ingredients" in message
 
 
-@pytest.mark.parametrize("error", [httpx.ConnectError, httpx.ReadTimeout])
+# DecodingError (a corrupt compressed body) is a RequestError but not a TransportError.
+@pytest.mark.parametrize("error", [httpx.ConnectError, httpx.ReadTimeout, httpx.DecodingError])
 def test_get_recipe_raises_mealie_unavailable_for_a_network_failure(
-    client: HttpMealieClient, stub: MealieStub, error: type[httpx.TransportError]
+    client: HttpMealieClient, stub: MealieStub, error: type[httpx.RequestError]
 ) -> None:
     stub.recipe_raises = error("Mealie is unreachable")
 
@@ -515,6 +516,19 @@ def test_get_recipe_raises_mealie_unavailable_for_a_body_that_does_not_parse(
         client.get_recipe("fajitas")
 
     assert isinstance(raised.value.__cause__, cause_type)
+
+
+# A bug must crash loudly, not read as "Mealie is down" and get skipped (seam map, AC-8).
+def test_get_recipe_lets_a_programming_error_through(
+    client: HttpMealieClient, stub: MealieStub
+) -> None:
+    stub.recipe_raises = TypeError("bug")
+
+    with pytest.raises(TypeError) as raised:
+        client.get_recipe("fajitas")
+
+    assert not isinstance(raised.value, MealieUnavailable)
+    assert raised.value is stub.recipe_raises
 
 
 # ── list_by_tag ──────────────────────────────────────────────────────────────
