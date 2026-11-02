@@ -146,9 +146,9 @@ def propose(
     after approval. Any order; the newest RECENT_WEEKS are used.
 
     Raises ValueError for a non-Sunday `week_start` or an unknown custody or mode, before any
-    Claude run; MealieUnavailable if every rotation fetch is unavailable; OSError if the profile
-    can't be read; ClaudeRunnerError if the run fails or its draft doesn't fit the week (after
-    the runner's one retry).
+    Claude run; MealieUnavailable, also before the run, if no rotation favorite loaded and any
+    was unavailable; OSError if the profile can't be read; ClaudeRunnerError if the run fails or
+    its draft doesn't fit the week (after the runner's one retry).
     """
     if week_start.weekday() != _SUNDAY:
         raise ValueError(f"week_start {week_start} is not a Sunday")
@@ -196,24 +196,25 @@ def _pantry_questions(pantry: Pantry, week_start: date) -> tuple[str, ...]:
 
 
 def _rotation_pool(mealie: MealieClient) -> dict[str, RecipeOption]:
-    """Slug -> recipe for every `rotation` favorite. A slug whose recipe is gone, or that Mealie
-    can't serve, is skipped. Raises MealieUnavailable if every fetch was unavailable: Mealie may be
-    down or its token revoked. A KeyError is an unknown slug, not Mealie failing, so it never counts."""
+    """Slug -> recipe for every `rotation` favorite. A slug whose recipe is gone (KeyError: stale
+    tags) or that Mealie can't serve is skipped. Raises MealieUnavailable if nothing loaded and any
+    fetch was unavailable: Mealie may be down, its token revoked or its parser broken, and a
+    deleted favorite beside that proves nothing."""
     pool: dict[str, RecipeOption] = {}
     slugs = mealie.list_by_tag(ROTATION_TAG)
-    unavailable: list[MealieUnavailable] = []
+    last_unavailable: MealieUnavailable | None = None
     for slug in slugs:
         try:
             pool[slug] = mealie.get_recipe(slug)
         except KeyError:
             logger.warning("planner: rotation slug %r has no recipe; skipping it", slug)
         except MealieUnavailable as exc:
-            unavailable.append(exc)
+            last_unavailable = exc
             logger.warning("planner: rotation slug %r unavailable; skipping it: %s", slug, exc)
-    if unavailable and len(unavailable) == len(slugs):
+    if not pool and last_unavailable is not None:
         raise MealieUnavailable(
             f"Mealie couldn't serve any of the {len(slugs)} rotation favorites"
-        ) from unavailable[-1]
+        ) from last_unavailable
     return pool
 
 
