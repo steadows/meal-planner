@@ -40,6 +40,10 @@ Telegram. A test whose startup gets as far as the token check routes PTB's HTTP 
 RecordingRequest (`telegram`), or, for F5, to a Telegram that rejects the token.
 
 Limit (F5): telegram.* DEBUG records go unchecked; wiring must never log telegram.* at DEBUG.
+
+Bot PR 2b adds AC-3 to startup: run_bot opens the gate's claim connection on PANTRY_DB. A test that
+sends updates to the polled app does so through `serve`, inside the replaced run_polling, so a
+run_bot that closes that connection when polling ends is still served correctly.
 """
 
 import html
@@ -49,6 +53,7 @@ import logging
 import re
 import sqlite3
 import traceback
+from collections.abc import Callable
 from contextlib import closing, suppress
 from pathlib import Path
 from typing import Any
@@ -80,6 +85,7 @@ MARKER = "zaatar marker 7f3"  # a pantry row only the test's PANTRY_DB holds
 PREFIX = "Couldn't read the pantry: "
 
 Polls = list[tuple[AnyApp, dict[str, Any]]]
+Serve = Callable[[Callable[[AnyApp], None]], None]
 
 
 def _shows_secret(text: str) -> bool:
@@ -100,6 +106,26 @@ def polls(monkeypatch: pytest.MonkeyPatch) -> Polls:
 
     monkeypatch.setattr(Application, "run_polling", record)
     return calls
+
+
+@pytest.fixture
+def serve(monkeypatch: pytest.MonkeyPatch) -> Serve:
+    """Calls run_bot with `Application.run_polling` replaced by the test's `scenario(app)`, so the
+    test's updates reach the app while run_bot is still polling, as Telegram's would. Bot PR 2b:
+    run_bot's gate connection may close once polling ends, so nothing is sent to the app after."""
+
+    def run(scenario: Callable[[AnyApp], None]) -> None:
+        served: list[AnyApp] = []
+
+        def polling(self: AnyApp, *args: Any, **kwargs: Any) -> None:
+            served.append(self)
+            scenario(self)
+
+        monkeypatch.setattr(Application, "run_polling", polling)
+        handlers.run_bot()
+        assert len(served) == 1, f"run_polling was called {len(served)} times"
+
+    return run
 
 
 @pytest.fixture
@@ -483,7 +509,7 @@ def test_polls_without_dropping_pending_updates(polls: Polls) -> None:
 
 
 def test_polled_app_answers_the_configured_chat_from_the_pantry_db(
-    bot_env: Path, polls: Polls, telegram: RecordingRequest
+    bot_env: Path, serve: Serve, telegram: RecordingRequest
 ) -> None:
     # AC-1 locks the bot to the TELEGRAM_ALLOWED_CHAT_ID setting; AC-16 has run_bot serve /pantry
     # from the PANTRY_DB setting. The app run_bot polls gets /pantry from
@@ -495,15 +521,15 @@ def test_polled_app_answers_the_configured_chat_from_the_pantry_db(
             (MARKER, "[]", "staple", "buy_next_time"),
         )
         conn.commit()
-    handlers.run_bot()
-    assert len(polls) == 1, f"run_polling was called {len(polls)} times"
-    app, _ = polls[0]
 
-    dispatch(
-        app,
-        text_update(app.bot, 1, "/pantry"),
-        text_update(app.bot, 2, "/pantry", chat_id=GROUP_CHAT_ID, from_id=ALLOWED_CHAT_ID),
-    )
+    def scenario(app: AnyApp) -> None:
+        dispatch(
+            app,
+            text_update(app.bot, 1, "/pantry"),
+            text_update(app.bot, 2, "/pantry", chat_id=GROUP_CHAT_ID, from_id=ALLOWED_CHAT_ID),
+        )
+
+    serve(scenario)
 
     sent = telegram.sent()
     assert [params["chat_id"] for params in sent] == [ALLOWED_CHAT_ID], sent
@@ -511,18 +537,31 @@ def test_polled_app_answers_the_configured_chat_from_the_pantry_db(
 
 
 def test_vanished_pantry_db_is_not_recreated(
-    bot_env: Path, polls: Polls, telegram: RecordingRequest
+    bot_env: Path, serve: Serve, telegram: RecordingRequest
 ) -> None:
     # F1 (AC-16 "creates no database file", after startup): PANTRY_DB is deleted while the bot
     # runs. /pantry replies its one-line failure and doesn't make a new, empty pantry.
-    handlers.run_bot()
-    assert len(polls) == 1, f"run_polling was called {len(polls)} times"
-    app, _ = polls[0]
-    bot_env.unlink()
+    def scenario(app: AnyApp) -> None:
+        bot_env.unlink()
+        dispatch(app, text_update(app.bot, 1, "/pantry"))
 
-    dispatch(app, text_update(app.bot, 1, "/pantry"))
+    serve(scenario)
 
     sent = telegram.sent()
     assert len(sent) == 1 and sent[0]["text"].startswith(PREFIX), sent
     assert "\n" not in sent[0]["text"] and "parse_mode" not in sent[0], sent
     assert not bot_env.exists(), "/pantry re-created the pantry database"
+
+
+def test_gate_claims_updates_in_the_pantry_db(
+    bot_env: Path, serve: Serve, telegram: RecordingRequest
+) -> None:
+    # AC-3, bot PR 2b: run_bot opens the gate's connection on PANTRY_DB, so an update's claim is
+    # in the shared database and outlives a restart. The polled app gets /pantry as update 31;
+    # its claim row reads back from PANTRY_DB on a connection of the test's own.
+    serve(lambda app: dispatch(app, text_update(app.bot, 31, "/pantry")))
+
+    assert len(telegram.sent()) == 1, "the polled app didn't answer /pantry"
+    with closing(sqlite3.connect(bot_env)) as conn:
+        claimed = [row[0] for row in conn.execute("SELECT update_id FROM telegram_update")]
+    assert claimed == [31], f"claims in PANTRY_DB: {claimed}"

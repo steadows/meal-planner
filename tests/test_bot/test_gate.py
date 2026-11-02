@@ -42,10 +42,26 @@ raises as well.
 The post-PR review's R4-1 (2026-11-02) changes AC-1's error log: an httpx transport error chained
 under a Telegram error carried the token past the redactor, so the error handler logs exception
 type names and stack frames only, for the whole chain, and never any exception's text.
+
+Bot PR 2b adds the update_id claim: AC-3 (an update_id already claimed never reaches a handler
+again, including after a restart on the same database file; a new id's claim row reads back
+before any later handler runs; claims older than 48 h are pruned) and AC-2 for it (a claim that
+raises stops the update). The claim is `claim(conn, update_id) -> bool` in meals/bot/gate.py: it
+refuses an id whose type isn't exactly int (TypeError), then, in one transaction, deletes claims
+whose SQLite-written `seen_at` is older than `datetime('now', '-48 hours')` and inserts the id
+with `ON CONFLICT(update_id) DO NOTHING`; True only when it inserted the id; committed before it
+returns; any error, IntegrityError included, propagates. The gate runs the chat lock first, then
+the claim on `BotDeps.gate_conn`. Claims are read back on a connection of their own, so only
+committed rows count, and old rows are aged by SQLite (`datetime('now', '-49 hours')`), never
+by a timestamp written from Python.
 """
 
 import html
 import logging
+import sqlite3
+from contextlib import closing
+from pathlib import Path
+from typing import Any
 from urllib.parse import unquote
 
 import httpx
@@ -55,6 +71,7 @@ from telegram.error import NetworkError
 from telegram.ext import AIORateLimiter, ContextTypes, TypeHandler
 
 from meals.contracts import PantryItem
+from meals.db import get_db
 from meals.fakes import FakePantry
 from test_bot.conftest import (
     ALLOWED_CHAT_ID,
@@ -68,6 +85,12 @@ from test_bot.conftest import (
     dispatch,
     text_update,
 )
+
+_CLAIM_MISSING: ImportError | None = None
+try:
+    from meals.bot.gate import claim
+except ImportError as exc:  # RED: bot PR 2b's claim; `_require_claim` names it per test
+    _CLAIM_MISSING = exc
 
 STRANGER_ID = 9191
 GROUP_CHAT_ID = -100777
@@ -469,3 +492,241 @@ def test_gate_is_blocking_in_group_minus_one(fake_pantry: FakePantry) -> None:
     gate = app.handlers[-1][0]
     assert isinstance(gate, TypeHandler) and gate.type is Update, f"the gate is {gate!r}"
     assert gate.block is True
+
+
+# ── bot PR 2b: the update_id claim (AC-3, and AC-2 when the claim fails) ─────
+
+
+def _require_claim() -> None:
+    if _CLAIM_MISSING is not None:
+        pytest.fail(
+            "meals.bot.gate.claim is not built yet (PLAN.md Phase 4, bot PR 2b, AC-3: "
+            "claim(conn, update_id) -> bool raises TypeError for a non-int id, prunes claims "
+            "older than 48 h, then inserts the id, committed before it returns; True only when "
+            f"this call inserted it): {_CLAIM_MISSING}",
+            pytrace=False,
+        )
+
+
+def _claimed(path: Path) -> list[int]:
+    """The update_ids committed to the database at `path`, read on a connection of its own."""
+    with closing(sqlite3.connect(path)) as conn:
+        return [row[0] for row in conn.execute("SELECT update_id FROM telegram_update ORDER BY 1")]
+
+
+def _seed_claim(conn: sqlite3.Connection, update_id: int, age: str) -> None:
+    """A claim row whose seen_at SQLite computes, `age` back from now (e.g. '-49 hours'), in the
+    column's own UTC text form: never a timestamp written from Python."""
+    conn.execute(
+        "INSERT INTO telegram_update (update_id, seen_at) VALUES (?, datetime('now', ?))",
+        (update_id, age),
+    )
+    conn.commit()
+
+
+def _db_path(conn: sqlite3.Connection) -> Path:
+    return Path(conn.execute("PRAGMA database_list").fetchone()[2])
+
+
+def test_replayed_update_is_dropped_after_restart(
+    tmp_path: Path, sample_pantry_items: tuple[PantryItem, ...]
+) -> None:
+    # AC-3: a claimed update_id never reaches a handler again, in the same run or after a restart
+    # (a fresh connection on the same database file), because Telegram resends every update whose
+    # offset it hasn't confirmed. Update 8 is the control: a new id after the restart still passes.
+    path = tmp_path / "pantry.sqlite"
+    opener = PantryOpener(FakePantry(sample_pantry_items))
+    with closing(get_db(path)) as first_run:
+        app, request = build_bot(opener, gate_conn=first_run)
+        probe = Probe()
+        app.add_handler(TypeHandler(Update, probe), group=1)
+        dispatch(app, text_update(app.bot, 7, "/pantry"), text_update(app.bot, 7, "/pantry"))
+
+    assert probe.seen == [7], "a replay in the same run reached a later handler group"
+    assert opener.opened == 1 and len(request.sent()) == 1, "/pantry ran twice for one update"
+
+    with closing(get_db(path)) as after_restart:
+        app, request = build_bot(opener, gate_conn=after_restart)
+        probe = Probe()
+        app.add_handler(TypeHandler(Update, probe), group=1)
+        dispatch(app, text_update(app.bot, 7, "/pantry"), text_update(app.bot, 8, "/pantry"))
+
+    assert probe.seen == [8], "after a restart the replayed update reached a later handler group"
+    assert opener.opened == 2 and len(request.sent()) == 1, "/pantry answered the replay"
+
+
+def test_claim_is_committed_before_dispatch(
+    tmp_path: Path, sample_pantry_items: tuple[PantryItem, ...]
+) -> None:
+    # AC-3: a new id's claim row reads back before any later handler runs. The reader uses its
+    # own connection, so it sees only what the gate committed: a claim still inside an open
+    # transaction, or one written after dispatch, reads back empty.
+    path = tmp_path / "pantry.sqlite"
+    seen: list[list[int]] = []
+
+    async def reader(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        seen.append(_claimed(path))
+
+    with closing(get_db(path)) as gate_conn:
+        app, _ = build_bot(PantryOpener(FakePantry(sample_pantry_items)), gate_conn=gate_conn)
+        app.add_handler(TypeHandler(Update, reader), group=1)
+        dispatch(app, text_update(app.bot, 41, "/pantry"), text_update(app.bot, 42, "/pantry"))
+
+    assert seen == [[41], [41, 42]], f"claims committed when each later handler ran: {seen}"
+
+
+def test_foreign_chat_writes_no_claim(
+    db: sqlite3.Connection, sample_pantry_items: tuple[PantryItem, ...]
+) -> None:
+    # AC-3 with AC-1, the seam's order: the chat lock runs first, so a stranger's update never
+    # touches the database. Steve's update 4 is the control: it is claimed.
+    app, _ = build_bot(PantryOpener(FakePantry(sample_pantry_items)), gate_conn=db)
+
+    dispatch(
+        app,
+        text_update(app.bot, 3, "/pantry", chat_id=STRANGER_ID),
+        text_update(app.bot, 4, "/pantry"),
+    )
+
+    assert _claimed(_db_path(db)) == [4], "a stranger's update was claimed (or Steve's wasn't)"
+
+
+def test_update_reusing_an_expired_claims_id_reaches_handlers(
+    db: sqlite3.Connection, sample_pantry_items: tuple[PantryItem, ...]
+) -> None:
+    # AC-3 through the gate: after a quiet week Telegram can send a new update whose id matches a
+    # claim over 48 h old. The gate claims through claim's prune-then-insert, so Steve's update
+    # reaches the later handler instead of being dropped as a replay.
+    _seed_claim(db, 601, "-49 hours")
+    app, request = build_bot(PantryOpener(FakePantry(sample_pantry_items)), gate_conn=db)
+    probe = Probe()
+    app.add_handler(TypeHandler(Update, probe), group=1)
+
+    dispatch(app, text_update(app.bot, 601, "/pantry"))
+
+    assert probe.seen == [601], "a new update with an expired claim's id was dropped"
+    assert len(request.sent()) == 1, "/pantry didn't answer it"
+
+
+def test_claim_returns_true_only_for_a_new_id(db: sqlite3.Connection) -> None:
+    # AC-3: True only when this call inserted the id, committed before it returns. After a week
+    # with no updates Telegram picks the next id at random, so a lower id is new too: a
+    # high-water mark ("drop anything at or below the last id") would drop Steve's message. A
+    # replay that inserts nothing still ends its transaction: one left open would hold the
+    # database's write lock against every pantry write until the next claim.
+    _require_claim()
+
+    assert claim(db, 700) is True
+    assert _claimed(_db_path(db)) == [700], "the claim isn't committed when claim() returns"
+    assert claim(db, 700) is False, "a replayed id was claimed twice"
+    assert not db.in_transaction, "a replay left the claim's transaction open"
+    assert claim(db, 650) is True, "a new id below an earlier one was refused"
+
+
+def test_old_claims_are_pruned(db: sqlite3.Connection) -> None:
+    # AC-3: claims older than 48 h are pruned when a new id is claimed (Telegram keeps an
+    # undelivered update for at most 24 h). One row each side of 48 h, aged by SQLite itself.
+    _require_claim()
+    _seed_claim(db, 501, "-49 hours")
+    _seed_claim(db, 502, "-47 hours")
+
+    assert claim(db, 503) is True
+
+    assert _claimed(_db_path(db)) == [502, 503], "the 48 h prune kept or dropped the wrong rows"
+
+
+def test_old_claim_is_pruned_before_its_id_is_claimed_again(db: sqlite3.Connection) -> None:
+    # AC-3, the prune runs BEFORE the insert: after a quiet week Telegram can reuse an id whose
+    # claim is over 48 h old. Insert-then-prune finds the old row (nothing inserted, False) and
+    # drops Steve's new message as a replay.
+    _require_claim()
+    _seed_claim(db, 601, "-49 hours")
+
+    assert claim(db, 601) is True, "a new update with an expired claim's id was dropped"
+
+    # The new claim's own seen_at is SQLite's UTC text from the last hour: not the expired row's,
+    # and not a Python timestamp ('T' separator, or local time), which compares wrongly as text.
+    with closing(sqlite3.connect(_db_path(db))) as conn:
+        fresh = conn.execute(
+            "SELECT seen_at BETWEEN datetime('now', '-1 hours') AND datetime('now')"
+            " FROM telegram_update WHERE update_id = 601"
+        ).fetchone()
+    assert fresh == (1,), "update 601's claim doesn't carry a fresh SQLite seen_at"
+
+
+@pytest.mark.parametrize("update_id", [None, "7", 7.0, True], ids=["none", "str", "float", "bool"])
+def test_claim_refuses_a_non_int_id(update_id: Any, db: sqlite3.Connection) -> None:
+    # AC-3, the contracts lane's security review of #35: update_id is the table's rowid alias, so
+    # a None insert gets a fresh id (max + 1) and "succeeds" every time, and SQLite turns "7" or
+    # 7.0 into 7. claim refuses anything whose type isn't exactly int (bool included) with
+    # TypeError, and writes nothing.
+    _require_claim()
+
+    with pytest.raises(TypeError):
+        claim(db, update_id)
+
+    assert _claimed(_db_path(db)) == [], f"claim({update_id!r}) wrote a row"
+
+
+def test_claim_error_propagates(db: sqlite3.Connection) -> None:
+    # AC-2 with AC-3, the contracts lane's security review of #35: an IntegrityError from the
+    # claim is a failure, never "duplicate, skip". The trigger makes SQLite refuse the insert of
+    # a new id the way a constraint does. The failed claim's transaction (its prune included)
+    # doesn't stay open holding the database's write lock.
+    _require_claim()
+    db.execute(
+        "CREATE TRIGGER refuse_claims BEFORE INSERT ON telegram_update"
+        " BEGIN SELECT RAISE(ABORT, 'claims refused'); END"
+    )
+    db.commit()
+
+    with pytest.raises(sqlite3.IntegrityError):
+        claim(db, 801)
+
+    assert not db.in_transaction, "the failed claim left its transaction open"
+
+
+@pytest.mark.parametrize(
+    ("broken", "error_type"),
+    [("refusing_trigger", "IntegrityError"), ("unmigrated", "OperationalError")],
+)
+def test_claim_failure_stops_every_handler(
+    broken: str,
+    error_type: str,
+    db: sqlite3.Connection,
+    caplog: pytest.LogCaptureFixture,
+    sample_pantry_items: tuple[PantryItem, ...],
+) -> None:
+    # AC-2 with AC-3: when the claim raises, the update stops (fail closed) and the failure is
+    # logged as an error (the app's error handler logs exception type names), not let through and
+    # not dropped quietly as a replay. Steve's own /pantry, the strongest case. The database
+    # refuses the insert (an IntegrityError, as above), or has no telegram_update table (an
+    # OperationalError).
+    caplog.set_level(logging.DEBUG, logger="meals")
+    if broken == "refusing_trigger":
+        db.execute(
+            "CREATE TRIGGER refuse_claims BEFORE INSERT ON telegram_update"
+            " BEGIN SELECT RAISE(ABORT, 'claims refused'); END"
+        )
+        db.commit()
+        gate_conn = db
+    else:
+        gate_conn = sqlite3.connect(":memory:")
+    opener = PantryOpener(FakePantry(sample_pantry_items))
+    app, request = build_bot(opener, gate_conn=gate_conn)
+    probe = Probe()
+    app.add_handler(TypeHandler(Update, probe), group=1)
+
+    dispatch(app, text_update(app.bot, 9, "/pantry"))
+
+    assert opener.opened == 0, "the pantry was opened after the claim failed"
+    assert probe.seen == [], "a later handler group ran after the claim failed"
+    assert [name for name, _ in request.calls] == ["getMe"], "the bot called Telegram about it"
+    logged = [
+        (record.levelno, record.getMessage() + (record.exc_text or ""))
+        for record in caplog.records
+        if record.name.split(".")[0] == "meals"
+    ]
+    assert any(level >= logging.ERROR and error_type in text for level, text in logged), (
+        f"no meals ERROR record names the claim's {error_type}"
+    )
