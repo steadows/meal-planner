@@ -697,6 +697,13 @@ def test_fake_pantry_confirming_stores_the_later_of_stored_and_pushed(
     assert item.next_ask_on == (today + _days(stored) if kept else pushed)
 
 
+def test_pantry_item_schema_says_next_ask_on_is_a_floor() -> None:
+    """The pantry MCP tools' output schemas carry this to Claude: a set next_ask_on is a floor,
+    not the ask date, so Claude mustn't tell Steve it's when he'll be asked next."""
+    field = PantryItem.model_json_schema()["properties"]["next_ask_on"]
+    assert "floor" in field.get("description", "").lower()
+
+
 def test_fake_pantry_refuses_items_the_real_schema_cannot_hold() -> None:
     with pytest.raises(ValueError, match="id"):
         FakePantry((_staple(1, "rice"), _staple(1, "oats")))
