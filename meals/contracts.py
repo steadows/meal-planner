@@ -328,8 +328,22 @@ def validate_claude_output(schema: type[M], payload: object) -> M:
 
 def describe_rejection(schema: type[BaseModel], exc: ValidationError) -> str:
     """A ClaudeRunnerError reason naming the first rejected field and why, so a refused field (a
-    possible injection) doesn't read like an ordinary type mismatch in the logs."""
-    first = exc.errors()[0]
+    possible injection) doesn't read like an ordinary type mismatch in the logs. Union branches
+    whose `kind` didn't match are skipped, so the field named is in the branch Claude meant."""
+    errors = exc.errors()
+    mismatched_branches: set[tuple[str | int, ...]] = {
+        error["loc"][:-1]
+        for error in errors
+        if error["loc"][-1:] == ("kind",) and error["type"] == "literal_error"
+    }
+    first = next(
+        (
+            error
+            for error in errors
+            if not any(error["loc"][: len(prefix)] == prefix for prefix in mismatched_branches)
+        ),
+        errors[0],
+    )
     where = ".".join(str(part) for part in first["loc"]) or "(root)"
     return (
         f"output failed {schema.__name__} validation ({exc.error_count()} error(s); "
