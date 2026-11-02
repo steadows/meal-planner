@@ -231,8 +231,8 @@ class SqlitePantry:
 
     def staples_due(self, on: date) -> tuple[PantryItem, ...]:
         """Staples to ask about on `on`, most overdue first: flagged, or on or past their ask date
-        (`next_ask_on`, else 90% of the interval since the last purchase). Capping how many to ask
-        is the caller's job."""
+        (the later of `next_ask_on` and 90% of the interval since the last purchase). Capping how
+        many to ask is the caller's job."""
         on = _as_day(on)
         due = (
             item for item in self.list_items() if item.category == "staple" and _is_due(item, on)
