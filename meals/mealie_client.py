@@ -20,7 +20,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from meals.config import Settings, get_settings
-from meals.contracts import TRUSTED, Ingredient, RecipeOption
+from meals.contracts import TRUSTED, Ingredient, MealieUnavailable, RecipeOption
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +145,7 @@ class _Page(_Mealie):
 
 
 _SLUG_RESPONSE = TypeAdapter(str)
+_PARSED_RESPONSE = TypeAdapter(list[_Parsed])
 
 
 class HttpMealieClient:
@@ -199,6 +200,13 @@ class HttpMealieClient:
         return slug
 
     def get_recipe(self, slug: str) -> RecipeOption:
+        try:
+            return self._recipe_option(slug)
+        # KeyError (no such recipe) passes through. InvalidURL is a Location httpx can't parse.
+        except (httpx.HTTPError, httpx.InvalidURL, ValueError) as exc:
+            raise MealieUnavailable(_unavailable_reason(slug, exc)) from exc
+
+    def _recipe_option(self, slug: str) -> RecipeOption:
         recipe = self._fetch_recipe(slug)
         seconds = recipe.prep_time_seconds
         option = RecipeOption(
@@ -270,7 +278,7 @@ class HttpMealieClient:
         if response.status_code == 404:
             raise KeyError(slug)
         response.raise_for_status()
-        return _Recipe.model_validate(response.json())
+        return _Recipe.model_validate_json(response.content)
 
     def _create_entry(self, day: str, recipe_id: UUID) -> None:
         entry = {
@@ -300,7 +308,7 @@ class HttpMealieClient:
             "/api/parser/ingredients", json={"parser": "nlp", "ingredients": texts}
         )
         response.raise_for_status()
-        return tuple(_Parsed.model_validate(item).ingredient for item in response.json())
+        return tuple(item.ingredient for item in _PARSED_RESPONSE.validate_json(response.content))
 
     def _paged(self, path: str, params: Mapping[str, str]) -> Iterator[dict[str, Any]]:
         for page in itertools.count(1):
@@ -310,6 +318,17 @@ class HttpMealieClient:
             yield from body.items
             if page >= body.total_pages:
                 return
+
+
+def _unavailable_reason(slug: str, exc: Exception) -> str:
+    """Build a log-safe, fixed-field message naming the request this client built."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        request = exc.response.history[0].request if exc.response.history else exc.request
+        method = request.method
+        path = request.url.path
+        return f"Mealie couldn't serve recipe {slug}: HTTP {status} from {method} {path}"
+    return f"Mealie couldn't serve recipe {slug}: {type(exc).__name__}"
 
 
 def _require_public_url(url: str) -> None:
