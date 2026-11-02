@@ -145,6 +145,7 @@ class _Page(_Mealie):
 
 
 _SLUG_RESPONSE = TypeAdapter(str)
+_PARSED_RESPONSE = TypeAdapter(list[_Parsed])
 
 
 class HttpMealieClient:
@@ -306,7 +307,7 @@ class HttpMealieClient:
             "/api/parser/ingredients", json={"parser": "nlp", "ingredients": texts}
         )
         response.raise_for_status()
-        return tuple(_Parsed.model_validate(item).ingredient for item in response.json())
+        return tuple(item.ingredient for item in _PARSED_RESPONSE.validate_json(response.content))
 
     def _paged(self, path: str, params: Mapping[str, str]) -> Iterator[dict[str, Any]]:
         for page in itertools.count(1):
@@ -319,11 +320,12 @@ class HttpMealieClient:
 
 
 def _unavailable_reason(slug: str, exc: Exception) -> str:
-    """Build a log-safe message from fixed fields only, never the cause's text or body."""
+    """Build a log-safe, fixed-field message naming the request this client built."""
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
-        method = exc.request.method
-        path = exc.request.url.path
+        request = exc.response.history[0].request if exc.response.history else exc.request
+        method = request.method
+        path = request.url.path
         return f"Mealie couldn't serve recipe {slug}: HTTP {status} from {method} {path}"
     return f"Mealie couldn't serve recipe {slug}: {type(exc).__name__}"
 
