@@ -14,13 +14,12 @@ def _as_day(on: date) -> date:
 
 
 def _ask_date(item: PantryItem) -> date | None:
-    """`next_ask_on`, else PLAN's 90% point: ceil(9 * interval / 10) days after the last purchase."""
-    if item.next_ask_on is not None:
-        return item.next_ask_on
+    """The later of `next_ask_on` and PLAN's 90% point, or whichever is known."""
     if item.typical_interval_days is None or item.last_purchased is None:
-        return None
+        return item.next_ask_on
     ninety_percent = -(-9 * item.typical_interval_days // 10)  # ceil, in integers: no float
-    return item.last_purchased + timedelta(days=ninety_percent)
+    ask = item.last_purchased + timedelta(days=ninety_percent)
+    return ask if item.next_ask_on is None else max(item.next_ask_on, ask)
 
 
 def _is_due(item: PantryItem, on: date) -> bool:
@@ -68,9 +67,7 @@ class FakePantry:
         if plenty and interval is not None:
             wait = max(interval, STILL_GOOD_DAYS)
         pushed = on + timedelta(days=wait)
-        current = _ask_date(item)
-        # Losing the push keeps what's stored: a `next_ask_on`, or None under a 90% point.
-        ask = pushed if current is None or pushed > current else item.next_ask_on
+        ask = pushed if item.next_ask_on is None else max(item.next_ask_on, pushed)
         return self._replace(item, {"status": "have", "next_ask_on": ask})
 
     def log_purchase(
