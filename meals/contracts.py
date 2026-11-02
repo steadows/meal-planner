@@ -23,11 +23,15 @@ from pydantic.json_schema import SkipJsonSchema
 
 PlanMode = Literal["mix", "recipes", "components"]
 Custody = Literal["wed+fri_sat", "wed+sat_sun"]
+ComponentSlot = Literal["proteins", "grains", "veg", "sauces", "fresh"]
 IntentKind = Literal[
     "pick", "swap", "custody", "pantry_flip", "add_item", "find", "save", "rate", "mode"
 ]
 PantryCategory = Literal["staple", "perishable", "fallback"]
 PantryStatus = Literal["have", "buy_next_time"]
+
+Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+Number = Annotated[int, Field(ge=1)]
 
 MAX_PANTRY_QUESTIONS = 3
 
@@ -147,9 +151,104 @@ class WeekProposal(Contract):
     )
 
 
-class Intent(Contract):
-    kind: IntentKind
-    args: dict[str, str] = Field(description="Kind-specific arguments, e.g. {'item': 'eggs'}")
+class PickArgs(Contract):
+    numbers: tuple[Number, ...] = Field(min_length=1)
+
+
+class PickIntent(Contract):
+    kind: Literal["pick"]
+    args: PickArgs
+
+
+class SwapArgs(Contract):
+    slot: ComponentSlot
+    remove: Text
+    add: Text | None
+
+
+class SwapIntent(Contract):
+    kind: Literal["swap"]
+    args: SwapArgs
+
+
+class CustodyArgs(Contract):
+    custody: Custody
+
+
+class CustodyIntent(Contract):
+    kind: Literal["custody"]
+    args: CustodyArgs
+
+
+class PantryFlipArgs(Contract):
+    item: Text
+    to: Literal["buy_next_time", "still_good", "plenty"]
+
+
+class PantryFlipIntent(Contract):
+    kind: Literal["pantry_flip"]
+    args: PantryFlipArgs
+
+
+class AddItemArgs(Contract):
+    item: Text
+
+
+class AddItemIntent(Contract):
+    kind: Literal["add_item"]
+    args: AddItemArgs
+
+
+class FindArgs(Contract):
+    request: Text
+
+
+class FindIntent(Contract):
+    kind: Literal["find"]
+    args: FindArgs
+
+
+class SaveArgs(Contract):
+    number: Number
+    add_to_week: bool
+
+
+class SaveIntent(Contract):
+    kind: Literal["save"]
+    args: SaveArgs
+
+
+class RateArgs(Contract):
+    target: Text
+    rater: Literal["steve", "miles"]
+    rating: Literal[-1, 1]
+
+
+class RateIntent(Contract):
+    kind: Literal["rate"]
+    args: RateArgs
+
+
+class ModeArgs(Contract):
+    mode: PlanMode
+
+
+class ModeIntent(Contract):
+    kind: Literal["mode"]
+    args: ModeArgs
+
+
+Intent = (
+    PickIntent
+    | SwapIntent
+    | CustodyIntent
+    | PantryFlipIntent
+    | AddItemIntent
+    | FindIntent
+    | SaveIntent
+    | RateIntent
+    | ModeIntent
+)
 
 
 class CartItem(Contract):
@@ -229,8 +328,22 @@ def validate_claude_output(schema: type[M], payload: object) -> M:
 
 def describe_rejection(schema: type[BaseModel], exc: ValidationError) -> str:
     """A ClaudeRunnerError reason naming the first rejected field and why, so a refused field (a
-    possible injection) doesn't read like an ordinary type mismatch in the logs."""
-    first = exc.errors()[0]
+    possible injection) doesn't read like an ordinary type mismatch in the logs. Union branches
+    whose `kind` didn't match are skipped, so the field named is in the branch Claude meant."""
+    errors = exc.errors()
+    mismatched_branches: set[tuple[str | int, ...]] = {
+        error["loc"][:-1]
+        for error in errors
+        if error["loc"][-1:] == ("kind",) and error["type"] == "literal_error"
+    }
+    first = next(
+        (
+            error
+            for error in errors
+            if not any(error["loc"][: len(prefix)] == prefix for prefix in mismatched_branches)
+        ),
+        errors[0],
+    )
     where = ".".join(str(part) for part in first["loc"]) or "(root)"
     return (
         f"output failed {schema.__name__} validation ({exc.error_count()} error(s); "
@@ -256,7 +369,8 @@ class MealieClient(Protocol):
 
     def get_recipe(self, slug: str) -> RecipeOption:
         """The recipe, with `mealie_slug` set to `slug`. Raises KeyError for an unknown slug, and
-        MealieUnavailable for any other failure."""
+        MealieUnavailable for the failures the MealieUnavailable docstring names. Any other error,
+        a bug included, propagates as is."""
         ...
 
     def list_by_tag(self, tag: str) -> tuple[str, ...]:

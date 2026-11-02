@@ -2,11 +2,11 @@
 
 Authority: the claude_runner.py docstrings and constants, the seam maps (`run()` /
 `load_prompt()`; contracts-3-followup: kill on any exception, `load_prompt` hardening,
-`validate_claude_output` and `RecipeOption.mealie_slug`), and ADR-0001 (Orphaned Chrome child:
-`hold_fds`). Unit tests drive a fake `claude` executable written into tmp_path. The runner hands
-the child an allowlisted env, so the fake can't be told through env where to write: it records
-each call to `calls.jsonl` and reads its scripted behaviours from `script.json`, both next to
-itself.
+`validate_claude_output` and `RecipeOption.mealie_slug`; contracts-8-bot-asks: `web=False`), and
+ADR-0001 (Orphaned Chrome child: `hold_fds`). Unit tests drive a fake `claude` executable written
+into tmp_path. The runner hands the child an allowlisted env, so the fake can't be told through env
+where to write: it records each call to `calls.jsonl` and reads its scripted behaviours from
+`script.json`, both next to itself.
 """
 
 import contextlib
@@ -187,12 +187,26 @@ def _kill(pid: int) -> None:
 
 
 @pytest.mark.parametrize(
-    ("schema", "chrome"), [(None, True), (Ingredient, False)], ids=["chrome", "schema"]
+    ("schema", "chrome", "kwargs"),
+    [
+        # web left out, so these two rows check its default.
+        (None, True, {}),
+        (Ingredient, False, {}),
+        # Bot's parse run, with or without a schema.
+        (None, False, {"web": False}),
+        (Ingredient, False, {"web": False}),
+        # Chrome runs ignore web: they already get no built-in tools, and it's no error.
+        (None, True, {"web": False}),
+    ],
+    ids=["chrome", "schema", "no_web", "no_web_schema", "chrome_no_web"],
 )
 def test_argv_carries_the_required_flags(
-    fake_claude_home: Path, schema: type[BaseModel] | None, chrome: bool
+    fake_claude_home: Path,
+    schema: type[BaseModel] | None,
+    chrome: bool,
+    kwargs: dict[str, Any],
 ) -> None:
-    claude_runner.run(PROMPT, schema=schema, chrome=chrome, timeout=RUN_TIMEOUT)
+    claude_runner.run(PROMPT, schema=schema, chrome=chrome, timeout=RUN_TIMEOUT, **kwargs)
 
     (call,) = _calls(fake_claude_home)
     argv: list[str] = call["argv"]
@@ -201,8 +215,9 @@ def test_argv_carries_the_required_flags(
     assert _flag_value(argv, "--output-format") == "json"
     assert ("--chrome" in argv) is chrome
     allowed = [_flag_value(argv, flag) for flag in ("--allowedTools", "--allowed-tools")]
-    if chrome:
-        # The logged-in Meijer session: no built-in tools at all, so no open web.
+    if chrome or kwargs.get("web") is False:
+        # The logged-in Meijer session, and bot's parse run (its prompt can carry web-sourced
+        # text, and its output drives pantry writes): no built-in tools at all, so no open web.
         assert _flag_value(argv, "--tools") == ""
         assert allowed == [None, None]
     else:
@@ -362,13 +377,26 @@ def test_failure_then_success_returns_the_second_answer(fake_claude_home: Path) 
     assert len(_calls(fake_claude_home)) == 2
 
 
-def test_chrome_run_is_never_retried(fake_claude_home: Path) -> None:
-    """A Chrome run adds items to the real cart; running it again would double the cart."""
+@pytest.mark.parametrize("kwargs", [{}, {"web": False}], ids=["default", "no_web"])
+def test_chrome_run_is_never_retried(fake_claude_home: Path, kwargs: dict[str, Any]) -> None:
+    """A Chrome run adds items to the real cart; running it again would double the cart. web=False
+    doesn't make it retryable."""
     _script(fake_claude_home, NONZERO_EXIT, OK)
 
     with pytest.raises(ClaudeRunnerError):
-        claude_runner.run(PROMPT, chrome=True, timeout=RUN_TIMEOUT)
+        claude_runner.run(PROMPT, chrome=True, timeout=RUN_TIMEOUT, **kwargs)
     assert len(_calls(fake_claude_home)) == 1
+
+
+def test_tool_free_run_is_retried_once(fake_claude_home: Path) -> None:
+    """A web=False run has no side effects, so it is retried like any plain run, and the retry has
+    no tools either."""
+    _script(fake_claude_home, NONZERO_EXIT, OK)
+
+    answer = claude_runner.run(PROMPT, schema=Ingredient, timeout=RUN_TIMEOUT, web=False)
+
+    assert answer == Ingredient(name="eggs")
+    assert [_flag_value(call["argv"], "--tools") for call in _calls(fake_claude_home)] == ["", ""]
 
 
 def test_retry_logs_a_warning_with_the_failure_reason(
@@ -1201,6 +1229,22 @@ def test_real_claude_returns_a_validated_ingredient() -> None:
     if shutil.which(get_settings().claude_bin) is None:
         pytest.skip(f"{get_settings().claude_bin!r} is not installed")
     ingredient = claude_runner.run("Return the ingredient: 2 lb chicken thighs", schema=Ingredient)
+
+    assert isinstance(ingredient, Ingredient)
+    assert "chicken" in ingredient.name.lower()
+
+
+@pytest.mark.integration
+@pytest.mark.usefixtures("live_claude")
+def test_real_claude_without_tools_returns_a_validated_ingredient() -> None:
+    """With `--tools ""` the CLI still adds its StructuredOutput tool (checked 2026-11-02 on
+    2.1.314; anthropics/claude-code#82258 saw a tools allowlist drop it), so a CLI upgrade that
+    drops it fails here. Needs `claude /login`; run with -m integration."""
+    if shutil.which(get_settings().claude_bin) is None:
+        pytest.skip(f"{get_settings().claude_bin!r} is not installed")
+    ingredient = claude_runner.run(
+        "Return the ingredient: 2 lb chicken thighs", schema=Ingredient, web=False
+    )
 
     assert isinstance(ingredient, Ingredient)
     assert "chicken" in ingredient.name.lower()
