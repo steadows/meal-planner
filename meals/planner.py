@@ -23,6 +23,7 @@ from meals.contracts import (
     Contract,
     Custody,
     MealieClient,
+    MealieUnavailable,
     Pantry,
     PlanMode,
     RecipeOption,
@@ -145,8 +146,9 @@ def propose(
     after approval. Any order; the newest RECENT_WEEKS are used.
 
     Raises ValueError for a non-Sunday `week_start` or an unknown custody or mode, before any
-    Claude run; OSError if the profile can't be read; ClaudeRunnerError if the run fails or its
-    draft doesn't fit the week (after the runner's one retry).
+    Claude run; MealieUnavailable if every rotation fetch is unavailable; OSError if the profile
+    can't be read; ClaudeRunnerError if the run fails or its draft doesn't fit the week (after
+    the runner's one retry).
     """
     if week_start.weekday() != _SUNDAY:
         raise ValueError(f"week_start {week_start} is not a Sunday")
@@ -194,13 +196,24 @@ def _pantry_questions(pantry: Pantry, week_start: date) -> tuple[str, ...]:
 
 
 def _rotation_pool(mealie: MealieClient) -> dict[str, RecipeOption]:
-    """Slug -> recipe for every `rotation` favorite. A slug whose recipe is gone is skipped."""
+    """Slug -> recipe for `rotation` favorites. Fail if every call raises MealieUnavailable."""
     pool: dict[str, RecipeOption] = {}
-    for slug in mealie.list_by_tag(ROTATION_TAG):
+    slugs = mealie.list_by_tag(ROTATION_TAG)
+    unavailable = 0
+    last_error: MealieUnavailable | None = None
+    for slug in slugs:
         try:
             pool[slug] = mealie.get_recipe(slug)
         except KeyError:
             logger.warning("planner: rotation slug %r has no recipe; skipping it", slug)
+        except MealieUnavailable as exc:
+            unavailable += 1
+            last_error = exc
+            logger.warning("planner: rotation slug %r unavailable; skipping it: %s", slug, exc)
+    if slugs and unavailable == len(slugs):
+        raise MealieUnavailable(
+            f"Mealie couldn't serve any of the {len(slugs)} rotation favorites"
+        ) from last_error
     return pool
 
 
