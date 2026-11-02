@@ -25,6 +25,13 @@ The security review's S1 (2026-11-02) adds to AC-1: if the gate itself raises, t
 there too (fails closed) and the error is logged.
 `test_allowed_chat_reaches_later_groups` is that test's control as well: the same /pantry, with a
 gate that doesn't raise.
+
+The post-PR review's C1 and C2 (2026-11-02) add to AC-1: C1, the update stops even when logging
+itself raises (a log file that can't be opened makes a logger call raise, so the gate's drop log
+raises, then the error handler's own log raises too, and PTB carries on to group 0); C2, the error
+log never shows the bot's token, raw or with ':' percent-encoded as '%3A', when the error's text
+echoes a Telegram URL (PTB copies an error body that isn't JSON into the error's text,
+`telegram/request/_baserequest.py:334`).
 """
 
 import logging
@@ -39,6 +46,7 @@ from test_bot.conftest import (
     ALLOWED_CHAT_ID,
     BOT_USER,
     MESSAGE_DATE,
+    TOKEN,
     AnyApp,
     PantryOpener,
     RecordingRequest,
@@ -50,6 +58,9 @@ from test_bot.conftest import (
 STRANGER_ID = 9191
 GROUP_CHAT_ID = -100777
 GATE_ERROR = "gate failure marker 5d2"  # the text of the error the broken gate raises
+ENCODED_TOKEN = TOKEN.replace(":", "%3A")  # the bot's token as a percent-encoded URL carries it
+TOKEN_FORMS = (TOKEN, ENCODED_TOKEN, TOKEN.partition(":")[2])  # raw, encoded, the secret half
+GATEWAY_PAGE = "<html><title>502 Bad Gateway</title><p>No answer from {url}</p></html>"
 
 
 class Probe:
@@ -60,6 +71,15 @@ class Probe:
 
     async def __call__(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         self.seen.append(update.update_id)
+
+
+class RaisingLogHandler(logging.Handler):
+    """A log destination that can't be written: each record raises OSError, as Python 3.11's
+    `FileHandler(..., delay=True)` does when its file can't be opened (its `emit` opens the file
+    outside any try, and `Handler.handle` has only try/finally)."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        raise OSError("the log file can't be opened")
 
 
 def _probed_bot(items: tuple[PantryItem, ...]) -> tuple[AnyApp, RecordingRequest, Probe]:
@@ -166,6 +186,71 @@ def test_gate_failure_stops_every_handler(
     assert any(GATE_ERROR in text for text in logged), (
         "no meals ERROR record shows the gate's error"
     )
+
+
+def test_logging_failure_still_stops_a_foreign_chat(
+    caplog: pytest.LogCaptureFixture, sample_pantry_items: tuple[PantryItem, ...]
+) -> None:
+    # AC-1, the post-PR review's C1: the `meals` log can't be written, so a logger call raises a
+    # plain OSError, not ApplicationHandlerStop. A stranger's /pantry makes the gate log its drop,
+    # which raises; the error handler's own log then raises too, and PTB logs that and carries on to
+    # the next group (telegram/ext/_application.py:1324-1327, 1929-1936). The lock must not depend
+    # on logging working. The level lets every meals record reach the broken handler.
+    caplog.set_level(logging.DEBUG, logger="meals")
+    opener = PantryOpener(FakePantry(sample_pantry_items))
+    app, request = build_bot(opener)
+    probe = Probe()
+    app.add_handler(TypeHandler(Update, probe), group=1)
+    meals_log = logging.getLogger("meals")
+    broken = RaisingLogHandler()
+    meals_log.addHandler(broken)
+    try:
+        dispatch(app, text_update(app.bot, 1, "/pantry", chat_id=STRANGER_ID))
+    finally:
+        meals_log.removeHandler(broken)
+
+    assert opener.opened == 0, "the pantry was opened for a foreign chat when logging raised"
+    assert probe.seen == [], "a later handler group ran for a foreign chat when logging raised"
+    assert [name for name, _ in request.calls] == ["getMe"], "the bot called Telegram about it"
+
+
+@pytest.mark.parametrize("echoed", [TOKEN, ENCODED_TOKEN], ids=["raw", "percent_encoded"])
+def test_gate_error_log_never_shows_the_token(
+    echoed: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    sample_pantry_items: tuple[PantryItem, ...],
+) -> None:
+    # AC-1's error log, the post-PR review's C2: the gate raises an error whose text echoes a
+    # Telegram URL carrying the bot's own token, the way PTB words a gateway's 502 page
+    # (_baserequest.py:334). The update still stops and the error is still logged, but no meals
+    # record shows the token: not raw, not with ':' as '%3A' (a redactor that replaces only the
+    # exact token misses that one), and not the secret half alone. The gate is replaced where
+    # build_app reads it, as in the S1 test above.
+    caplog.set_level(logging.DEBUG, logger="meals")
+    ran: list[int] = []
+    page = GATEWAY_PAGE.format(url=f"https://api.telegram.org/bot{echoed}/sendMessage").encode()
+
+    async def leaky_gate(update: Update, *args: object, **kwargs: object) -> None:
+        ran.append(update.update_id)
+        raise RuntimeError(f"Bad Gateway (502). Parsing the server response {page!r} failed")
+
+    monkeypatch.setattr("meals.bot.handlers.gate", leaky_gate)
+    opener = PantryOpener(FakePantry(sample_pantry_items))
+    app, request = build_bot(opener)
+    probe = Probe()
+    app.add_handler(TypeHandler(Update, probe), group=1)
+
+    dispatch(app, text_update(app.bot, 1, "/pantry"))
+
+    assert ran == [1], "the replaced gate never ran: build_app no longer reads handlers.gate"
+    assert opener.opened == 0, "the pantry was opened after the gate raised"
+    assert probe.seen == [], "a later handler group ran after the gate raised"
+    assert [name for name, _ in request.calls] == ["getMe"], "the bot called Telegram about it"
+    records = [record for record in caplog.records if record.name.split(".")[0] == "meals"]
+    assert any(record.levelno >= logging.ERROR for record in records), "no meals ERROR record"
+    logged = "".join(record.getMessage() + (record.exc_text or "") for record in records)
+    assert [form for form in TOKEN_FORMS if form in logged] == [], "a meals record has the token"
 
 
 def test_business_message_with_allowed_chat_id_is_dropped(
