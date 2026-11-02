@@ -1,12 +1,15 @@
 """meals.bot's gate (the chat lock) and how build_app registers it.
 
-Authority: the phase4-bot seam map (.context/seams/phase4-bot.md): AC-1 (an update from another
-chat, or with no chat: no later handler runs, nothing is written, nothing is replied), D4 (one
-`TypeHandler(Update, gate, block=True)` in group -1, allowlist first, ApplicationHandlerStop), the
-reuse rows for `AIORateLimiter(max_retries=3)` and `concurrent_updates=False`, the `handlers.py`
-seam, and "PR split (rev 3)" (2a: the allowlist only, no claim).
+Authority: PLAN.md, Phase 4 (lock the bot to Steve's chat ID); ADR-0001, Ownership (bot: the
+chat-ID allowlist sits in one pre-dispatch `TypeHandler` in group -1, raising
+ApplicationHandlerStop, so every handler inherits it); and the bot PR's Acceptance → proof table:
+AC-1 (an update from another chat, or with no chat: no later handler runs, nothing is written,
+nothing is replied) and its registration row (one `TypeHandler(Update, gate, block=True)` in group
+-1, allowlist first, ApplicationHandlerStop; `AIORateLimiter(max_retries=3)`;
+`concurrent_updates=False`; build_app registers the gate). PR 2a is the allowlist only, with no
+update_id claim (that is bot PR 2b).
 
-The pre-PR review's F4 (.context/reviews/pr2a-code-review.md, Issues — FIX NOW) narrows AC-1 to
+The pre-PR review's F4 (a FIX NOW) narrows AC-1 to
 the update kinds the bot reads: the gate passes only `update.message` / `update.edited_message`
 from the allowed chat with no `business_connection_id`; every other kind stops. PTB's
 `effective_chat` also reads business messages (`_update.py:698-705`), whose chat can share an id
@@ -17,7 +20,14 @@ Each dispatch test builds the real app (conftest) and adds a probe handler in gr
 `test_allowed_chat_reaches_later_groups` is the control that shows each "nothing happened"
 observation in the other two would have seen something; the edited-message test is the same
 control for the F4 cases.
+
+The security review's S1 (2026-11-02) adds to AC-1: if the gate itself raises, the update stops
+there too (fails closed) and the error is logged.
+`test_allowed_chat_reaches_later_groups` is that test's control as well: the same /pantry, with a
+gate that doesn't raise.
 """
+
+import logging
 
 import pytest
 from telegram import Update
@@ -39,6 +49,7 @@ from test_bot.conftest import (
 
 STRANGER_ID = 9191
 GROUP_CHAT_ID = -100777
+GATE_ERROR = "gate failure marker 5d2"  # the text of the error the broken gate raises
 
 
 class Probe:
@@ -85,8 +96,8 @@ def test_foreign_chat_stops_every_handler(
 
 
 def test_update_without_chat_is_dropped(sample_pantry_items: tuple[PantryItem, ...]) -> None:
-    # AC-1 "or with no chat"; D4 "a missing chat is rejected". A button press on an inline message
-    # has a sender, here Steve himself, but no chat.
+    # AC-1 "or with no chat": a missing chat is rejected. A button press on an inline message has a
+    # sender, here Steve himself, but no chat.
     opener = PantryOpener(FakePantry(sample_pantry_items))
     app, request = build_bot(opener)
     probe = Probe()
@@ -115,6 +126,46 @@ def test_allowed_chat_reaches_later_groups(sample_pantry_items: tuple[PantryItem
     assert probe.seen == [1], "the allowed chat's update didn't reach a later handler group"
     assert opener.opened == 1
     assert request.sent(), "the allowed chat's /pantry got no reply"
+
+
+def test_gate_failure_stops_every_handler(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    sample_pantry_items: tuple[PantryItem, ...],
+) -> None:
+    # AC-1, the security review's S1: the gate fails closed. PTB's process_update catches a
+    # handler's exception and, with no error handler registered, logs it and moves on to the next
+    # group (telegram/ext/_application.py:1324-1327, process_error ~:1888), so a gate that raises
+    # lets the update through to /pantry. The gate raises here for Steve's own /pantry, the
+    # strongest case: when the lock can't decide, even the allowed chat stops. How the bot stops it
+    # (an error handler, a wrapper in build_app) is open; the gate is replaced where build_app
+    # reads it.
+    ran: list[int] = []
+
+    async def broken_gate(update: Update, *args: object, **kwargs: object) -> None:
+        ran.append(update.update_id)
+        raise RuntimeError(GATE_ERROR)
+
+    monkeypatch.setattr("meals.bot.handlers.gate", broken_gate)
+    opener = PantryOpener(FakePantry(sample_pantry_items))
+    app, request = build_bot(opener)
+    probe = Probe()
+    app.add_handler(TypeHandler(Update, probe), group=1)
+
+    dispatch(app, text_update(app.bot, 1, "/pantry"))
+
+    assert ran == [1], "the replaced gate never ran: build_app no longer reads handlers.gate"
+    assert opener.opened == 0, "the pantry was opened after the gate raised"
+    assert probe.seen == [], "a later handler group ran after the gate raised"
+    assert [name for name, _ in request.calls] == ["getMe"], "the bot called Telegram about it"
+    logged = [  # caplog formats each record as it arrives, filling exc_text
+        record.getMessage() + (record.exc_text or "")
+        for record in caplog.records
+        if record.levelno >= logging.ERROR and record.name.split(".")[0] == "meals"
+    ]
+    assert any(GATE_ERROR in text for text in logged), (
+        "no meals ERROR record shows the gate's error"
+    )
 
 
 def test_business_message_with_allowed_chat_id_is_dropped(
@@ -181,8 +232,9 @@ def test_edited_message_from_allowed_chat_passes_the_gate(
 
 
 def test_app_is_sequential_and_rate_limited(fake_pantry: FakePantry) -> None:
-    # Seam map reuse rows: flood-control retries via AIORateLimiter(max_retries=3), and updates
-    # processed one at a time (concurrent_updates=False), so the gate sees them in arrival order.
+    # AC-1's registration row in the bot PR's Acceptance → proof table: flood-control retries via
+    # AIORateLimiter(max_retries=3), and updates processed one at a time (concurrent_updates=False),
+    # so the gate sees them in arrival order.
     app, _ = build_bot(PantryOpener(fake_pantry))
 
     limiter = app.bot.rate_limiter
@@ -192,9 +244,10 @@ def test_app_is_sequential_and_rate_limited(fake_pantry: FakePantry) -> None:
 
 
 def test_gate_is_blocking_in_group_minus_one(fake_pantry: FakePantry) -> None:
-    # D4: one TypeHandler(Update, gate, block=True) in group -1, and the allowlist runs first, so no
-    # group comes before it. block=True explicitly: PTB's default is DEFAULT_TRUE, which a
-    # Defaults(block=False) would turn into a non-blocking gate whose stop can't stop anything.
+    # ADR-0001, Ownership, and AC-1's registration row: one TypeHandler(Update, gate, block=True) in
+    # group -1, and the allowlist runs first, so no group comes before it. block=True explicitly:
+    # PTB's default is DEFAULT_TRUE, which a Defaults(block=False) would turn into a non-blocking
+    # gate whose stop can't stop anything.
     app, _ = build_bot(PantryOpener(fake_pantry))
 
     assert min(app.handlers) == -1, f"handler groups: {sorted(app.handlers)}"

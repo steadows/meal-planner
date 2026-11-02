@@ -1,8 +1,8 @@
 """/pantry: what Steve sees when he asks what's in the pantry (AC-13, the /pantry part, PR 2a).
 
-Authority: the phase4-bot seam map (.context/seams/phase4-bot.md): AC-13 ("/pantry lists items
-with status (split at Telegram's limit)") and the "/pantry text (2a)" paragraph under "PR split
-(rev 3)": two lines, `On the list: <names>` (status buy_next_time) then `Have: <names>`, names in
+Authority: PLAN.md, Phase 4 (Commands: `/pantry`), and AC-13 in the bot PR's Acceptance → proof
+table ("/pantry lists items with status (split at Telegram's limit)"). For PR 2a the /pantry text
+is: two lines, `On the list: <names>` (status buy_next_time) then `Have: <names>`, names in
 `list_items()` order joined by ", ", `nothing` for an empty group; an empty pantry gets
 `The pantry is empty. Run the seed loader first.`; long text goes through
 `background.split_message`; it runs inline, with no "on it" ack. The team-lead's 2a brief
@@ -111,7 +111,7 @@ def test_empty_pantry_says_run_the_seed_loader() -> None:
 
 
 def test_long_pantry_is_split_at_telegram_limit() -> None:
-    # The seam map: long /pantry text goes through background.split_message, so the replies are
+    # AC-13: long /pantry text goes through background.split_message, so the replies are
     # exactly its chunks of the whole text.
     items = _long_items()
     whole = "On the list: nothing\nHave: " + ", ".join(item.name for item in items)

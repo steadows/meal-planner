@@ -1,20 +1,24 @@
 """meals.bot.handlers.run_bot: refuses to start without what it needs (AC-16), and polls without
 dropping the messages that arrived while it was down.
 
-Authority: the phase4-bot seam map (.context/seams/phase4-bot.md): AC-16 under "PR split (rev 3)"
-(no TELEGRAM_BOT_TOKEN, no TELEGRAM_ALLOWED_CHAT_ID, or a PANTRY_DB path that doesn't exist: refuse
-before polling, name what's missing, never print the token, create no database file); the
-`handlers.py` seam (run_bot builds real deps from get_settings() and runs polling); AC-1 (the lock
-is on TELEGRAM_ALLOWED_CHAT_ID). The team-lead's 2a brief (2026-11-02): a refusal is a
-RuntimeError, and run_polling is called without drop_pending_updates=True.
+Authority: PLAN.md, Phase 4 (the bot, locked to Steve's chat ID); ADR-0001, Decision (the bot is
+one long-running process that handles chat); and the bot PR's Acceptance → proof table: AC-16 (no
+TELEGRAM_BOT_TOKEN, no TELEGRAM_ALLOWED_CHAT_ID, or a PANTRY_DB path that doesn't exist: refuse
+before polling, name what's missing, never print the token, create no database file; run_bot
+builds real deps from get_settings() and runs polling) and AC-1 (the lock is on
+TELEGRAM_ALLOWED_CHAT_ID). The team-lead's 2a brief (2026-11-02): a refusal is a RuntimeError, and
+run_polling is called without drop_pending_updates=True.
 
-The pre-PR review (.context/reviews/pr2a-code-review.md, Issues — FIX NOW) and the team-lead's
-repair brief (2026-11-02) add: F1, a PANTRY_DB deleted after startup is not re-created by /pantry,
-which replies its one-line failure; F2, a PANTRY_DB that isn't a pantry database this code can open
-(not SQLite, or a newer schema) is refused before polling and left as it was; F3,
+The pre-PR review's FIX NOWs and the team-lead's repair brief (2026-11-02) add: F1, a PANTRY_DB
+deleted after startup is not re-created by /pantry, which replies its one-line failure; F2, a
+PANTRY_DB that isn't a pantry database this code can open (not SQLite, or a newer schema) is
+refused before polling and left as it was; F3,
 TELEGRAM_ALLOWED_CHAT_ID=0 is refused like a missing one; F5, run_bot checks the token with
 Telegram before polling, and a rejected token is refused without showing it; F6, run_polling asks
 Telegram for message and edited_message updates only.
+
+The security review (2026-11-02) adds to AC-16: S3, a negative (group) TELEGRAM_ALLOWED_CHAT_ID is
+refused; S2, a token Telegram rejects at run_polling's own start is refused without showing it.
 
 Settings come from env vars only, with the project .env switched off. `Application.run_polling` is
 replaced by a recorder, so nothing polls, and conftest's guard fails anything that would reach
@@ -35,6 +39,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from telegram.error import InvalidToken
 from telegram.ext import Application
 from telegram.request import HTTPXRequest
 
@@ -125,6 +130,24 @@ def test_refuses_zero_chat_id(polls: Polls, monkeypatch: pytest.MonkeyPatch) -> 
         handlers.run_bot()
 
     assert polls == [], "run_bot polled before refusing"
+
+
+@pytest.mark.parametrize("chat_id", [-1, -1001234567890], ids=["minus_one", "supergroup"])
+@pytest.mark.usefixtures("bot_env", "telegram")
+def test_refuses_group_chat_id(chat_id: int, polls: Polls, monkeypatch: pytest.MonkeyPatch) -> None:
+    # AC-16, the security review's S3: private chat ids are positive, group and supergroup ids
+    # negative.
+    # The lock compares only the chat id, so a bot locked to a group serves every member of it.
+    # -1 is the negative id nearest zero; supergroup ids look like the second. getMe is answered,
+    # so the refusal may come before or after the token check, as long as it is before polling.
+    monkeypatch.setenv("TELEGRAM_ALLOWED_CHAT_ID", str(chat_id))
+
+    with pytest.raises(RuntimeError, match="TELEGRAM_ALLOWED_CHAT_ID") as raised:
+        handlers.run_bot()
+
+    assert polls == [], "run_bot polled before refusing"
+    shown = str(raised.value) + "".join(traceback.format_exception(raised.value))
+    assert SECRET not in shown, "the token is in the refusal or the chain printed with it"
 
 
 @pytest.mark.usefixtures("bot_env")
@@ -219,7 +242,7 @@ def test_rejected_token_is_refused_without_showing_it(
     # log record (message or traceback), and in nothing printed. PTB's own DEBUG records
     # (telegram.*) are left out: PTB logs its API URL, token included, at DEBUG whenever a Bot is
     # built (_bot.py:342), and whether telegram.* DEBUG is ever recorded is bot logging setup,
-    # wiring P4.1's (seam map, Out of scope).
+    # wiring P4.1's (the bot PR's Out of scope).
     caplog.set_level(logging.DEBUG)
     unauthorized = json.dumps({"ok": False, "error_code": 401, "description": "Unauthorized"})
 
@@ -244,6 +267,32 @@ def test_rejected_token_is_refused_without_showing_it(
 
 
 @pytest.mark.usefixtures("bot_env", "telegram")
+def test_token_rejected_at_polling_start_is_refused_without_showing_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # AC-16, the security review's S2: getMe accepts the token at the check, then Telegram rejects
+    # it when run_polling initializes the bot again. PTB's Bot.initialize raises InvalidToken with
+    # the whole token in its text (_bot.py:867-868) and it comes out of run_polling; the replaced
+    # run_polling raises that error. Log records go unchecked here: PTB's retry loop logs it, token
+    # included, at ERROR (ext/_utils/networkloop.py:183), and that is bot logging setup, wiring
+    # P4.1's (the bot PR's Out of scope; the security review leaves it to wiring).
+    started: list[AnyApp] = []
+
+    def rejected(self: AnyApp, *args: Any, **kwargs: Any) -> None:
+        started.append(self)
+        raise InvalidToken(f"The token `{TOKEN}` was rejected by the server.")
+
+    monkeypatch.setattr(Application, "run_polling", rejected)
+
+    with pytest.raises(RuntimeError, match="TELEGRAM_BOT_TOKEN") as raised:
+        handlers.run_bot()
+
+    assert len(started) == 1, f"run_polling was called {len(started)} times"
+    shown = str(raised.value) + "".join(traceback.format_exception(raised.value))
+    assert SECRET not in shown, "the token is in the refusal or the chain printed with it"
+
+
+@pytest.mark.usefixtures("bot_env", "telegram")
 def test_polls_without_dropping_pending_updates(polls: Polls) -> None:
     # Messages Steve sent while the bot was down must still arrive when it starts. F6: polling
     # names the update kinds the bot reads, so no filter an earlier run left on Telegram's side
@@ -261,8 +310,8 @@ def test_polls_without_dropping_pending_updates(polls: Polls) -> None:
 def test_polled_app_answers_the_configured_chat_from_the_pantry_db(
     bot_env: Path, polls: Polls, telegram: RecordingRequest
 ) -> None:
-    # AC-1 locks the bot to the TELEGRAM_ALLOWED_CHAT_ID setting; the handlers.py seam has run_bot
-    # build /pantry's pantry from the PANTRY_DB setting. The app run_bot polls gets /pantry from
+    # AC-1 locks the bot to the TELEGRAM_ALLOWED_CHAT_ID setting; AC-16 has run_bot serve /pantry
+    # from the PANTRY_DB setting. The app run_bot polls gets /pantry from
     # Steve's chat and from a group he writes in: only his chat is answered, from the row put in
     # that database.
     with closing(get_db(bot_env)) as conn:

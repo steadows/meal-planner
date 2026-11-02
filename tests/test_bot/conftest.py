@@ -1,9 +1,11 @@
 """The PR 2a test instrument for meals.bot.
 
-Authority: the phase4-bot seam map (.context/seams/phase4-bot.md), "Test instrument (2a)": the real
-PTB Application runs `process_update` on real `Update`s (`Update.de_json`), with the bot's HTTP
-replaced by RecordingRequest, which records each Bot API call and answers it with canned JSON. That
-is PTB's real dispatch (group order, ApplicationHandlerStop), which AC-1 is a claim about.
+Authority: PLAN.md, Phase 4 (the bot, locked to Steve's chat ID), and ADR-0001, Ownership (bot: the
+chat-ID allowlist is one pre-dispatch handler in group -1). The instrument: the real PTB Application
+runs `process_update` on real `Update`s (`Update.de_json`), with the bot's HTTP replaced by
+RecordingRequest, which records each Bot API call and answers it with canned JSON. That is PTB's
+real dispatch (group order, ApplicationHandlerStop), which AC-1 in the bot PR's Acceptance → proof
+table is a claim about.
 
 No test reaches Telegram: RecordingRequest answers every call, and `_no_telegram` fails any call
 that reaches PTB's own HTTP client instead (a `build_app` that ignored `request`, or a `run_bot`
@@ -41,7 +43,7 @@ MESSAGE_DATE = 1_793_000_000  # a fixed send time, as the Unix timestamp Telegra
 def _bot_is_built() -> None:
     if _MISSING is not None:
         pytest.fail(
-            "meals.bot.handlers is not built yet (seam map phase4-bot, PR 2a: BotDeps, "
+            "meals.bot.handlers is not built yet (PLAN.md Phase 4, bot PR 2a: BotDeps, "
             f"build_app(token, deps, *, request=None), run_bot()): {_MISSING}",
             pytrace=False,
         )
