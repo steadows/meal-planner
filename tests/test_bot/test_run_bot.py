@@ -25,6 +25,10 @@ at the check or at run_polling's start, is refused without showing the token. PT
 body that isn't JSON into the error's text (telegram/request/_baserequest.py:334), so a gateway's
 502 page that echoes the request URL carries the token, raw or with ':' percent-encoded as '%3A'.
 
+The post-PR review's R3-1 (2026-11-02) adds to C2: that text is untrusted and can encode the token
+any way, so the same failures with the secret's '-' as '%2D' or '&#45;' are refused without showing
+the token either, and what is shown is searched once percent-decoded and HTML-unescaped too.
+
 Settings come from env vars only, with the project .env switched off. `Application.run_polling` is
 replaced by a recorder, so nothing polls, and conftest's guard fails anything that would reach
 Telegram. A test whose startup gets as far as the token check routes PTB's HTTP client to a
@@ -33,6 +37,7 @@ RecordingRequest (`telegram`), or, for F5, to a Telegram that rejects the token.
 Limit (F5): telegram.* DEBUG records go unchecked; wiring must never log telegram.* at DEBUG.
 """
 
+import html
 import inspect
 import json
 import logging
@@ -42,6 +47,7 @@ import traceback
 from contextlib import closing, suppress
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 import pytest
 from telegram.error import InvalidToken, NetworkError
@@ -60,7 +66,8 @@ with suppress(
 SECRET = "TEST-token-abc"  # a bot token's secret is the part after the colon
 TOKEN = f"123456:{SECRET}"
 ENCODED_TOKEN = TOKEN.replace(":", "%3A")  # the token as a percent-encoded URL carries it
-TOKEN_FORMS = (TOKEN, ENCODED_TOKEN, SECRET)
+SECRET_ENCODED_TOKEN = ENCODED_TOKEN.replace("-", "%2D")  # R3-1: encoded inside the secret too
+SECRET_ESCAPED_TOKEN = TOKEN.replace("-", "&#45;")  # R3-1: HTML-escaped inside the secret
 GATEWAY_PAGE = "<html><title>502 Bad Gateway</title><p>No answer from {url}</p></html>"
 TELEGRAM_FAILED = "(?i)telegram|getme"  # the refusal says Telegram (or getMe) failed
 GROUP_CHAT_ID = -100777
@@ -68,6 +75,12 @@ MARKER = "zaatar marker 7f3"  # a pantry row only the test's PANTRY_DB holds
 PREFIX = "Couldn't read the pantry: "
 
 Polls = list[tuple[AnyApp, dict[str, Any]]]
+
+
+def _shows_secret(text: str) -> bool:
+    """Whether `text` shows the token's secret half, as written or once percent-decoded and
+    HTML-unescaped (R3-1: Telegram's error text is untrusted and can encode the token any way)."""
+    return SECRET in text or SECRET in unquote(html.unescape(text))
 
 
 @pytest.fixture
@@ -301,7 +314,11 @@ def test_token_rejected_at_polling_start_is_refused_without_showing_it(
     assert SECRET not in shown, "the token is in the refusal or the chain printed with it"
 
 
-@pytest.mark.parametrize("echoed", [TOKEN, ENCODED_TOKEN], ids=["raw", "percent_encoded"])
+@pytest.mark.parametrize(
+    "echoed",
+    [TOKEN, ENCODED_TOKEN, SECRET_ENCODED_TOKEN, SECRET_ESCAPED_TOKEN],
+    ids=["raw", "percent_encoded", "secret_percent_encoded", "secret_html_escaped"],
+)
 @pytest.mark.usefixtures("bot_env")
 def test_telegram_failure_at_the_token_check_never_shows_the_token(
     echoed: str,
@@ -314,7 +331,9 @@ def test_telegram_failure_at_the_token_check_never_shows_the_token(
     # a body that isn't JSON into the error's text (_baserequest.py:334) and raises NetworkError.
     # run_bot refuses before polling, and the token appears nowhere in the refusal, the chain
     # printed with it, or a meals log record: not raw, not with ':' as '%3A' (a redactor that
-    # replaces only the exact token misses that one), and not the secret half alone.
+    # replaces only the exact token misses that one), and not the secret half alone. R3-1: nor
+    # with the secret's '-' as '%2D' or '&#45;' (a redactor that replaces only the secret as
+    # written misses those), so what is shown is also searched once decoded.
     caplog.set_level(logging.DEBUG, logger="meals")
     page = GATEWAY_PAGE.format(url=f"https://api.telegram.org/bot{echoed}/getMe").encode()
 
@@ -328,16 +347,20 @@ def test_telegram_failure_at_the_token_check_never_shows_the_token(
 
     assert polls == [], "run_bot polled after getMe failed"
     shown = str(raised.value) + "".join(traceback.format_exception(raised.value))
-    assert [form for form in TOKEN_FORMS if form in shown] == [], "the refusal shows the token"
-    logged = "".join(
+    assert not _shows_secret(shown), "the refusal shows the token"
+    logged = [
         record.getMessage() + (record.exc_text or "")
         for record in caplog.records
         if record.name.split(".")[0] == "meals"
-    )
-    assert [form for form in TOKEN_FORMS if form in logged] == [], "a meals record has the token"
+    ]
+    assert [text for text in logged if _shows_secret(text)] == [], "a meals record has the token"
 
 
-@pytest.mark.parametrize("echoed", [TOKEN, ENCODED_TOKEN], ids=["raw", "percent_encoded"])
+@pytest.mark.parametrize(
+    "echoed",
+    [TOKEN, ENCODED_TOKEN, SECRET_ENCODED_TOKEN, SECRET_ESCAPED_TOKEN],
+    ids=["raw", "percent_encoded", "secret_percent_encoded", "secret_html_escaped"],
+)
 @pytest.mark.usefixtures("bot_env", "telegram")
 def test_telegram_failure_at_polling_start_never_shows_the_token(
     echoed: str, monkeypatch: pytest.MonkeyPatch
@@ -345,8 +368,9 @@ def test_telegram_failure_at_polling_start_never_shows_the_token(
     # AC-16, the post-PR review's C2: getMe accepts the token at the check, then run_polling fails
     # with the NetworkError PTB raises for a gateway's 502 page that echoes the request URL
     # (_baserequest.py:334). The replaced run_polling raises that error. The refusal and the chain
-    # printed with it show no form of the token. Log records go unchecked, as in the S2 test above:
-    # PTB's own network-loop logging is bot logging setup, wiring P4.1's.
+    # printed with it show no form of the token, R3-1's '%2D' and '&#45;' forms included, searched
+    # as written and once decoded. Log records go unchecked, as in the S2 test above: PTB's own
+    # network-loop logging is bot logging setup, wiring P4.1's.
     started: list[AnyApp] = []
     page = GATEWAY_PAGE.format(url=f"https://api.telegram.org/bot{echoed}/getUpdates").encode()
 
@@ -361,7 +385,7 @@ def test_telegram_failure_at_polling_start_never_shows_the_token(
 
     assert len(started) == 1, f"run_polling was called {len(started)} times"
     shown = str(raised.value) + "".join(traceback.format_exception(raised.value))
-    assert [form for form in TOKEN_FORMS if form in shown] == [], "the refusal shows the token"
+    assert not _shows_secret(shown), "the refusal shows the token"
 
 
 @pytest.mark.usefixtures("bot_env", "telegram")

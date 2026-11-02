@@ -32,12 +32,21 @@ raises, then the error handler's own log raises too, and PTB carries on to group
 log never shows the bot's token, raw or with ':' percent-encoded as '%3A', when the error's text
 echoes a Telegram URL (PTB copies an error body that isn't JSON into the error's text,
 `telegram/request/_baserequest.py:334`).
+
+The post-PR review's R3-1 and R3-2 (2026-11-02) add to AC-1: R3-1, a Telegram error's text is
+untrusted and can encode the token any way, so a NetworkError whose text has the secret's '-' as
+'%2D' or '&#45;' must not show the token either, and the log is searched once percent-decoded and
+HTML-unescaped too; R3-2, the update stops when the gate raises and the error handler's own log
+raises as well.
 """
 
+import html
 import logging
+from urllib.parse import unquote
 
 import pytest
 from telegram import Update
+from telegram.error import NetworkError
 from telegram.ext import AIORateLimiter, ContextTypes, TypeHandler
 
 from meals.contracts import PantryItem
@@ -58,8 +67,10 @@ from test_bot.conftest import (
 STRANGER_ID = 9191
 GROUP_CHAT_ID = -100777
 GATE_ERROR = "gate failure marker 5d2"  # the text of the error the broken gate raises
+SECRET = TOKEN.partition(":")[2]  # a bot token's secret is the part after the colon
 ENCODED_TOKEN = TOKEN.replace(":", "%3A")  # the bot's token as a percent-encoded URL carries it
-TOKEN_FORMS = (TOKEN, ENCODED_TOKEN, TOKEN.partition(":")[2])  # raw, encoded, the secret half
+SECRET_ENCODED_TOKEN = ENCODED_TOKEN.replace("-", "%2D")  # R3-1: encoded inside the secret too
+SECRET_ESCAPED_TOKEN = TOKEN.replace("-", "&#45;")  # R3-1: HTML-escaped inside the secret
 GATEWAY_PAGE = "<html><title>502 Bad Gateway</title><p>No answer from {url}</p></html>"
 
 
@@ -80,6 +91,12 @@ class RaisingLogHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         raise OSError("the log file can't be opened")
+
+
+def _shows_secret(text: str) -> bool:
+    """Whether `text` shows the token's secret half, as written or once percent-decoded and
+    HTML-unescaped (R3-1: Telegram's error text is untrusted and can encode the token any way)."""
+    return SECRET in text or SECRET in unquote(html.unescape(text))
 
 
 def _probed_bot(items: tuple[PantryItem, ...]) -> tuple[AnyApp, RecordingRequest, Probe]:
@@ -214,9 +231,56 @@ def test_logging_failure_still_stops_a_foreign_chat(
     assert [name for name, _ in request.calls] == ["getMe"], "the bot called Telegram about it"
 
 
-@pytest.mark.parametrize("echoed", [TOKEN, ENCODED_TOKEN], ids=["raw", "percent_encoded"])
+def test_gate_and_logging_failure_still_stops_a_foreign_chat(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    sample_pantry_items: tuple[PantryItem, ...],
+) -> None:
+    # AC-1, the post-PR review's R3-2: the C1 test above stops at the gate, so the error handler
+    # never runs there. Here the gate raises (as in the S1 test), so the error handler runs, and
+    # its own log raises too. An error handler that raises anything but ApplicationHandlerStop
+    # makes PTB log that and carry on to the next group (telegram/ext/_application.py:1324-1327,
+    # 1929-1936), so the lock must not depend on the error handler's log working. The gate is
+    # replaced where build_app reads it; the level lets every meals record reach the broken handler.
+    caplog.set_level(logging.DEBUG, logger="meals")
+    ran: list[int] = []
+
+    async def broken_gate(update: Update, *args: object, **kwargs: object) -> None:
+        ran.append(update.update_id)
+        raise RuntimeError(GATE_ERROR)
+
+    monkeypatch.setattr("meals.bot.handlers.gate", broken_gate)
+    opener = PantryOpener(FakePantry(sample_pantry_items))
+    app, request = build_bot(opener)
+    probe = Probe()
+    app.add_handler(TypeHandler(Update, probe), group=1)
+    meals_log = logging.getLogger("meals")
+    broken = RaisingLogHandler()
+    meals_log.addHandler(broken)
+    try:
+        dispatch(app, text_update(app.bot, 1, "/pantry", chat_id=STRANGER_ID))
+    finally:
+        meals_log.removeHandler(broken)
+
+    assert ran == [1], "the replaced gate never ran: build_app no longer reads handlers.gate"
+    assert opener.opened == 0, "the pantry was opened when the gate and the error log both raised"
+    assert probe.seen == [], "a later handler group ran when the gate and the error log both raised"
+    assert [name for name, _ in request.calls] == ["getMe"], "the bot called Telegram about it"
+
+
+@pytest.mark.parametrize(
+    ("echoed", "carrier"),
+    [
+        (TOKEN, RuntimeError),
+        (ENCODED_TOKEN, RuntimeError),
+        (SECRET_ENCODED_TOKEN, NetworkError),
+        (SECRET_ESCAPED_TOKEN, NetworkError),
+    ],
+    ids=["raw", "percent_encoded", "secret_percent_encoded", "secret_html_escaped"],
+)
 def test_gate_error_log_never_shows_the_token(
     echoed: str,
+    carrier: type[Exception],
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     sample_pantry_items: tuple[PantryItem, ...],
@@ -225,15 +289,17 @@ def test_gate_error_log_never_shows_the_token(
     # Telegram URL carrying the bot's own token, the way PTB words a gateway's 502 page
     # (_baserequest.py:334). The update still stops and the error is still logged, but no meals
     # record shows the token: not raw, not with ':' as '%3A' (a redactor that replaces only the
-    # exact token misses that one), and not the secret half alone. The gate is replaced where
-    # build_app reads it, as in the S1 test above.
+    # exact token misses that one), and not the secret half alone. R3-1: the same page in a
+    # NetworkError, the error PTB raises for it, with the secret's '-' as '%2D' or '&#45;' (a
+    # redactor that replaces only the secret as written misses those), so each record is also
+    # searched once decoded. The gate is replaced where build_app reads it, as in the S1 test above.
     caplog.set_level(logging.DEBUG, logger="meals")
     ran: list[int] = []
     page = GATEWAY_PAGE.format(url=f"https://api.telegram.org/bot{echoed}/sendMessage").encode()
 
     async def leaky_gate(update: Update, *args: object, **kwargs: object) -> None:
         ran.append(update.update_id)
-        raise RuntimeError(f"Bad Gateway (502). Parsing the server response {page!r} failed")
+        raise carrier(f"Bad Gateway (502). Parsing the server response {page!r} failed")
 
     monkeypatch.setattr("meals.bot.handlers.gate", leaky_gate)
     opener = PantryOpener(FakePantry(sample_pantry_items))
@@ -249,8 +315,8 @@ def test_gate_error_log_never_shows_the_token(
     assert [name for name, _ in request.calls] == ["getMe"], "the bot called Telegram about it"
     records = [record for record in caplog.records if record.name.split(".")[0] == "meals"]
     assert any(record.levelno >= logging.ERROR for record in records), "no meals ERROR record"
-    logged = "".join(record.getMessage() + (record.exc_text or "") for record in records)
-    assert [form for form in TOKEN_FORMS if form in logged] == [], "a meals record has the token"
+    logged = [record.getMessage() + (record.exc_text or "") for record in records]
+    assert [text for text in logged if _shows_secret(text)] == [], "a meals record has the token"
 
 
 def test_business_message_with_allowed_chat_id_is_dropped(
