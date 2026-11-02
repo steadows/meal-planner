@@ -192,7 +192,14 @@ class PantryItem(Contract):
     status: PantryStatus = "have"
     typical_interval_days: int | None = Field(default=None, gt=0)
     last_purchased: date | None = None
-    next_ask_on: date | None = None  # a floor under the ask date, not the ask date (see Pantry)
+    next_ask_on: date | None = Field(
+        default=None,
+        description=(
+            "A floor under the ask date, not the ask date itself. The ask date is the later of "
+            "this and 90% of the interval after the last purchase, and a buy_next_time item is "
+            "due at once. Use staples_due to know what is due."
+        ),
+    )
     default_qty: float | None = None
     default_unit: str | None = None
     meijer_product_id: str | None = None
