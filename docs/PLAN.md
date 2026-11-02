@@ -478,10 +478,10 @@ Not yet tested: whether the importer handles every recipe site Steve uses.
 
 ### Phase 4: Telegram bot, capture first (about 2–3 hours)
 
-- [~] Create the bot with BotFather (`/newbot`) and lock it to Steve's chat ID. (@steve_meals_bot created 2026-09-25; token and chat ID are in `.env`. The chat-ID lock in code is Lane D's.)
+- [x] Create the bot with BotFather (`/newbot`) and lock it to Steve's chat ID. (@steve_meals_bot created 2026-09-25; token and chat ID are in `.env`. The chat-ID lock in code shipped in #38.)
 - [ ] Free text goes to Claude, which turns it into pantry operations, applies them through the MCP tools, and repeats back what changed.
 - [ ] Voice notes: transcribe (Whisper locally or through an API), then send the text down the same path. Always repeat the transcript back.
-- [ ] Commands: `/pantry`, `/plan`, `/due`.
+- [~] Commands: `/pantry`, `/plan`, `/due`. (`/pantry` shipped in #38; `/plan` and `/due` follow.)
 
 * [x] Write the preferences profile file (likes, dislikes, grains, goals, effort, Miles, sources).
 * [~] Recipe search: `/find` plus plain words returns 3–5 options filtered by the profile. "save N" imports to Mealie, and "add N to this week" puts it on the plan. (`/find` shipped in #10; "save N" and "add N" wait on the bot and `plan_state`.)
