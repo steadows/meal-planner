@@ -5,10 +5,14 @@ that cannot open and migrate. Its chat lock fails closed; its error log holds ex
 code locations only.
 It checks the token with one getMe, then polls for messages and edits only, keeping any pending
 updates. `/pantry` checks that the file exists, opens it once per command, and replies in plain text.
+Free text takes an arrival ticket and deadline before background parsing and guarded pantry writes.
+Edited messages ask for a new message. Parse failures expose only the runner's safe reason.
 """
 
 import asyncio
 import logging
+import sqlite3
+import time
 import traceback
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, closing, contextmanager
@@ -25,32 +29,38 @@ from telegram.ext import (
     ApplicationHandlerStop,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
     TypeHandler,
+    filters,
 )
 from telegram.request import BaseRequest
 
 from meals import background
+from meals.bot import intents, pantry_ops
 from meals.bot.gate import gate
 from meals.config import get_settings
-from meals.contracts import Pantry, PantryItem
+from meals.contracts import ClaudeRunnerError, Pantry, PantryItem
 from meals.db import get_db
 from meals.pantry import SqlitePantry
 
 logger = logging.getLogger(__name__)
 
+APPLY_MARGIN_S = 10.0
+
 
 @dataclass(frozen=True)
 class BotDeps:
-    """The allowed chat and a fresh pantry context for each command."""
+    """The allowed chat, event-loop claim connection, and fresh pantry context per call."""
 
     allowed_chat_id: int
     open_pantry: Callable[[], AbstractContextManager[Pantry]]
+    gate_conn: sqlite3.Connection
 
 
 def build_app(
     token: str, deps: BotDeps, *, request: BaseRequest | None = None
 ) -> Application[Any, Any, Any, Any, Any, Any]:
-    """Build sequential dispatch with a blocking gate before /pantry and optional fake HTTP."""
+    """Build sequential, gated dispatch with per-Application write ordering and optional fake HTTP."""
     builder = (
         ApplicationBuilder()
         .token(token)
@@ -60,12 +70,26 @@ def build_app(
     if request is not None:
         builder = builder.request(request).get_updates_request(request)
     app = builder.build()
+    latest = pantry_ops.LatestWrites()
     app.add_error_handler(_stop_on_error, block=True)
     app.add_handler(
-        TypeHandler(Update, partial(gate, allowed_chat_id=deps.allowed_chat_id), block=True),
+        TypeHandler(
+            Update,
+            partial(gate, allowed_chat_id=deps.allowed_chat_id, gate_conn=deps.gate_conn),
+            block=True,
+        ),
         group=-1,
     )
-    app.add_handler(CommandHandler("pantry", partial(_pantry, deps=deps)), group=0)
+    app.add_handler(
+        CommandHandler("pantry", partial(_pantry, deps=deps), filters=filters.UpdateType.MESSAGE)
+    )
+    app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE & filters.TEXT, _edited_text))
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND & filters.UpdateType.MESSAGE,
+            partial(_free_text, deps=deps, latest=latest),
+        )
+    )
     return app
 
 
@@ -126,6 +150,60 @@ def _pantry_text(items: tuple[PantryItem, ...]) -> str:
     return f"On the list: {to_buy}\nHave: {have}"
 
 
+async def _edited_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """An edit never reruns a command or parse; ask for a fresh message."""
+    if update.edited_message is not None:
+        await update.edited_message.reply_text(
+            "Please send that again as a new message.", parse_mode=None
+        )
+
+
+async def _free_text(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    deps: BotDeps,
+    latest: pantry_ops.LatestWrites,
+) -> None:
+    """Capture arrival order and the apply deadline on the event loop before queuing work."""
+    message = update.message
+    if message is None or message.text is None:
+        return
+    ticket = latest.ticket()
+    apply_by = time.monotonic() + background.DEADLINE_S - APPLY_MARGIN_S
+    work = partial(
+        _text_work, message.text, deps=deps, latest=latest, ticket=ticket, apply_by=apply_by
+    )
+    await background.start(update, context, work, str, "On it.")
+
+
+def _text_work(
+    text: str, *, deps: BotDeps, latest: pantry_ops.LatestWrites, ticket: int, apply_by: float
+) -> str:
+    """Open the pantry in the worker, parse once, and keep parse failures out of background logs."""
+    try:
+        with deps.open_pantry() as pantry:
+            parsed = intents.parse(text, items=pantry.list_items())
+            lines = pantry_ops.apply(
+                parsed.intents, pantry=pantry, ticket=ticket, apply_by=apply_by, latest=latest
+            )
+    except ClaudeRunnerError as exc:
+        reason = exc.reason
+    else:
+        asked = tuple(f'What did you mean by "{_single_line(part)}"?' for part in parsed.unclear)
+        return (
+            "\n".join((*lines, *asked)) or "I couldn't understand that. Please say it another way."
+        )
+    # Outside the except block: even a logging failure must not chain the parse error's output.
+    logger.warning("couldn't parse the message: %s", reason)
+    return ("Couldn't understand that: " + _single_line(reason))[: background.ERROR_MAX_CHARS]
+
+
+def _single_line(text: str) -> str:
+    """`text` with its line breaks turned into spaces, so one reply line stays one line."""
+    return " ".join(text.splitlines())
+
+
 async def _check_token(app: Application[Any, Any, Any, Any, Any, Any]) -> None:
     """Verify with initialize's single getMe, closing the HTTP clients before polling."""
     try:
@@ -152,6 +230,7 @@ def run_bot() -> None:
     try:
         with closing(get_db(path)):
             pass
+        gate_conn = get_db(path)
     except Exception as exc:
         raise RuntimeError(f"Could not open PANTRY_DB: {path}") from exc
 
@@ -162,8 +241,18 @@ def run_bot() -> None:
         with closing(get_db(path)) as conn:
             yield SqlitePantry(conn)
 
-    deps = BotDeps(allowed_chat_id=settings.telegram_allowed_chat_id, open_pantry=open_pantry)
-    app = build_app(settings.telegram_bot_token.get_secret_value(), deps)
+    with closing(gate_conn):
+        deps = BotDeps(
+            allowed_chat_id=settings.telegram_allowed_chat_id,
+            open_pantry=open_pantry,
+            gate_conn=gate_conn,
+        )
+        app = build_app(settings.telegram_bot_token.get_secret_value(), deps)
+        _poll(app)
+
+
+def _poll(app: Application[Any, Any, Any, Any, Any, Any]) -> None:
+    """Check the token with one getMe, then poll; any failure becomes a type-only refusal."""
     asyncio.run(_check_token(app))
     try:
         app.run_polling(allowed_updates=["message", "edited_message"])

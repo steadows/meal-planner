@@ -10,10 +10,13 @@ table is a claim about.
 No test reaches Telegram: RecordingRequest answers every call, and `_no_telegram` fails any call
 that reaches PTB's own HTTP client instead (a `build_app` that ignored `request`, or a `run_bot`
 that called Telegram in a test that routed nothing to answer it).
+
+Bot PR 2b adds the gate's update_id claim (AC-3), so `build_bot` passes `BotDeps.gate_conn`.
 """
 
 import asyncio
 import json
+import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -23,7 +26,9 @@ from telegram import Bot, Update
 from telegram.ext import Application
 from telegram.request import BaseRequest, HTTPXRequest, RequestData
 
-from meals.contracts import Pantry
+from meals.contracts import Pantry, PantryItem, PantryStatus
+from meals.db import migrate
+from meals.fakes import FakePantry
 
 _MISSING: ImportError | None = None
 try:
@@ -132,10 +137,41 @@ class PantryOpener:
             self.closed += 1
 
 
-def build_bot(opener: PantryOpener) -> tuple[AnyApp, RecordingRequest]:
-    """`build_app` locked to Steve's chat over `opener`, its HTTP recorded instead of sent."""
+class LockedPantry(FakePantry):
+    """A FakePantry whose `flip_status` raises SQLite's "database is locked", writing nothing, for
+    the item named `locked` (found as `get_item` finds it, aliases included), until `locked` is set
+    to None. The pre-PR code review's CR-1 (bot PR 2b): a pantry error on one intent."""
+
+    def __init__(self, items: tuple[PantryItem, ...], *, locked: str | None) -> None:
+        super().__init__(items)
+        self.locked = locked
+
+    def flip_status(self, name: str, status: PantryStatus) -> PantryItem | None:
+        item = self.get_item(name)
+        if item is not None and item.name == self.locked:
+            raise sqlite3.OperationalError("database is locked")
+        return super().flip_status(name, status)
+
+
+def memory_gate_conn() -> sqlite3.Connection:
+    """A migrated in-memory database for the gate's update_id claims (AC-3), for a test that
+    doesn't read them back."""
+    conn = sqlite3.connect(":memory:")
+    migrate(conn)
+    return conn
+
+
+def build_bot(
+    opener: PantryOpener, *, gate_conn: sqlite3.Connection | None = None
+) -> tuple[AnyApp, RecordingRequest]:
+    """`build_app` locked to Steve's chat over `opener`, claiming update_ids in `gate_conn` (a
+    fresh in-memory database by default), its HTTP recorded instead of sent."""
     request = RecordingRequest()
-    deps = BotDeps(allowed_chat_id=ALLOWED_CHAT_ID, open_pantry=opener)
+    deps = BotDeps(
+        allowed_chat_id=ALLOWED_CHAT_ID,
+        open_pantry=opener,
+        gate_conn=memory_gate_conn() if gate_conn is None else gate_conn,
+    )
     return build_app(TOKEN, deps, request=request), request
 
 
@@ -173,11 +209,18 @@ def text_update(
 
 
 def dispatch(app: AnyApp, *updates: Update) -> None:
-    """Start `app`, run each update through PTB's real `process_update` in order, then stop it."""
+    """Start `app`, run each update through PTB's real `process_update` in order, then stop it.
+    Background work an update starts runs alongside the next update, as in the bot; PTB's `stop`
+    waits for the tasks handlers gave `create_task` (background work included), so every reply
+    has been sent when this returns."""
 
     async def scenario() -> None:
         async with app:
-            for update in updates:
-                await app.process_update(update)
+            await app.start()
+            try:
+                for update in updates:
+                    await app.process_update(update)
+            finally:
+                await app.stop()
 
     asyncio.run(scenario())
