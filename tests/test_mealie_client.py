@@ -1,16 +1,17 @@
 import json
 import logging
 import uuid
+from collections.abc import Callable
 from datetime import date
 from typing import Any
 from urllib.parse import parse_qs
 
 import httpx
 import pytest
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
 from meals.config import Settings
-from meals.contracts import Ingredient, MealieClient
+from meals.contracts import Ingredient, MealieClient, MealieUnavailable
 from meals.mealie_client import BATCH_OK_TAG, PLAN_ENTRY_MARKER, HttpMealieClient
 
 WEEK = date(2026, 9, 27)
@@ -66,6 +67,9 @@ class MealieStub:
         self.parses: dict[str, Json] = {}  # ingredient text -> parsed RecipeIngredient
         self.import_status = 201
         self.import_raises: Exception | None = None  # raised in place of answering the import
+        self.recipe_answer: httpx.Response | None = None  # sent for any recipe GET instead
+        self.recipe_raises: Exception | None = None  # raised in place of answering a recipe GET
+        self.parse_answer: httpx.Response | None = None  # sent instead of the parser's answer
         self.create_entry_status = 201
         self.requests: list[httpx.Request] = []
 
@@ -103,11 +107,17 @@ class MealieStub:
             slugs = sorted(self.tagged.get(params["tags"][0], []))
             return httpx.Response(200, json=self._slice([{"slug": s} for s in slugs], params))
         if method == "GET" and path.startswith("/api/recipes/"):
+            if self.recipe_raises is not None:
+                raise self.recipe_raises
+            if self.recipe_answer is not None:
+                return self.recipe_answer
             slug = path.rsplit("/", 1)[1]
             if slug not in self.recipes:
                 return httpx.Response(404, json={"detail": "not found"})
             return httpx.Response(200, json=self.recipes[slug])
         if (method, path) == ("POST", "/api/parser/ingredients"):
+            if self.parse_answer is not None:
+                return self.parse_answer
             parsed = [
                 {"input": text, "ingredient": self.parses.get(text, raw(text))}
                 for text in body["ingredients"]
@@ -416,6 +426,97 @@ def test_get_recipe_raises_key_error_for_an_unknown_slug(client: HttpMealieClien
         client.get_recipe("nope")
 
 
+# Anything but "no such recipe" is MealieUnavailable, raised from the cause, with a message built
+# from fixed fields (seam map mealie-unavailable, AC-2 to AC-5).
+@pytest.mark.parametrize("status", [500, 401, 403])
+def test_get_recipe_raises_mealie_unavailable_for_an_http_error_on_the_recipe(
+    client: HttpMealieClient, stub: MealieStub, status: int
+) -> None:
+    stub.recipe_answer = httpx.Response(status, json={"detail": "nope"})
+
+    with pytest.raises(MealieUnavailable) as raised:
+        client.get_recipe("fajitas")
+
+    cause = raised.value.__cause__
+    assert isinstance(cause, httpx.HTTPStatusError)
+    assert cause.response.status_code == status
+    message = str(raised.value)
+    assert str(status) in message
+    assert "GET" in message and "/api/recipes/fajitas" in message
+
+
+# The recipe exists; Mealie failing to parse its ingredients is never "no such recipe", even a 404.
+@pytest.mark.parametrize("status", [404, 500])
+def test_get_recipe_raises_mealie_unavailable_when_the_ingredient_parser_fails(
+    client: HttpMealieClient, stub: MealieStub, status: int
+) -> None:
+    stub.recipes["bowl"] = recipe_json("bowl", recipeIngredient=[raw("2 lb chicken thighs")])
+    stub.parse_answer = httpx.Response(status, json={"detail": "nope"})
+
+    with pytest.raises(MealieUnavailable) as raised:
+        client.get_recipe("bowl")
+
+    cause = raised.value.__cause__
+    assert isinstance(cause, httpx.HTTPStatusError)
+    assert cause.request.url.path == "/api/parser/ingredients"
+    message = str(raised.value)
+    assert str(status) in message
+    assert "POST" in message and "/api/parser/ingredients" in message
+
+
+@pytest.mark.parametrize("error", [httpx.ConnectError, httpx.ReadTimeout])
+def test_get_recipe_raises_mealie_unavailable_for_a_network_failure(
+    client: HttpMealieClient, stub: MealieStub, error: type[httpx.TransportError]
+) -> None:
+    stub.recipe_raises = error("Mealie is unreachable")
+
+    with pytest.raises(MealieUnavailable) as raised:
+        client.get_recipe("fajitas")
+
+    assert raised.value.__cause__ is stub.recipe_raises
+
+
+@pytest.mark.parametrize(
+    ("recipe", "parsed", "cause_type"),
+    [
+        pytest.param("<html>Mealie is starting</html>", None, json.JSONDecodeError, id="not-json"),
+        pytest.param(
+            json.dumps(recipe_json("fajitas", id="not-a-uuid")),
+            None,
+            ValidationError,
+            id="id-not-a-uuid",
+        ),
+        pytest.param(
+            json.dumps({k: v for k, v in recipe_json("fajitas").items() if k != "id"}),
+            None,
+            ValidationError,
+            id="id-missing",
+        ),
+        pytest.param(
+            json.dumps(recipe_json("fajitas", recipeIngredient=[raw("2 limes"), raw("1 onion")])),
+            json.dumps([{"input": "2 limes", "ingredient": raw("2 limes")}]),
+            ValueError,
+            id="parser-answers-fewer-lines-than-sent",
+        ),
+    ],
+)
+def test_get_recipe_raises_mealie_unavailable_for_a_body_that_does_not_parse(
+    client: HttpMealieClient,
+    stub: MealieStub,
+    recipe: str,
+    parsed: str | None,
+    cause_type: type[ValueError],
+) -> None:
+    stub.recipe_answer = httpx.Response(200, text=recipe)
+    if parsed is not None:
+        stub.parse_answer = httpx.Response(200, text=parsed)
+
+    with pytest.raises(MealieUnavailable) as raised:
+        client.get_recipe("fajitas")
+
+    assert isinstance(raised.value.__cause__, cause_type)
+
+
 # ── list_by_tag ──────────────────────────────────────────────────────────────
 
 
@@ -538,6 +639,21 @@ def test_set_meal_plan_raises_when_mealie_rejects_a_write(
     stub.create_entry_status = 500
     with pytest.raises(httpx.HTTPStatusError):
         client.set_meal_plan(WEEK, ["fajitas"])
+
+
+# MealieUnavailable is get_recipe's contract only; the lookup set_meal_plan shares keeps its error
+# (seam map mealie-unavailable, AC-7).
+@pytest.mark.usefixtures("three_recipes")
+def test_set_meal_plan_still_raises_http_status_error_when_a_recipe_lookup_fails(
+    client: HttpMealieClient, stub: MealieStub
+) -> None:
+    stub.recipe_answer = httpx.Response(500, json={"detail": "boom"})
+
+    with pytest.raises(httpx.HTTPStatusError) as raised:
+        client.set_meal_plan(WEEK, ["fajitas"])
+
+    assert not isinstance(raised.value, MealieUnavailable)
+    assert raised.value.request.url.path == "/api/recipes/fajitas"
 
 
 # ── guards (C2) ──────────────────────────────────────────────────────────────
@@ -816,3 +932,43 @@ def test_the_token_stays_out_of_repr_and_error_text(stub: MealieStub) -> None:
     with pytest.raises(ValueError) as unscrapable:
         client.import_url("https://www.budgetbytes.com/fajitas/")
     assert TOKEN not in str(unscrapable.value)
+
+
+# Places a failure can carry the token back (seam map mealie-unavailable, AC-6). Each handler puts
+# the Authorization header it was sent there.
+def echo_the_token_in_a_500(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(500, json={"detail": f"rejected {request.headers['Authorization']}"})
+
+
+def quote_the_token_in_a_network_error(request: httpx.Request) -> httpx.Response:
+    raise httpx.ConnectError(f"reset after sending {request.headers['Authorization']}")
+
+
+def put_the_token_in_an_invalid_field(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(200, json=recipe_json("fajitas", id=request.headers["Authorization"]))
+
+
+@pytest.mark.parametrize(
+    ("handler", "cause_type"),
+    [
+        pytest.param(echo_the_token_in_a_500, httpx.HTTPStatusError, id="error-body"),
+        pytest.param(quote_the_token_in_a_network_error, httpx.TransportError, id="network-error"),
+        pytest.param(put_the_token_in_an_invalid_field, ValidationError, id="validation-error"),
+    ],
+)
+def test_get_recipe_keeps_the_token_out_of_mealie_unavailable(
+    handler: Callable[[httpx.Request], httpx.Response], cause_type: type[Exception]
+) -> None:
+    settings = Settings(mealie_url="http://mealie.test", mealie_token=SecretStr(TOKEN))
+    client = HttpMealieClient.from_settings(settings, transport=httpx.MockTransport(handler))
+
+    with pytest.raises(MealieUnavailable) as raised:
+        client.get_recipe("fajitas")
+
+    error, cause = raised.value, raised.value.__cause__
+    assert isinstance(cause, cause_type)
+    # The token must really reach the cause; otherwise its absence below proves nothing.
+    carried = cause.response.text if isinstance(cause, httpx.HTTPStatusError) else str(cause)
+    assert TOKEN in carried
+    assert TOKEN not in str(error)
+    assert TOKEN not in repr(error)
