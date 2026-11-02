@@ -479,7 +479,7 @@ Not yet tested: whether the importer handles every recipe site Steve uses.
 ### Phase 4: Telegram bot, capture first (about 2–3 hours)
 
 - [x] Create the bot with BotFather (`/newbot`) and lock it to Steve's chat ID. (@steve_meals_bot created 2026-09-25; token and chat ID are in `.env`. The chat-ID lock in code shipped in #38.)
-- [ ] Free text goes to Claude, which turns it into pantry operations, applies them through the MCP tools, and repeats back what changed.
+- [~] Free text goes to Claude, which turns it into typed pantry intents; the bot applies them through the pantry and repeats back what changed. ("out of X" puts X on the list in bot PR 2b; "still good" and "plenty" follow in 2c.)
 - [ ] Voice notes: transcribe (Whisper locally or through an API), then send the text down the same path. Always repeat the transcript back.
 - [~] Commands: `/pantry`, `/plan`, `/due`. (`/pantry` shipped in #38; `/plan` and `/due` follow.)
 
