@@ -98,6 +98,20 @@ def test_confirming_a_flagged_item_restocks_it_and_never_logs_a_purchase(
     assert rows == [(1, str(_on(-30)))]
 
 
+def test_confirming_an_item_whose_ask_date_overflows_raises_and_writes_nothing(
+    db: sqlite3.Connection, insert_item: Insert
+) -> None:  # [Rev7]; PR #34 ultrareview (LOW): confirm_stocked committed its write, then raised
+    # computing the ask date for its log line. Bought on the last day there is, the 90% point of a
+    # 1-day interval (one day later) is past the end of the calendar.
+    insert_item(
+        _item(1, "rice", status="buy_next_time", typical_interval_days=1, last_purchased=date.max)
+    )
+    with pytest.raises(OverflowError):
+        SqlitePantry(db).confirm_stocked("rice", ON)
+    assert _column(db, "status") == {"rice": "buy_next_time"}
+    assert _column(db, "next_ask_on") == {"rice": None}
+
+
 # ── confirm_stocked: the push and the new ask date ([A3] [A4] [Rev6] [Rev7]) ──
 
 
