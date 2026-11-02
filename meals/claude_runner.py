@@ -71,6 +71,7 @@ def run(
     chrome: bool = False,
     timeout: int = 600,
     hold_fds: tuple[int, ...] = (),
+    web: bool = True,
 ) -> M: ...
 @overload
 def run(
@@ -79,6 +80,7 @@ def run(
     chrome: bool = False,
     timeout: int = 600,
     hold_fds: tuple[int, ...] = (),
+    web: bool = True,
 ) -> Any: ...
 def run(
     prompt: str,
@@ -86,6 +88,7 @@ def run(
     chrome: bool = False,
     timeout: int = 600,
     hold_fds: tuple[int, ...] = (),
+    web: bool = True,
 ) -> Any:
     """Run `claude -p` and return validated output.
 
@@ -99,6 +102,8 @@ def run(
     ENV_ALLOWLIST env, and a fresh empty temp dir as cwd. Plain runs get the ALLOWED_TOOLS,
     pre-approved; `chrome=True` runs get `--chrome` and no built-in tools. The run holds one of
     settings.claude_max_concurrent cross-process slots (settings.claude_lock_dir) throughout.
+    `web=False` runs with no built-in tools, for a run whose prompt can carry web-sourced text
+    and whose output drives writes.
 
     `hold_fds` are open fds (3 and up) each claude child inherits alongside its slot, so a
     `flock` lock the caller holds through one (a job lock, cart's Chrome lock) stays held while
@@ -117,7 +122,7 @@ def run(
     macOS, if killpg is refused (zombie leader), only the leader is reaped.
     """
     _check_hold_fds(hold_fds)
-    command = _command(schema, chrome)
+    command = _command(schema, chrome, web)
     attempts = 1 if chrome else MAX_ATTEMPTS
     with _slot() as slot_fd:
         attempt = 1
@@ -151,8 +156,8 @@ def load_prompt(lane: str, name: str, **variables: str) -> str:
     return _PromptTemplate(template).substitute(variables)
 
 
-def _command(schema: type[BaseModel] | None, chrome: bool) -> list[str]:
-    tools = "" if chrome else ",".join(ALLOWED_TOOLS)
+def _command(schema: type[BaseModel] | None, chrome: bool, web: bool) -> list[str]:
+    tools = "" if chrome or not web else ",".join(ALLOWED_TOOLS)
     command = [
         get_settings().claude_bin,
         "-p",
@@ -164,7 +169,7 @@ def _command(schema: type[BaseModel] | None, chrome: bool) -> list[str]:
     ]
     if chrome:
         command.append("--chrome")
-    else:
+    if tools:
         command += ["--allowedTools", tools]
     if schema is not None:
         command += ["--json-schema", json.dumps(schema.model_json_schema())]

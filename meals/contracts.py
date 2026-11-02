@@ -23,11 +23,15 @@ from pydantic.json_schema import SkipJsonSchema
 
 PlanMode = Literal["mix", "recipes", "components"]
 Custody = Literal["wed+fri_sat", "wed+sat_sun"]
+ComponentSlot = Literal["proteins", "grains", "veg", "sauces", "fresh"]
 IntentKind = Literal[
     "pick", "swap", "custody", "pantry_flip", "add_item", "find", "save", "rate", "mode"
 ]
 PantryCategory = Literal["staple", "perishable", "fallback"]
 PantryStatus = Literal["have", "buy_next_time"]
+
+Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+Number = Annotated[int, Field(ge=1)]
 
 MAX_PANTRY_QUESTIONS = 3
 
@@ -147,9 +151,104 @@ class WeekProposal(Contract):
     )
 
 
-class Intent(Contract):
-    kind: IntentKind
-    args: dict[str, str] = Field(description="Kind-specific arguments, e.g. {'item': 'eggs'}")
+class PickArgs(Contract):
+    numbers: tuple[Number, ...] = Field(min_length=1)
+
+
+class PickIntent(Contract):
+    kind: Literal["pick"]
+    args: PickArgs
+
+
+class SwapArgs(Contract):
+    slot: ComponentSlot
+    remove: Text
+    add: Text | None
+
+
+class SwapIntent(Contract):
+    kind: Literal["swap"]
+    args: SwapArgs
+
+
+class CustodyArgs(Contract):
+    custody: Custody
+
+
+class CustodyIntent(Contract):
+    kind: Literal["custody"]
+    args: CustodyArgs
+
+
+class PantryFlipArgs(Contract):
+    item: Text
+    to: Literal["buy_next_time", "still_good", "plenty"]
+
+
+class PantryFlipIntent(Contract):
+    kind: Literal["pantry_flip"]
+    args: PantryFlipArgs
+
+
+class AddItemArgs(Contract):
+    item: Text
+
+
+class AddItemIntent(Contract):
+    kind: Literal["add_item"]
+    args: AddItemArgs
+
+
+class FindArgs(Contract):
+    request: Text
+
+
+class FindIntent(Contract):
+    kind: Literal["find"]
+    args: FindArgs
+
+
+class SaveArgs(Contract):
+    number: Number
+    add_to_week: bool
+
+
+class SaveIntent(Contract):
+    kind: Literal["save"]
+    args: SaveArgs
+
+
+class RateArgs(Contract):
+    target: Text
+    rater: Literal["steve", "miles"]
+    rating: Literal[-1, 1]
+
+
+class RateIntent(Contract):
+    kind: Literal["rate"]
+    args: RateArgs
+
+
+class ModeArgs(Contract):
+    mode: PlanMode
+
+
+class ModeIntent(Contract):
+    kind: Literal["mode"]
+    args: ModeArgs
+
+
+Intent = (
+    PickIntent
+    | SwapIntent
+    | CustodyIntent
+    | PantryFlipIntent
+    | AddItemIntent
+    | FindIntent
+    | SaveIntent
+    | RateIntent
+    | ModeIntent
+)
 
 
 class CartItem(Contract):
@@ -256,7 +355,9 @@ class MealieClient(Protocol):
 
     def get_recipe(self, slug: str) -> RecipeOption:
         """The recipe, with `mealie_slug` set to `slug`. Raises KeyError for an unknown slug, and
-        MealieUnavailable for any other failure."""
+        MealieUnavailable for an HTTP error other than the recipe's 404, a rejected token
+        (401/403), a network failure, or a response that doesn't parse. Any other error, a bug
+        included, propagates as is."""
         ...
 
     def list_by_tag(self, tag: str) -> tuple[str, ...]:

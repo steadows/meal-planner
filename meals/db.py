@@ -85,6 +85,16 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
             PRIMARY KEY (job, week_start)
         )""",
     ),
+    (
+        # Only meals/bot/ reads or writes this table. Before dispatch, the bot claims an update
+        # with INSERT ... ON CONFLICT(update_id) DO NOTHING (claimed when rowcount is 1) and
+        # deletes rows older than 48 h in the same transaction. `seen_at` is SQLite's UTC
+        # CURRENT_TIMESTAMP text, 'YYYY-MM-DD HH:MM:SS'.
+        """CREATE TABLE telegram_update (
+            update_id INTEGER PRIMARY KEY,
+            seen_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""",
+    ),
 )
 
 
